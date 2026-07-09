@@ -75,7 +75,12 @@ CREATE TABLE IF NOT EXISTS index_runs (
     warnings_json TEXT
 );
 
-CREATE VIRTUAL TABLE IF NOT EXISTS content_fts USING fts5(path, name, content);
+CREATE TABLE IF NOT EXISTS meta (
+    key TEXT PRIMARY KEY,
+    value TEXT
+);
+
+CREATE VIRTUAL TABLE IF NOT EXISTS content_fts USING fts5(path, name, content, node_id UNINDEXED);
 """
 
 
@@ -94,7 +99,18 @@ class GraphStore:
         self.conn.execute("PRAGMA journal_mode=WAL")
         self.conn.execute("PRAGMA foreign_keys=ON")
         self.conn.executescript(_SCHEMA)
+        self._migrate_fts()
         self.conn.commit()
+
+    def _migrate_fts(self) -> None:
+        """Rebuild content_fts if it predates the node_id column (pre-release
+        databases only). A full re-index repopulates the dropped rows."""
+        cols = {r[1] for r in self.conn.execute("SELECT * FROM pragma_table_info('content_fts')")}
+        if "node_id" not in cols:
+            self.conn.execute("DROP TABLE content_fts")
+            self.conn.execute(
+                "CREATE VIRTUAL TABLE content_fts USING fts5(path, name, content, node_id UNINDEXED)"
+            )
 
     def close(self) -> None:
         self.conn.close()
@@ -195,8 +211,21 @@ class GraphStore:
 
     def add_fts_rows(self, rows: Sequence[FtsRow]) -> None:
         self.conn.executemany(
-            "INSERT INTO content_fts (path, name, content) VALUES (?, ?, ?)",
-            [(r.path, r.name, r.content) for r in rows],
+            "INSERT INTO content_fts (path, name, content, node_id) VALUES (?, ?, ?, ?)",
+            [(r.path, r.name, r.content, r.node_id) for r in rows],
+        )
+
+    # -- meta ----------------------------------------------------------------
+
+    def get_meta(self, key: str) -> str | None:
+        row = self.conn.execute("SELECT value FROM meta WHERE key = ?", (key,)).fetchone()
+        return row["value"] if row else None
+
+    def set_meta(self, key: str, value: str) -> None:
+        self.conn.execute(
+            "INSERT INTO meta (key, value) VALUES (?, ?) "
+            "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            (key, value),
         )
 
     # -- files -------------------------------------------------------------
@@ -211,6 +240,12 @@ class GraphStore:
                 last_indexed_at=excluded.last_indexed_at, status='active'
             """,
             (path, hash_, size, mtime, language, _now()),
+        )
+
+    def update_file_stat(self, path: str, size: int, mtime: float) -> None:
+        """Refresh stat columns for a file whose content hash was unchanged."""
+        self.conn.execute(
+            "UPDATE files SET size = ?, mtime = ? WHERE path = ?", (size, mtime, path)
         )
 
     def mark_files_deleted(self, paths: Iterable[str]) -> None:

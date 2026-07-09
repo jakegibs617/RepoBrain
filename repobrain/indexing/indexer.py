@@ -9,9 +9,12 @@ from pathlib import Path
 from ..config import RepoBrainConfig
 from ..graph.store import GraphStore
 from ..parsers.base import ParseResult, ParserRegistry, default_registry
-from .hasher import hash_bytes
 from .incremental import compute_diff
 from .scanner import ScannedFile, scan
+
+
+class RepoRootMismatchError(RuntimeError):
+    """Raised when a database pinned to one repo root is asked to index another."""
 
 
 @dataclass
@@ -56,6 +59,7 @@ class Indexer:
     def index(self, root: str | Path, incremental: bool = True) -> IndexStats:
         """Index `root`. Incremental runs only re-parse changed/added files."""
         root = Path(root).resolve()
+        self._check_root(root)
         started_at = _now()
         commit = git_commit_hash(root)
         stats = IndexStats()
@@ -68,23 +72,14 @@ class Indexer:
         )
         stats.files_scanned = len(scanned)
 
-        contents: dict[str, str] = {}
-        hashes: dict[str, str] = {}
-        for f in scanned:
-            data = Path(f.abs_path).read_bytes()
-            hashes[f.path] = hash_bytes(data)
-            contents[f.path] = data.decode("utf-8", errors="replace")
-
-        diff = compute_diff(scanned, hashes, self.store)
-        if not incremental:
-            diff.changed = diff.changed + diff.unchanged
-            diff.unchanged = []
+        diff = compute_diff(scanned, self.store, incremental=incremental)
         stats.files_changed = len(diff.to_parse)
         stats.files_deleted = len(diff.deleted)
 
         combined = ParseResult()
+        combined.warnings.extend(diff.warnings)
         for f in diff.to_parse:
-            combined.extend(self._parse_file(f, contents[f.path]))
+            combined.extend(self._parse_file(f, diff.contents[f.path]))
         stats.warnings = combined.warnings
 
         for node in combined.nodes:
@@ -92,8 +87,8 @@ class Indexer:
         for edge in combined.edges:
             edge.commit_hash = commit
         for node in combined.nodes:
-            if node.hash is None and node.path in hashes:
-                node.hash = hashes[node.path]
+            if node.hash is None and node.path in diff.hashes:
+                node.hash = diff.hashes[node.path]
 
         with self.store.conn:  # single transaction
             self.store.delete_paths(diff.stale_paths)
@@ -102,7 +97,9 @@ class Indexer:
             self.store.upsert_edges(combined.edges)
             self.store.add_fts_rows(combined.fts_rows)
             for f in diff.to_parse:
-                self.store.upsert_file(f.path, hashes[f.path], f.size, f.mtime, f.language)
+                self.store.upsert_file(f.path, diff.hashes[f.path], f.size, f.mtime, f.language)
+            for f in diff.stat_changed:
+                self.store.update_file_stat(f.path, f.size, f.mtime)
             self.store.touch_paths([f.path for f in diff.unchanged])
             self._cleanup_directories(diff)
             self.store.delete_orphan_edges()
@@ -113,6 +110,22 @@ class Indexer:
                 stats.nodes_created, stats.edges_created, stats.warnings,
             )
         return stats
+
+    def _check_root(self, root: Path) -> None:
+        """Pin the database to one repo root; refuse to index any other.
+
+        Without this, indexing a different root would collide relative paths
+        and purge the previous root's entire graph as 'deleted files'.
+        """
+        stored = self.store.get_meta("root")
+        if stored is None:
+            self.store.set_meta("root", str(root))
+        elif stored != str(root):
+            raise RepoRootMismatchError(
+                f"This database indexes '{stored}' but you asked to index "
+                f"'{root}'. Run repobrain from that root, or index the new "
+                f"path with its own database (repobrain index {root})."
+            )
 
     def _parse_file(self, f: ScannedFile, content: str) -> ParseResult:
         result = ParseResult()

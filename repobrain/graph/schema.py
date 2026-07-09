@@ -164,8 +164,13 @@ class Edge:
 
 @dataclass
 class FtsRow:
-    """A row destined for the content_fts full-text index."""
+    """A row destined for the content_fts full-text index.
+
+    node_id links the row to the graph node the text was extracted from, so
+    search results can attribute node type and line spans precisely.
+    """
 
     path: str
     name: str
     content: str
+    node_id: str | None = None

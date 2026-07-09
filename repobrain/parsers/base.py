@@ -59,7 +59,9 @@ class GenericFileParser(Parser):
             extractor=self.name,
         )
         result.nodes.append(file_node)
-        result.fts_rows.append(FtsRow(path=path, name=file_node.name, content=content))
+        result.fts_rows.append(
+            FtsRow(path=path, name=file_node.name, content=content, node_id=file_node.id)
+        )
 
         # Directory chain: a/b/c.py -> Directory(a), Directory(a/b),
         # a CONTAINS a/b (provenance path = child dir), a/b CONTAINS file.

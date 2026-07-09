@@ -37,16 +37,14 @@ problem.
 
 ### D4: FTS5 design — one contentful table, rows per file AND per section
 
-`content_fts(path, name, content)` is a regular (contentful) FTS5 table. The
-generic file parser inserts one row per text file (name = basename, content =
-whole file); the Markdown parser additionally inserts one row per section
-(name = heading, content = section text). Sync strategy: on re-index, all FTS
-rows for changed/deleted paths are deleted before re-inserting, inside the
-same transaction as node/edge updates. Search results join back to `nodes` on
-`(path, name)` to recover node type and line spans — chosen over adding an
-UNINDEXED node_id column to keep the FTS schema exactly as specified; the
-join is heuristic when a file and document share a basename, resolved by a
-type-preference ORDER BY.
+*(Amended by D11: the table now carries a `node_id UNINDEXED` column.)*
+
+`content_fts` is a regular (contentful) FTS5 table. The generic file parser
+inserts one row per text file (name = basename, content = whole file); the
+Markdown parser additionally inserts one row per section (name = heading,
+content = section text). Sync strategy: on re-index, all FTS rows for
+changed/deleted paths are deleted before re-inserting, inside the same
+transaction as node/edge updates.
 
 ### D5: Parsers may stack; ParseResult carries FTS rows
 
@@ -75,11 +73,8 @@ tuning.
 
 ### D8: Store paths relative to the indexed root; db lives in CWD
 
-`repobrain index PATH` keeps its database in the current directory's
-`.repobrain/` but stores file paths relative to PATH. One repository per
-database (PRD 8: one local repository at a time). `.repobrain/` is gitignored
-— treated as a local cache per PRD 30 recommended default #5, while Markdown
-memory files (AGENT_HANDOFF.md, DECISIONS.md) are committed.
+*(SUPERSEDED by D10 — the CWD-based location allowed one database to receive
+two different roots, whose colliding relative paths purged the graph.)*
 
 ### D9: Tasks limited to TODO/FIXME list items
 
@@ -87,3 +82,48 @@ Markdown Task nodes are created only for list items whose text (after
 stripping a `[ ]`/`[x]` checkbox prefix) contains the word TODO or FIXME.
 Plain checkboxes without TODO/FIXME are not tasks yet — prefer precision over
 recall at first (PRD 30 #8).
+
+## 2026-07-09 — Code review fixes
+
+### D10: Database is pinned to the repository root it indexes (replaces D8)
+
+`repobrain index PATH` opens/creates `PATH/.repobrain/repobrain.sqlite`;
+`init`, `status --path`, and `search --path` locate the database the same
+way. The resolved absolute root is recorded in a `meta` table on first index;
+any later attempt to index a different root through the same database raises
+`RepoRootMismatchError` instead of proceeding. Rationale: the previous
+CWD-based scheme let one database receive scans of two different roots —
+relative paths collided and `compute_diff` marked the whole previous graph as
+deleted files, purging it. One repository per database is now enforced, not
+just assumed. `.repobrain/` remains a gitignored local cache; Markdown memory
+files stay committed.
+
+### D11: content_fts carries `node_id UNINDEXED` (amends D4)
+
+The FTS table is now `content_fts(path, name, content, node_id UNINDEXED)`.
+Each FTS row records the id of the graph node its text came from, so search
+attributes node type and line spans by primary-key lookup instead of the old
+heuristic `(path, name)` join (which was ambiguous when a File and a
+MarkdownDocument shared a basename), and future deletions can target a single
+node's row. Adding the column now avoids an FTS rebuild when tree-sitter
+symbol rows land in M3. Pre-release databases without the column are
+dropped/recreated on open (a full re-index repopulates them).
+
+### D12: Incremental diff trusts size+mtime before hashing
+
+`compute_diff` skips reading/hashing any file whose size AND mtime match the
+stored `files` row; content is read once, and only for files that may need
+parsing. When a file's stat moves but its hash is unchanged, the stored stat
+is refreshed so the shortcut works on the next run. Trade-off (documented in
+README): a same-length edit that also restores mtime is missed until a
+`--no-incremental` run — the same trade-off git's index makes. Unreadable
+files are skipped with a warning and kept out of the deletion set, so a
+transient I/O error can never purge a file's existing graph rows.
+
+### D13: Anchored ignore patterns honored for directories; LIKE escaping
+
+`/dist/` now only ignores a root-level `dist` directory, not `src/dist`
+(previously anchoring was ignored for directory patterns). Known remaining
+gap, documented rather than fixed: fnmatch's `*` crosses `/`, so `docs/*`
+over-matches `docs/a/b.md`. Separately, `%`/`_` in search queries are escaped
+in the partial-name LIKE clause so they match literally.

@@ -42,20 +42,28 @@ uv pip install -p .venv/bin/python -e ".[dev]"
 ## Usage
 
 ```bash
-# create .repobrain/ with a default config in the current directory
+# create .repobrain/ with a default config inside PATH (default: cwd)
 .venv/bin/repobrain init
+.venv/bin/repobrain init tests/fixtures/small_python_app
 
-# index a repository (incremental by default; --no-incremental to force)
+# index a repository (incremental by default; --no-incremental to force).
+# The database lives inside the indexed root: PATH/.repobrain/repobrain.sqlite
 .venv/bin/repobrain index .
 .venv/bin/repobrain index tests/fixtures/small_python_app
 
-# last run stats plus node/edge counts by type (--json for machine output)
+# last run stats plus node/edge counts by type (--json for machine output);
+# --path picks which repository's database to inspect (default: cwd)
 .venv/bin/repobrain status
+.venv/bin/repobrain status --path tests/fixtures/small_python_app
 
-# full-text + name search (--limit N, --type NodeType, --json)
-.venv/bin/repobrain search "database"
+# full-text + name search (--path DIR, --limit N, --type NodeType, --json)
+.venv/bin/repobrain search "database" --path tests/fixtures/small_python_app
 .venv/bin/repobrain search "users" --type File --json
 ```
+
+Each database is pinned to the repository root it indexes (stored in a `meta`
+table). Asking a database to index a different root fails with a clear error
+instead of silently purging the previous graph.
 
 Example search output:
 
@@ -67,9 +75,11 @@ Example search output:
 
 ## How it works
 
-- `repobrain index PATH` scans `PATH`, hashes every text file (sha256), and
-  diffs against the `files` table. Only added/changed files are re-parsed;
-  stale nodes/edges/FTS rows are deleted first, so re-runs are idempotent.
+- `repobrain index PATH` scans `PATH` and diffs against the `files` table.
+  Files whose size and mtime match the stored row are trusted without being
+  read; otherwise the file is sha256-hashed, and only added/changed files are
+  re-parsed. Stale nodes/edges/FTS rows are deleted first, so re-runs are
+  idempotent. Unreadable files are skipped with a warning, never fatally.
 - Every parser returns nodes, edges, warnings, and full-text rows. Node IDs
   are sha1 over `(type, qualified_name, path)`, so re-indexing an unchanged
   entity converges on the same row.
@@ -102,11 +112,15 @@ they never mutate the checked-in fixtures.
 ## Limitations
 
 - Gitignore support is a simple fnmatch-based subset: no `!negation`, no
-  nested `.gitignore` files in subdirectories, and no full `**` semantics.
-- Paths are stored relative to the indexed root; index one repository per
-  database.
-- `repobrain index PATH` stores its database in the *current* directory's
-  `.repobrain/`, not inside `PATH`.
+  nested `.gitignore` files in subdirectories, and no true gitignore `*`/`**`
+  semantics — fnmatch's `*` crosses `/`, so a pattern like `docs/*`
+  over-matches nested paths such as `docs/a/b.md` (real gitignore would only
+  match direct children).
+- Paths are stored relative to the indexed root; one repository per database
+  (enforced: the database is pinned to its root and refuses other roots).
+- Incremental change detection trusts size+mtime: a same-length edit that
+  also restores the file's mtime is missed until a `--no-incremental` run
+  (the same trade-off git's index makes).
 - Only Markdown gets structural parsing so far; other text files are indexed
   whole-file for full-text search.
 - Empty directories produce no Directory nodes (directories are derived from

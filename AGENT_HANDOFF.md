@@ -13,15 +13,18 @@ Markdown parser, FTS5 keyword search, and the `init` / `index` / `status` /
 - `repobrain/graph/schema.py` — full NodeType/EdgeType enums (all PRD 11.1/11.2
   values), `Node`/`Edge`/`FtsRow` dataclasses, deterministic sha1 id helpers.
 - `repobrain/graph/store.py` — `GraphStore`: WAL SQLite, tables `nodes`,
-  `edges`, `files`, `index_runs`, FTS5 `content_fts(path, name, content)`.
-  Batch upserts via executemany; `delete_paths` wipes nodes/edges/FTS by
-  provenance path.
+  `edges`, `files`, `index_runs`, `meta` (repo-root pin), FTS5
+  `content_fts(path, name, content, node_id UNINDEXED)`. Batch upserts via
+  executemany; `delete_paths` wipes nodes/edges/FTS by provenance path.
 - `repobrain/indexing/scanner.py` — walk + ignore rules (fnmatch gitignore
   subset, PRD 17 defaults), language detection, binary sniff, 2 MB cap.
 - `repobrain/indexing/hasher.py` — sha256. `incremental.py` — diffs scan
-  against the `files` table into added/changed/unchanged/deleted.
+  against the `files` table into added/changed/unchanged/deleted with a
+  size+mtime shortcut (unchanged stat → no read/hash); reads content only for
+  files needing parsing; unreadable files become warnings, never deletions.
 - `repobrain/indexing/indexer.py` — scan → diff → parse → single-transaction
-  store; stamps commit hash (`git rev-parse HEAD`) on all rows; records
+  store; pins the DB to its repo root (`RepoRootMismatchError` on mismatch);
+  stamps commit hash (`git rev-parse HEAD`) on all rows; records
   `index_runs`; sweeps dead Directory nodes and orphan edges.
 - `repobrain/parsers/base.py` — `Parser` interface, `ParseResult(nodes, edges,
   warnings, fts_rows)`, `GenericFileParser`, registry. All matching parsers
@@ -30,51 +33,61 @@ Markdown parser, FTS5 keyword search, and the `init` / `index` / `status` /
   sections with line spans, links/code-blocks in metadata, TODO/FIXME Task
   nodes, per-section FTS rows.
 - `repobrain/retrieval/keyword.py` — bm25 + exact-name (+100) / partial-name
-  (+25) / path (+10) boosts; results carry path, lines, type, snippet, score,
-  reasons.
-- `repobrain/cli.py` — click CLI; `--json` on status/search.
+  (+25, LIKE with `%`/`_` escaped) / path (+10) boosts, each applied at most
+  once per result; results are keyed by node id via `content_fts.node_id` and
+  carry path, lines, type, snippet, score, reasons.
+- `repobrain/cli.py` — click CLI. All commands operate on the target repo's
+  own `.repobrain/`: `init [PATH]`, `index [PATH]`, `status/search --path`.
+  `--json` on status/search.
 
 ## Important Files
 
 - `prd.md` — the full product spec; milestone plan in section 26.
-- `DECISIONS.md` — D1–D9 explain the non-obvious choices (IDs, FTS join,
-  directory cleanup). Read before changing storage or search.
+- `DECISIONS.md` — D1–D13 explain the non-obvious choices (IDs, FTS design,
+  root pinning, stat shortcut). Read before changing storage or search.
 - `tests/fixtures/small_python_app/`, `tests/fixtures/markdown_docs_app/` —
   fixture repos; tests copy them to tmp dirs (see `tests/conftest.py`).
 
 ## Recent Changes
 
-Initial implementation — everything listed above is new in this slice.
+- Initial implementation of Milestones 1–2 (everything listed above).
+- Code review fixes (same session): database pinned to its repo root via a
+  `meta` table (fixes a graph-purge bug when indexing a second root);
+  `content_fts` gained `node_id UNINDEXED`; size+mtime shortcut before
+  hashing; unreadable files skipped with warnings; anchored dir ignore
+  patterns honored; name boost deduped per result; LIKE wildcards escaped.
 
 ## Decisions
 
-See `DECISIONS.md` (D1–D9).
+See `DECISIONS.md` (D1–D13; D8 is superseded by D10, D4 amended by D11).
 
 ## Assumptions
 
-- One repository per database; paths stored relative to the indexed root.
-- `repobrain` CLI runs from the directory that owns `.repobrain/` (the index
-  target can be elsewhere).
+- One repository per database; paths stored relative to the indexed root
+  (enforced via the `meta` root pin, not just assumed).
 - Observed facts get confidence 1.0; nothing inferred yet, so no edge has
   `is_inferred=1` (the columns and dataclass fields exist and are tested).
+- If a file's size and mtime both match the stored row, its content is
+  unchanged (same trust model as git's index).
 
 ## Open Questions
 
-- Should FTS gain an UNINDEXED `node_id` column instead of the `(path, name)`
-  join back to nodes? (Deviation was avoided; join is heuristic.)
 - Should Directory nodes survive with `last_seen` semantics instead of being
   swept when their last file disappears?
 - When tree-sitter lands (M3), should `Module` nodes replace or complement the
   generic `File` node for source files?
+- Should `delete_paths` switch to node_id-targeted FTS deletes once parsers
+  emit sub-file nodes that can change independently?
 
 ## Known Pitfalls
 
-- Gitignore matcher skips `!negation` lines silently and reads only the scan
-  root's `.gitignore` — nested gitignores are ignored.
-- `content_fts` rows for a file whose basename equals another node's name
-  resolve by type preference (File first) — see keyword.py comment.
-- Whole-file re-index reads every file into memory one at a time; fine for
-  ~1k files, revisit streaming for huge repos.
+- Gitignore matcher skips `!negation` lines silently, reads only the scan
+  root's `.gitignore`, and fnmatch's `*` crosses `/` (so `docs/*` also
+  matches `docs/a/b.md`) — nested gitignores are ignored.
+- Pre-review databases (content_fts without node_id) are dropped/recreated on
+  open; run `repobrain index --no-incremental` afterwards to repopulate FTS.
+- The stat shortcut misses a same-length edit whose mtime is also restored;
+  `--no-incremental` forces a full re-hash.
 - pytest is configured with `norecursedirs = ["fixtures"]` so the fixture
   app's own tests are not collected — don't remove that.
 
@@ -89,7 +102,8 @@ See `DECISIONS.md` (D1–D9).
 
 ## Source-Grounded Notes
 
-- Acceptance verified: `repobrain init && repobrain index
-  tests/fixtures/small_python_app && repobrain status` works; `repobrain
-  search "database"` returns README section + `app/db/config.py` with
-  snippets; 24/24 pytest tests pass.
+- Acceptance verified after review fixes: `repobrain init && repobrain index
+  tests/fixtures/small_python_app && repobrain status --path ... && repobrain
+  search "database" --path ...` works (database now lives inside the fixture
+  root); indexing a subdirectory creates its own database and leaves the
+  root's untouched; 32/32 pytest tests pass.

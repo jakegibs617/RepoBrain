@@ -231,7 +231,9 @@ class MarkdownParser(Parser):
                 )
             )
             section_text = "\n".join(lines[sec.start_line - 1: sec.end_line])
-            result.fts_rows.append(FtsRow(path=path, name=sec.title, content=section_text))
+            result.fts_rows.append(
+                FtsRow(path=path, name=sec.title, content=section_text, node_id=sec.node.id)
+            )
 
     def _build_task_nodes(
         self,

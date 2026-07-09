@@ -7,9 +7,13 @@ Gitignore support is intentionally simple (fnmatch-based). Supported:
 - `*`, `?`, `[...]` globbing via fnmatch, matched against both the full
   relative POSIX path and the basename / individual path segments
 
-NOT supported (documented limitation): negation (`!pattern`), `**` semantics
-beyond what fnmatch happens to do, and nested .gitignore files in
-subdirectories (only the scan root's .gitignore / .repobrainignore are read).
+NOT supported (documented limitations):
+- negation (`!pattern`) — such lines are skipped
+- nested .gitignore files in subdirectories (only the scan root's
+  .gitignore / .repobrainignore are read)
+- true gitignore `*` / `**` semantics: fnmatch's `*` crosses `/`, so a
+  pattern like `docs/*` over-matches nested paths such as `docs/a/b.md`
+  (real gitignore would only match direct children)
 """
 from __future__ import annotations
 
@@ -106,13 +110,18 @@ class IgnoreMatcher:
         basename = segments[-1]
         for p in self.patterns:
             if p.is_dir:
-                # match any path segment (or the dir itself) against the pattern
-                if is_dir and (fnmatch(rel_path, p.pattern) or fnmatch(basename, p.pattern)):
-                    return True
-                if any(fnmatch(seg, p.pattern) for seg in segments[:-1]):
-                    return True
-                if is_dir and any(fnmatch(seg, p.pattern) for seg in segments):
-                    return True
+                if p.anchored:
+                    # anchored dir pattern (`/dist/`): only a root-level
+                    # directory (or its contents) may match
+                    if fnmatch(segments[0], p.pattern) and (is_dir or len(segments) > 1):
+                        return True
+                else:
+                    # any directory segment on the path may match
+                    dir_segments = segments if is_dir else segments[:-1]
+                    if any(fnmatch(seg, p.pattern) for seg in dir_segments):
+                        return True
+                    if is_dir and fnmatch(rel_path, p.pattern):
+                        return True
             else:
                 if p.anchored:
                     if fnmatch(rel_path, p.pattern):
