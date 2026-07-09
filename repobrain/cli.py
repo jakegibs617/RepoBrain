@@ -7,6 +7,8 @@ from pathlib import Path
 import click
 
 from .config import CONFIG_FILENAME, REPOBRAIN_DIR, RepoBrainConfig
+from .graph.queries import explain_file as run_explain_file
+from .graph.queries import find_symbol as run_find_symbol
 from .graph.store import GraphStore
 from .indexing.indexer import Indexer, RepoRootMismatchError
 from .retrieval.keyword import search as keyword_search
@@ -148,6 +150,149 @@ def search(query: str, path: str, limit: int, node_type: str | None, as_json: bo
         if r.snippet:
             snippet = " ".join(r.snippet.split())
             click.echo(f"   {snippet[:200]}")
+
+
+@main.command("find-symbol")
+@click.argument("name")
+@click.option("--exact", is_flag=True, help="Match the symbol name exactly.")
+@click.option("--limit", type=int, default=20, show_default=True)
+@click.option("--path", "path", type=click.Path(exists=True, file_okay=False), default=".",
+              show_default=True, help="Repository root whose database to search.")
+@click.option("--json", "as_json", is_flag=True, help="Machine-readable output.")
+def find_symbol(name: str, exact: bool, limit: int, path: str, as_json: bool) -> None:
+    """Find code symbols (functions, classes, methods, variables, modules)."""
+    with _open_store(_resolve_root(path)) as store:
+        results = run_find_symbol(store, name, exact=exact, limit=limit)
+
+    if as_json:
+        click.echo(json.dumps(results, indent=2))
+        return
+    if not results:
+        click.echo("No symbols found.")
+        return
+    for i, r in enumerate(results, 1):
+        lines = ""
+        if r["start_line"]:
+            lines = f":{r['start_line']}"
+            if r["end_line"] and r["end_line"] != r["start_line"]:
+                lines += f"-{r['end_line']}"
+        click.echo(f"{i}. {r['name']}  [{r['type']}]  {r['path']}{lines}")
+        detail = r["qualified_name"] or ""
+        if r["signature"]:
+            detail += f"   {r['signature']}"
+        if detail:
+            click.echo(f"   {detail}")
+
+
+@main.group()
+def explain() -> None:
+    """Explain parts of the indexed repository."""
+
+
+def _echo_symbol_tree(entries: list[dict], depth: int) -> None:
+    for entry in entries:
+        lines = f":{entry['start_line']}" if entry["start_line"] else ""
+        if entry["end_line"] and entry["end_line"] != entry["start_line"]:
+            lines += f"-{entry['end_line']}"
+        indent = "  " * depth
+        click.echo(f"  {indent}{entry['name']}  [{entry['type']}]{lines}")
+        _echo_symbol_tree(entry["children"], depth + 1)
+
+
+@explain.command("file")
+@click.argument("filepath")
+@click.option("--path", "path", type=click.Path(exists=True, file_okay=False), default=".",
+              show_default=True, help="Repository root whose database to query.")
+@click.option("--json", "as_json", is_flag=True, help="Machine-readable output.")
+def explain_file(filepath: str, path: str, as_json: bool) -> None:
+    """Explain FILEPATH: symbols, imports, callers, env vars, tests, docs."""
+    with _open_store(_resolve_root(path)) as store:
+        info = run_explain_file(store, filepath)
+
+    if info is None:
+        raise click.ClickException(
+            f"'{filepath}' is not an indexed file. Run `repobrain index` first, "
+            "or pass the path relative to the indexed root."
+        )
+    if as_json:
+        click.echo(json.dumps(info, indent=2))
+        return
+
+    header = f"{info['path']}  [{info['language'] or 'unknown'}]"
+    if info["line_count"]:
+        header += f"  {info['line_count']} lines"
+    click.echo(header)
+    if info["module"]:
+        suffix = "  (test file)" if info["module"]["is_test_file"] else ""
+        click.echo(f"module: {info['module']['qualified_name']}{suffix}")
+    if info["node_counts"]:
+        counts = ", ".join(f"{t}={c}" for t, c in info["node_counts"].items())
+        click.echo(f"nodes: {counts}")
+
+    click.echo("\nSymbols")
+    if info["symbols"]:
+        _echo_symbol_tree(info["symbols"], 0)
+    else:
+        click.echo("  none")
+
+    click.echo("\nImports")
+    for imp in info["imports"]["internal"]:
+        click.echo(f"  {imp['module']}  ({imp['path']}:{imp['line']})")
+    if info["imports"]["external"]:
+        click.echo(f"  external: {', '.join(info['imports']['external'])}")
+    if not info["imports"]["internal"] and not info["imports"]["external"]:
+        click.echo("  none")
+
+    click.echo("\nImported by")
+    if info["imported_by"]:
+        for imp in info["imported_by"]:
+            click.echo(f"  {imp['module']}  ({imp['path']})")
+    else:
+        click.echo("  none")
+
+    click.echo("\nCalls out")
+    if info["calls_out"]:
+        for c in info["calls_out"]:
+            flag = "  (inferred)" if c["is_inferred"] else ""
+            click.echo(
+                f"  {c['caller']} -> {c['callee']}  "
+                f"({c['callee_path']}, line {c['start_line']}, "
+                f"conf {c['confidence']:.1f}){flag}"
+            )
+    else:
+        click.echo("  none")
+
+    click.echo("\nCalled by")
+    if info["called_by"]:
+        for c in info["called_by"]:
+            flag = "  (inferred)" if c["is_inferred"] else ""
+            click.echo(
+                f"  {c['caller']} -> {c['callee']}  "
+                f"({c['caller_path']}:{c['start_line']}, conf {c['confidence']:.1f}){flag}"
+            )
+    else:
+        click.echo("  none")
+
+    click.echo("\nEnvironment variables read")
+    if info["env_vars"]:
+        for e in info["env_vars"]:
+            click.echo(f"  {e['var']}  (line {e['start_line']}, by {e['reader']})")
+    else:
+        click.echo("  none")
+
+    click.echo("\nRelated tests")
+    if info["tests"]:
+        for t in info["tests"]:
+            click.echo(f"  {t['path']}  ({t['via']})")
+    else:
+        click.echo("  none")
+
+    click.echo("\nReferencing docs")
+    if info["docs"]:
+        for d in info["docs"]:
+            click.echo(f"  {d['path']}  [{d['type']}] {d['name']}")
+    else:
+        click.echo("  none yet")
 
 
 if __name__ == "__main__":

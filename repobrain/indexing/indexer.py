@@ -76,6 +76,14 @@ class Indexer:
         stats.files_changed = len(diff.to_parse)
         stats.files_deleted = len(diff.deleted)
 
+        # Parsers that resolve cross-file references (e.g. imports) get the
+        # full set of scanned paths before any file is parsed.
+        known_paths = {f.path for f in scanned}
+        for parser in self.registry.all():
+            begin = getattr(parser, "begin_run", None)
+            if begin is not None:
+                begin(known_paths)
+
         combined = ParseResult()
         combined.warnings.extend(diff.warnings)
         for f in diff.to_parse:
@@ -101,6 +109,17 @@ class Indexer:
             for f in diff.stat_changed:
                 self.store.update_file_stat(f.path, f.size, f.mtime)
             self.store.touch_paths([f.path for f in diff.unchanged])
+            # Reconciliation pass: parsers may resolve cross-file relationships
+            # (e.g. name-only CALLS) now that this run's nodes are stored.
+            extra_edges = []
+            for parser in self.registry.all():
+                finish = getattr(parser, "finish_run", None)
+                if finish is not None:
+                    extra_edges.extend(finish(self.store))
+            for edge in extra_edges:
+                edge.commit_hash = commit
+            self.store.upsert_edges(extra_edges)
+            combined.edges.extend(extra_edges)
             self._cleanup_directories(diff)
             self.store.delete_orphan_edges()
             stats.nodes_created = len({n.id for n in combined.nodes})

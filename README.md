@@ -8,7 +8,7 @@ things live, and what connects to what.
 
 Everything runs offline. No API keys, no network calls.
 
-## Current status (Milestones 1–2)
+## Current status (Milestones 1–3)
 
 Implemented:
 
@@ -26,9 +26,30 @@ Implemented:
   MarkdownSection nodes with line spans, links, fenced code blocks, and
   TODO/FIXME list items as Task nodes
 - Keyword search: FTS5 bm25 ranking combined with exact-name and path boosts
+- Tree-sitter code parser: Module/Function/Class/Method/Variable nodes with
+  qualified names and line spans, DEFINES/CONTAINS/IMPORTS/CALLS/READS_ENV
+  edges, TestFile/TestCase detection, and symbol names in full-text search
+- `find-symbol` and `explain file` CLI commands backed by reusable graph
+  queries (`repobrain/graph/queries.py`)
 
-Not yet implemented: code symbol parsing (tree-sitter), YAML/config adapters,
+Not yet implemented: YAML/config adapters, doc-to-code purpose mapping,
 data-flow and impact analysis, the MCP server, agent memory, and reports.
+
+### Supported languages (code parsing)
+
+| Language   | Symbols | Internal import resolution | Calls | Env reads |
+|------------|---------|----------------------------|-------|-----------|
+| Python     | yes     | yes (dotted path → file, incl. relative imports) | same-file, self.method, import-qualified, name-match | `os.environ[...]`, `os.environ.get`, `os.getenv` |
+| JavaScript | yes     | yes (relative `import`/`require`, extension + `index.*` inference) | same-file, this.method, import-qualified, name-match | `process.env.X`, `process.env["X"]` |
+| TypeScript | yes (+interfaces/enums as Class) | same as JavaScript | same as JavaScript | same as JavaScript |
+| PHP        | yes     | `require`/`include` with literal relative paths | same-file, `$this->method` | `getenv('X')` |
+| Bash       | functions + top-level variables | no | same-file function invocations | no |
+| Go         | yes (structs/types as Class) | no (imports recorded as metadata) | same-file | no |
+| Java       | yes (interfaces/enums as Class) | no (imports recorded as metadata) | within-class | no |
+| Ruby       | yes (modules as Class) | `require_relative` | same-file, within-class, name-match | no |
+
+Unresolvable or third-party imports are stored as `external_imports` metadata
+on the module node — never as dangling graph nodes.
 
 ## Install
 
@@ -59,6 +80,13 @@ uv pip install -p .venv/bin/python -e ".[dev]"
 # full-text + name search (--path DIR, --limit N, --type NodeType, --json)
 .venv/bin/repobrain search "database" --path tests/fixtures/small_python_app
 .venv/bin/repobrain search "users" --type File --json
+
+# find code symbols by name (--exact, --limit N, --json)
+.venv/bin/repobrain find-symbol create_user --path tests/fixtures/small_python_app
+
+# explain a file: symbols, imports/imported-by, callers/callees, env vars,
+# related tests, referencing docs (--json for machine output)
+.venv/bin/repobrain explain file app/services/user_service.py --path tests/fixtures/small_python_app
 ```
 
 Each database is pinned to the repository root it indexes (stored in a `meta`
@@ -71,6 +99,15 @@ Example search output:
 1. README.md:12-17  [MarkdownSection]  score=101.55
    name: Database   reason: full-text match, exact name match
    ## [Database] The [database] connection is configured in `app/db/config.py`…
+```
+
+Example `find-symbol` output:
+
+```text
+1. create_user  [Function]  app/services/user_service.py:7-10
+   app.services.user_service.create_user   def create_user(payload):
+2. create_user_route  [Function]  app/api/routes.py:7-8
+   app.api.routes.register_routes.create_user_route   def create_user_route():
 ```
 
 ## How it works
@@ -86,6 +123,12 @@ Example search output:
 - Search queries the `content_fts` FTS5 table with bm25 ranking and layers
   exact-name (+100), partial-name (+25), and path-substring (+10) boosts on
   top, so source-grounded exact matches outrank vague content matches.
+- Code files are parsed with tree-sitter (query objects compiled once per
+  language and reused). Facts observed directly (definitions, imports,
+  same-file calls) get confidence 0.9–1.0; cross-file calls matched only by a
+  globally-unique name are marked `is_inferred` with confidence 0.7 and
+  `inference_reason="name-match"`. A file that fails to parse degrades to a
+  warning — it keeps its generic File node and full-text row.
 
 ## Configuration
 
@@ -121,7 +164,15 @@ they never mutate the checked-in fixtures.
 - Incremental change detection trusts size+mtime: a same-length edit that
   also restores the file's mtime is missed until a `--no-incremental` run
   (the same trade-off git's index makes).
-- Only Markdown gets structural parsing so far; other text files are indexed
-  whole-file for full-text search.
+- Markdown and the eight code languages above get structural parsing; other
+  text files are indexed whole-file for full-text search.
+- Call-graph extraction prefers precision over recall: method calls on
+  dynamic receivers (anything other than `self`/`this`) are skipped, and
+  cross-file name-only matches require the name to be globally unique.
+- Incremental runs only re-parse changed files, so a new function in file A
+  will not gain inferred CALLS edges from an unchanged caller in file B until
+  B changes (or a `--no-incremental` run).
+- Go/Java imports are recorded as module metadata only (resolving them needs
+  module/package roots, deferred).
 - Empty directories produce no Directory nodes (directories are derived from
   file paths).

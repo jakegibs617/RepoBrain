@@ -127,3 +127,88 @@ transient I/O error can never purge a file's existing graph rows.
 gap, documented rather than fixed: fnmatch's `*` crosses `/`, so `docs/*`
 over-matches `docs/a/b.md`. Separately, `%`/`_` in search queries are escaped
 in the partial-name LIKE clause so they match literally.
+
+## 2026-07-09 — Milestone 3 (tree-sitter code symbols)
+
+### D14: DEFINES for symbol definitions, CONTAINS for structural nesting
+
+`File DEFINES Module`, `Module DEFINES Function/Class/Variable/TestCase`, and
+`Class DEFINES Method` express "this scope declares this symbol". CONTAINS is
+reserved for structural nesting that is not a scope-level declaration: a
+function defined inside another function (`register_routes CONTAINS
+create_user_route`), directories containing files (D6), Markdown section
+nesting, and `TestFile CONTAINS TestCase`. Rationale: `DEFINES` answers "what
+symbols does X declare?" cleanly, while CONTAINS remains a purely structural
+axis; queries can traverse either without conflating them.
+
+### D15: Import resolution against the scanned file set; externals are metadata
+
+The code parser receives every scanned repo path via a `begin_run(known_files)`
+hook the indexer calls before parsing (parsers without the hook are
+unaffected). Python imports resolve dotted paths to `x/y.py` or
+`x/y/__init__.py` (relative imports supported); JS/TS resolve relative
+`import`/`require` specifiers with extension inference (`.js/.jsx/.ts/.tsx/
+.mjs/.cjs`) including `index.*` files; Ruby resolves `require_relative`; PHP
+resolves literal relative `require`/`include` paths. Resolved imports become
+`Module IMPORTS Module` edges whose target id is computed deterministically
+(D2) — no placeholder node needed. Anything unresolvable (stdlib, npm
+packages, dynamic paths) lands in the module node's `external_imports`
+metadata list, never as a dangling node. Go/Java imports are metadata-only for
+now (resolution needs go.mod / package roots).
+
+### D16: CALLS = observed 0.9, name-match inferred 0.7; Module may be a caller
+
+Call edges favor precision over recall:
+
+- Same-file bare calls, `self.method()` / `$this->method()` / `this.method()`
+  (resolved strictly within the enclosing class), and calls resolved through
+  an explicit import binding get confidence 0.9, `is_inferred=0`.
+- Remaining bare-name calls are queued and resolved after the run's nodes are
+  stored (indexer `finish_run(store)` hook): if exactly one Function/Method in
+  the whole graph has that name, an edge with confidence 0.7, `is_inferred=1`,
+  `inference_reason="name-match"` is created; ambiguous names create nothing.
+- Method calls on dynamic receivers are skipped entirely.
+- The PRD says "Function CALLS Function", but module-level calls (Express
+  route callbacks, script bodies) are common, so the source may also be the
+  Module node — the callee must still resolve to a known Function/Method.
+- Import-qualified targets are computed as deterministic ids without checking
+  existence; if the target symbol doesn't actually exist, the edge dangles and
+  the existing orphan-edge sweep removes it in the same transaction.
+
+Known incremental limitation (documented in README): inferred edges are only
+(re)computed for files parsed in the current run.
+
+### D17: EnvVar identity is repo-global (path = "")
+
+`EnvVar` node ids are keyed on `("EnvVar", name, "")`, so reads of the same
+variable from any number of files converge on one node. The node's `path`
+column is the empty string — it is deliberately outside path-based cleanup
+(`delete_paths`), so deleting one reader never destroys the shared node.
+Provenance lives on the `READS_ENV` edges (file + line per observation); the
+node keeps one example observation in metadata. Trade-off: an EnvVar whose
+last reader disappears lingers as an edgeless node until a future sweep —
+harmless, and M5 config parsing will make EnvVars long-lived anyway.
+
+### D18: TestFile complements File; test functions become TestCase nodes
+
+Files matching test conventions (`test_*.py`, `*_test.py`, `*.test.js/ts`,
+`*.spec.js/ts`, or living under `tests/`, `test/`, `__tests__/`, `spec/`) get
+a `TestFile` node in addition to the generic `File` node (same path, distinct
+type — ids don't collide) plus `is_test_file: true` on their Module node.
+Test functions (`test*` defs in test files; `it(...)`/`test(...)`
+registrations in JS) become `TestCase` nodes instead of Function nodes, with
+`TestFile CONTAINS TestCase`. JS test callbacks are attributed to their
+TestCase, so `TestCase CALLS Function` edges ground "which test exercises
+this?" queries. `explain file` finds related tests via TestFiles whose module
+imports the target module, falling back to filename-stem matching.
+
+### D19: Language wiring — first-class vs generic
+
+Python, JavaScript, TypeScript, PHP, and Bash are first-class (per PRD 30 #3).
+Go, Java, and Ruby reuse the same extraction pipeline with reduced scope (see
+README table). Structs/interfaces/enums/traits/Ruby modules are emitted as
+`Class` nodes with a `kind` metadata field rather than new node types, keeping
+`find-symbol` simple; revisit if Interface/Type nodes earn their own queries.
+Tree-sitter Query objects and parsers are compiled once per language
+(lru_cache) and reused across files; grammars come from
+`tree-sitter-language-pack` (no compilation step, no network at runtime).
