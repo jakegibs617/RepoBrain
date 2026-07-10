@@ -319,3 +319,45 @@ fallback: run the same exact path normalizer over persisted structured
 Markdown reference candidates. It never fuzzy-matches or resurrects ambiguous
 symbol references. Multi-target impact evidence deduplicates by node, edge
 kind, and edge provenance while retaining every changed-path reason.
+
+## 2026-07-10 — Milestone 14 (Git history as a deterministic extractor)
+
+### D25: History is bounded correlation evidence in its own tables and bucket
+
+The extractor mines only local Git plumbing (argument arrays, read-only
+commands, no shell, no hosted APIs) over a bounded recent window (default 500
+commits, configurable via `history_max_commits`). Merge commits are excluded
+at the log level; paths are filtered through the same ignore/include
+configuration as file scanning, so vendor/generated noise and `.repobrain/`
+never enter history facts.
+
+Raw evidence lives in dedicated `git_commits` / `git_commit_files` tables, not
+as graph nodes: commits are provenance rows to aggregate, not entities to
+traverse, and keeping them out of `nodes` protects search and traversal
+queries. The only new graph vocabulary is the `CO_CHANGED_WITH` edge between
+File nodes (extractor `git-history`, `is_inferred=1`), which queries earned.
+Because the window is bounded, every extraction fully rebuilds the tables and
+the extractor-owned edges in one transaction — re-extracting identical history
+is idempotent, and rewritten or shortened history leaves no stale rows. A
+`history_params` meta stamp (window, per-commit file cap, extractor version)
+plus the extracted HEAD decide staleness; bumping the extractor version forces
+re-extraction on upgrade.
+
+Co-change is scored with explicit support: a pair needs at least 2 shared
+commits, each commit touching k files contributes `1/(k-1)` (broad-commit
+discount), commits over `history_max_files_per_commit` (default 50) are
+recorded but excluded from pairing, and the score normalizes weighted support
+by the less frequently changed file's commit count. Rename continuity chains
+`old -> new` aliases newest-first so pre-rename commits attribute to the
+current identity. Supporting commit ids are preserved on every edge.
+
+History never impersonates static impact: edge confidence is capped at 0.55
+(below the 0.6 medium boundary), `impact_analysis` and `change_context`
+surface it as a separately labeled historical-evidence bucket with the
+heuristic explanation and provenance stamp, and ownership output is explicitly
+observed contribution history, never an authorization or CODEOWNERS claim.
+The M12 gate re-extracts when HEAD or parameters changed (pure commits and
+rebases move HEAD without touching files); with auto-index disabled, history
+staleness fails closed for history-backed answers only, while non-Git and
+shallow repositories report `unavailable` honestly without blocking static
+queries.

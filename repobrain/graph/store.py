@@ -80,6 +80,27 @@ CREATE TABLE IF NOT EXISTS meta (
     value TEXT
 );
 
+CREATE TABLE IF NOT EXISTS git_commits (
+    sha TEXT PRIMARY KEY,
+    committed_at INTEGER NOT NULL,
+    author_name TEXT,
+    author_email TEXT,
+    files_changed INTEGER NOT NULL,
+    additions INTEGER NOT NULL,
+    deletions INTEGER NOT NULL,
+    co_change_excluded TEXT
+);
+
+CREATE TABLE IF NOT EXISTS git_commit_files (
+    sha TEXT NOT NULL,
+    path TEXT NOT NULL,
+    original_path TEXT NOT NULL,
+    additions INTEGER,
+    deletions INTEGER,
+    PRIMARY KEY (sha, path)
+);
+CREATE INDEX IF NOT EXISTS idx_git_commit_files_path ON git_commit_files(path);
+
 CREATE VIRTUAL TABLE IF NOT EXISTS content_fts USING fts5(path, name, content, node_id UNINDEXED);
 """
 
@@ -227,6 +248,35 @@ class GraphStore:
         self.conn.executemany(
             "INSERT INTO content_fts (path, name, content, node_id) VALUES (?, ?, ?, ?)",
             [(r.path, r.name, r.content, r.node_id) for r in rows],
+        )
+
+    # -- git history ---------------------------------------------------------
+
+    def replace_git_history(
+        self, commits: Sequence[tuple], commit_files: Sequence[tuple]
+    ) -> None:
+        """Atomically replace the extractor-owned Git history evidence tables.
+
+        The extraction window is bounded, so a full rebuild is the simplest
+        convergent strategy: re-extracting identical history is idempotent and
+        rewritten/shortened history leaves no stale rows behind.
+        """
+        self.conn.execute("DELETE FROM git_commit_files")
+        self.conn.execute("DELETE FROM git_commits")
+        self.conn.executemany(
+            """
+            INSERT INTO git_commits (sha, committed_at, author_name, author_email,
+                files_changed, additions, deletions, co_change_excluded)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            commits,
+        )
+        self.conn.executemany(
+            """
+            INSERT INTO git_commit_files (sha, path, original_path, additions, deletions)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            commit_files,
         )
 
     # -- meta ----------------------------------------------------------------

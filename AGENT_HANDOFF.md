@@ -3,13 +3,28 @@
 ## Project Summary
 
 RepoBrain: a local-first second brain for AI coding agents (see `prd.md`).
-All ten PRD milestones and post-MVP Milestones 11–13 are now implemented. Milestones 1–4 delivered storage,
+All ten PRD milestones and post-MVP Milestones 11–14 are now implemented. Milestones 1–4 delivered storage,
 incremental indexing, code/docs parsing, search, and documentation mapping.
 Milestones 5–10 add config adapters and tracing, route/data-flow analysis,
 impact analysis, MCP tools, durable agent memory, and Markdown/HTML reports.
 
 ## Delivery Status
 
+- M14 is implemented on `feat/m14-git-history-extractor`: a deterministic
+  Git history extractor (`repobrain/history.py`) mines a bounded recent
+  commit window (default 500 commits, local plumbing only) into
+  `git_commits`/`git_commit_files` tables and extractor-owned
+  `CO_CHANGED_WITH` edges with rename continuity, broad-commit discounting,
+  merge/vendor/`.repobrain` exclusions, and supporting commit ids on every
+  relationship.
+- `repobrain history co-change|hotspots|owners` and the matching MCP tools
+  (`co_change`, `churn_hotspots`, `ownership`) serve gated, provenance-stamped
+  reports; `impact_analysis` and `change_context` gained a separately labeled
+  `historical_evidence`/`historical_impact` bucket capped below static
+  confidence. The M12 gate re-extracts when HEAD or history parameters move;
+  shallow/non-Git repos report `unavailable` without blocking static queries.
+- M14 verification: 164 pytest tests passed; Python compilation and manual
+  CLI/MCP smoke runs were clean before review.
 - M13 is implemented on `feat/m13-diff-aware-change-context`:
   `repobrain change-context` and the matching MCP tool capture a working or
   merge-base branch diff before freshness repair, then map changed lines to
@@ -93,6 +108,12 @@ impact analysis, MCP tools, durable agent memory, and Markdown/HTML reports.
 - `repobrain/change_context.py` — M13 Git plumbing, changed-line mapping,
   impact/test aggregation, live MENTIONS traversal, historical exact-path doc
   evidence for renamed/deleted targets, and shared plain/JSON-ready results.
+- `repobrain/history.py` — M14 Git history extractor: read-only plumbing over
+  a bounded window, `-z --numstat` state-machine parser (renames, binary,
+  empty commits), rename-continuity aliasing, co-change scoring, churn and
+  ownership queries, `refresh_history` (the gate's history phase), and the
+  gated CLI/MCP report builders. Raw evidence lives in `git_commits` /
+  `git_commit_files`; only `CO_CHANGED_WITH` edges enter the graph (D25).
 
 ## Important Files
 
@@ -120,7 +141,9 @@ impact analysis, MCP tools, durable agent memory, and Markdown/HTML reports.
 
 ## Decisions
 
-See `DECISIONS.md` D24 for the M13 session.
+See `DECISIONS.md` D24 for the M13 session and D25 for the M14 Git history
+extractor (tables-not-nodes, bounded-window full rebuild, co-change scoring,
+confidence cap, gate interaction).
 
 ## Assumptions
 
@@ -169,11 +192,24 @@ See `DECISIONS.md` D24 for the M13 session.
 - Stale-doc candidates are review evidence, not semantic claims. Live targets
   use MENTIONS edges; renamed/deleted paths use only exact structured path
   references because their live MENTIONS edge necessarily disappears.
+- `CO_CHANGED_WITH` edges carry `path=""` so path-based cleanup never touches
+  them; removal happens via the extractor-owned rebuild and the orphan-edge
+  sweep. Don't give them a real path.
+- `refresh_history` compares HEAD **and** the `history_params` meta stamp
+  (window, file cap, extractor version). Bump `EXTRACTOR_VERSION` in
+  `repobrain/history.py` whenever extraction or scoring output changes shape,
+  or upgraded databases will keep serving old-shaped history as "current".
+- File node ids are `node_id("File", path, path)` — `Node.id` prefers
+  `qualified_name` (the full path) over `name` (the basename). Building File
+  ids from basenames silently creates edges that join to nothing.
+- History staleness never blocks static queries: with `--no-auto-index` the
+  gate reports history `stale` and only history-backed answers fail closed.
+  Non-Git and shallow repositories are `unavailable`, not errors.
 
 ## Suggested Next Steps
 
-A ready-to-use prompt for the next session (scoped to Git history extraction) is in
-`docs/NEXT_SESSION_PROMPT.md`.
+A ready-to-use prompt for the next session (scoped to memory verification) is
+in `docs/NEXT_SESSION_PROMPT.md`.
 
 ### Product direction (post-MVP review, 2026-07-10)
 
@@ -198,10 +234,10 @@ priority order:
    impacted symbols, tests to run, and — the differentiator — **stale-doc
    detection** using existing MENTIONS edges (code changed, referencing doc
    section didn't). Natural pre-commit/PR hook surface.
-4. **Git history as an extractor.** Co-change coupling catches impact
+4. **Git history as an extractor.** **Delivered (M14).** Co-change coupling catches impact
    relationships static analysis misses (templates, migrations, config);
-   blend it into impact analysis. Also churn hotspots, ownership, and
-   commit-message mining. Local and deterministic — on-vision.
+   blended into impact analysis and change context. Churn hotspots and
+   observed ownership shipped too; commit-message mining deferred.
 5. **Memory verification.** Anchor memory entries to graph nodes and validate
    on reindex ("decision references `create_user`, which no longer exists →
    flag stale"). Turns append-only memory into a validated knowledge base and

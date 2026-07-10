@@ -19,6 +19,12 @@ from .graph.queries import (
 )
 from .graph.store import GraphStore
 from .freshness import ensure_fresh
+from .history import (
+    co_change_report,
+    churn_report,
+    ownership_report,
+    refresh_history,
+)
 from .indexing.indexer import Indexer
 from .memory import read_agent_memory, write_agent_memory
 from .reporting import project_overview
@@ -77,10 +83,11 @@ class RepoBrainTools:
             config.exclude_patterns = exclude_patterns
         with GraphStore(target / config.db_path) as store:
             stats = Indexer(store, config=config).index(target, incremental=incremental)
+            history = refresh_history(target, store, config=config)
         return _safe({"status": "ok", "files_scanned": stats.files_scanned,
                       "files_changed": stats.files_changed, "files_deleted": stats.files_deleted,
                       "nodes_created": stats.nodes_created, "edges_created": stats.edges_created,
-                      "warnings": stats.warnings})
+                      "warnings": stats.warnings, "history": history})
 
     def search_project(self, query: str, limit: int = 10,
                        types: list[str] | None = None, auto_index: bool = True) -> dict:
@@ -114,6 +121,25 @@ class RepoBrainTools:
                                             auto_index=auto_index))
         except GitDiffError as exc:
             return {"status": "error", "error": str(exc), "changes": []}
+
+    def co_change(self, path: str, limit: int = 20, auto_index: bool = True) -> dict:
+        """Files that historically change together with `path` (heuristic evidence)."""
+        with self._store() as store:
+            return _safe(co_change_report(self.root, store, path, limit=limit,
+                                          auto_index=auto_index))
+
+    def churn_hotspots(self, limit: int = 20, auto_index: bool = True) -> dict:
+        """Churn hotspots (commit counts, added/deleted lines) from recent history."""
+        with self._store() as store:
+            return _safe(churn_report(self.root, store, limit=limit,
+                                      auto_index=auto_index))
+
+    def ownership(self, path: str | None = None, limit: int = 10,
+                  auto_index: bool = True) -> dict:
+        """Observed contribution history; never an authorization or CODEOWNERS claim."""
+        with self._store() as store:
+            return _safe(ownership_report(self.root, store, path, limit=limit,
+                                          auto_index=auto_index))
 
     def explain_file(self, path: str, auto_index: bool = True) -> dict:
         def run(store):
@@ -232,6 +258,7 @@ def create_server(root: str | Path):
     for name in (
         "index_repo", "search_project", "explain_project", "project_brief", "change_context", "explain_file", "find_symbol",
         "trace_symbol", "trace_config", "trace_data_flow", "impact_analysis",
+        "co_change", "churn_hotspots", "ownership",
         "docs_for_code", "code_for_docs", "write_agent_memory", "read_agent_memory",
     ):
         server.tool(name=name)(getattr(tools, name))

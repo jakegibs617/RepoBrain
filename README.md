@@ -43,6 +43,11 @@ Implemented:
 - A local FastMCP server exposing all 13 core tools
 - Append-only structured agent memory mirrored into Markdown handoff files
 - Grounded project overviews and Markdown/HTML graph reports
+- Deterministic Git history extraction over a bounded recent window:
+  file-level co-change coupling with supporting commits and broad-commit
+  discounting, churn hotspots, and observed contribution history — blended
+  into impact analysis and change context as a separately labeled
+  historical-evidence bucket (`repobrain history …`)
 
 The ten-milestone MVP is implemented. Dynamic dispatch and framework-specific
 runtime wiring remain intentionally conservative; see Limitations.
@@ -130,6 +135,12 @@ uv pip install -p .venv/bin/python -e ".[dev]"
 .venv/bin/repobrain trace data-flow "POST /api/users" --path tests/fixtures/small_python_app
 .venv/bin/repobrain impact app/services/user_service.py --path tests/fixtures/small_python_app
 
+# deterministic Git history evidence (local plumbing only; heuristic, labeled)
+# co-change: files that historically change together, with supporting commits
+.venv/bin/repobrain history co-change repobrain/cli.py
+.venv/bin/repobrain history hotspots --limit 10
+.venv/bin/repobrain history owners repobrain/history.py
+
 # grounded overview and human-readable reports
 .venv/bin/repobrain explain project --json
 .venv/bin/repobrain report
@@ -193,9 +204,15 @@ Example `find-symbol` output:
   "db_path": ".repobrain/repobrain.sqlite",
   "include_patterns": [],
   "exclude_patterns": [],
-  "max_file_size_bytes": 2097152
+  "max_file_size_bytes": 2097152,
+  "history_max_commits": 500,
+  "history_max_files_per_commit": 50
 }
 ```
+
+`history_max_commits` bounds the Git history extraction window;
+`history_max_files_per_commit` marks broader commits as oversized — they are
+recorded for churn/ownership but excluded from co-change pairing.
 
 ## Tests
 
@@ -264,3 +281,8 @@ open setup/graph.html
   module/package roots, deferred).
 - Empty directories produce no Directory nodes (directories are derived from
   file paths).
+- Git history evidence is correlation over a bounded recent window (default
+  500 commits): co-change is a labeled heuristic, never a dependency claim;
+  copies are not followed (only renames); shallow clones and non-Git
+  directories report history as unavailable while static queries keep
+  working.

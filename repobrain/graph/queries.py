@@ -594,8 +594,63 @@ def trace_data_flow(store: GraphStore, start: str, depth: int = 4,
     return {"start": _node_payload(row), "nodes": list(nodes.values()), "edges": edges}
 
 
+def historical_co_change(store: GraphStore, paths: list[str], limit: int = 20) -> dict:
+    """Separately labeled historical-evidence bucket for impact answers.
+
+    Co-change edges are correlation mined from recent Git history; they carry
+    their supporting commit ids and stay below static-impact confidence, so
+    callers must present them apart from observed dependency evidence.
+    """
+    from ..history import CO_CHANGE_EXPLANATION, history_provenance
+
+    items = []
+    if paths:
+        marks = ",".join("?" for _ in paths)
+        rows = store.conn.execute(
+            f"""
+            SELECT s.path AS source_path, t.path AS target_path,
+                   s.id AS source_id, t.id AS target_id,
+                   e.confidence, e.metadata_json
+            FROM edges e
+            JOIN nodes s ON s.id = e.source_node_id
+            JOIN nodes t ON t.id = e.target_node_id
+            WHERE e.type = 'CO_CHANGED_WITH'
+              AND (s.path IN ({marks}) OR t.path IN ({marks}))
+            ORDER BY e.confidence DESC, s.path, t.path
+            LIMIT ?
+            """,
+            (*paths, *paths, limit),
+        ).fetchall()
+        changed = set(paths)
+        for row in rows:
+            queried = (row["source_path"] if row["source_path"] in changed
+                       else row["target_path"])
+            partner_id = (row["target_id"] if row["source_path"] == queried
+                          else row["source_id"])
+            partner = store.conn.execute(
+                "SELECT * FROM nodes WHERE id = ?", (partner_id,)
+            ).fetchone()
+            if partner is None:
+                continue
+            meta = _meta(row)
+            items.append({
+                "node": _node_payload(partner), "via": "CO_CHANGED_WITH",
+                "co_changed_with": queried,
+                "partner_changed": partner["path"] in changed,
+                "support": meta.get("support"), "score": meta.get("score"),
+                "confidence": row["confidence"],
+                "supporting_commits": meta.get("supporting_commits", []),
+                "evidence": "git-history",
+            })
+    return {
+        "items": items,
+        "explanation": CO_CHANGE_EXPLANATION,
+        "provenance": history_provenance(store),
+    }
+
+
 def impact_analysis(store: GraphStore, target: str, change_type: str = "modify",
-                    depth: int = 3) -> dict | None:
+                    depth: int = 3, include_history: bool = True) -> dict | None:
     """Estimate change blast radius with confidence buckets and evidence."""
     resolved = _resolve_code_target(store, target)
     if resolved is None:
@@ -637,10 +692,16 @@ def impact_analysis(store: GraphStore, target: str, change_type: str = "modify",
     low = [x for x in items if x["confidence"] < 0.6]
     tests = [x for x in items if x["node"]["type"] in {"TestFile", "TestCase"} or "/test" in x["node"]["path"]]
     docs = [x for x in items if x["node"]["type"] in {"MarkdownDocument", "MarkdownSection", "ADR"}]
+    start_paths = sorted({r["path"] for r in start_rows if r["path"]})
     return {
         "target": target, "change_type": change_type,
         "high_confidence": high, "medium_confidence": medium,
         "low_confidence": low, "recommended_tests": tests,
         "docs_likely_needing_updates": docs,
+        "historical_evidence": (
+            historical_co_change(store, start_paths) if include_history
+            else {"items": [], "explanation": "History excluded by caller.",
+                  "provenance": None}
+        ),
         "unknowns": ["Dynamic calls and runtime-only wiring are not statically observable."],
     }

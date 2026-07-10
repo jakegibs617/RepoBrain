@@ -6,6 +6,7 @@ from pathlib import Path
 
 from .config import RepoBrainConfig
 from .graph.store import GraphStore
+from .history import refresh_history
 from .indexing.indexer import Indexer
 from .indexing.scanner import scan
 
@@ -81,8 +82,12 @@ def ensure_fresh(
     }
     base = {"before": before, "thresholds": thresholds}
     if not before["is_stale"]:
+        # Pure commits (or rebases) move HEAD without touching the working
+        # tree, so history freshness is checked even when files are current.
         return {"status": "current", "can_query": True, "auto_indexed": False,
-                "message": "Index is current.", **base}
+                "message": "Index is current.",
+                "history": refresh_history(root, store, auto_index=auto_index),
+                **base}
 
     if not auto_index:
         return {"status": "blocked", "can_query": False, "auto_indexed": False,
@@ -113,6 +118,7 @@ def ensure_fresh(
     return {
         "status": "reindexed", "can_query": True, "auto_indexed": True,
         "message": f"Automatically reindexed {before['out_of_date_count']} changed file(s).",
+        "history": refresh_history(root, store, auto_index=auto_index),
         "after": after,
         "index_stats": {
             "files_scanned": stats.files_scanned,

@@ -150,6 +150,18 @@ def is_binary(data: bytes) -> bool:
     return b"\x00" in data[:_SNIFF_BYTES]
 
 
+def build_ignore_matcher(
+    root: str | Path, extra_excludes: list[str] | None = None
+) -> IgnoreMatcher:
+    """Build the matcher scan() uses, so other extractors share one file universe."""
+    root = Path(root).resolve()
+    patterns = list(DEFAULT_EXCLUDES)
+    patterns += _load_ignore_file(root / ".gitignore")
+    patterns += _load_ignore_file(root / ".repobrainignore")
+    patterns += extra_excludes or []
+    return IgnoreMatcher(patterns)
+
+
 def scan(
     root: str | Path,
     extra_excludes: list[str] | None = None,
@@ -158,11 +170,7 @@ def scan(
 ) -> list[ScannedFile]:
     """Walk `root` and return indexable text files, applying ignore rules."""
     root = Path(root).resolve()
-    patterns = list(DEFAULT_EXCLUDES)
-    patterns += _load_ignore_file(root / ".gitignore")
-    patterns += _load_ignore_file(root / ".repobrainignore")
-    patterns += extra_excludes or []
-    matcher = IgnoreMatcher(patterns)
+    matcher = build_ignore_matcher(root, extra_excludes)
 
     results: list[ScannedFile] = []
     for dirpath, dirnames, filenames in os.walk(root):
