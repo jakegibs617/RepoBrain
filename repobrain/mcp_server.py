@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from .config import RepoBrainConfig
+from .briefing import DEFAULT_BUDGET, project_brief
 from .graph.queries import (
     code_for_docs,
     docs_for_code,
@@ -83,6 +84,11 @@ class RepoBrainTools:
     def explain_project(self, focus: str = "overall") -> dict:
         with self._store() as store:
             result = {"status": "ok", "focus": focus, **project_overview(store)}
+        return _safe(result)
+
+    def project_brief(self, budget: int = DEFAULT_BUDGET) -> dict:
+        with self._store() as store:
+            result = project_brief(self.root, store, budget=budget)
         return _safe(result)
 
     def explain_file(self, path: str) -> dict:
@@ -184,7 +190,7 @@ def create_server(root: str | Path):
     server = FastMCP("RepoBrain")
     tools = RepoBrainTools(root)
     for name in (
-        "index_repo", "search_project", "explain_project", "explain_file", "find_symbol",
+        "index_repo", "search_project", "explain_project", "project_brief", "explain_file", "find_symbol",
         "trace_symbol", "trace_config", "trace_data_flow", "impact_analysis",
         "docs_for_code", "code_for_docs", "write_agent_memory", "read_agent_memory",
     ):

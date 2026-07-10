@@ -1,60 +1,68 @@
 # Next Session Prompt
 
 Copy-paste the prompt below to start the next agent session. It scopes the
-session to M11 (session-start briefing), the top priority under Suggested
-Next Steps in `AGENT_HANDOFF.md`.
+session to M12 (freshness automation), the highest-priority undelivered item
+under Suggested Next Steps in `AGENT_HANDOFF.md`.
 
 ```text
 You are continuing work on RepoBrain, a local-first second brain for AI
 coding agents.
 
-Start by reading AGENT_HANDOFF.md in full, then prd.md sections 3, 6, and 31,
-and DECISIONS.md D14-D21. Pull the latest main before creating a branch.
+Start by reading AGENT_HANDOFF.md in full, especially Known Pitfalls, then
+prd.md sections 3, 5.6, 6, 16, and 31, and DECISIONS.md D12 and D21-D22. Pull
+the latest main before creating a branch.
 
-Your milestone is M11: Session-start briefing ("push, don't pull"), the top
-item under Suggested Next Steps in AGENT_HANDOFF.md. Agents don't call MCP
-tools unprompted, so RepoBrain must deliver orientation to the agent at
-session start with zero agent behavior change.
+Your milestone is M12: Freshness automation. M11 warns when a brief is stale;
+M12 must safely repair small diffs before any query serves misleading facts
+and provide optional Git lifecycle hooks for larger changes.
 
 Implement:
-1. A `repobrain brief` CLI command (and matching `project_brief` MCP tool)
-   that emits a token-budgeted orientation pack built entirely from existing
-   graph queries and agent memory: project purpose, main subsystems,
-   entrypoints, key routes and config, active assumptions, open questions,
-   and the most recent memory entries.
-2. A `--budget N` option (approximate tokens; a chars/4 heuristic is fine —
-   document the choice). Sections must degrade gracefully in a fixed
-   priority order as the budget shrinks; never truncate mid-fact.
-3. Every fact in the brief must keep provenance (path:line) — same
-   source-grounding rules as all other output. --json and plain-text modes.
-4. A staleness guard: if indexed state no longer matches the working tree
-   (reuse the existing size+mtime diff), say so at the top of the brief and
-   report how many files are out of date. Do not silently serve stale facts.
-5. `repobrain install-agent` (minimal version): writes a SessionStart hook
-   and CLAUDE.md snippet into the target repo so Claude Code injects the
-   brief automatically. Idempotent; never overwrite human-authored content.
-6. Tests: unit tests for budget degradation and staleness detection, plus
-   fixture-repo and self-hosting coverage (the brief for RepoBrain itself
-   must mention its own purpose and at least one real subsystem).
+1. A shared query freshness gate used by every read-only CLI query and every
+   read-only MCP query. It must compare the configured working tree to indexed
+   state before executing the query and return/report a consistent freshness
+   result. Do not duplicate the gate across CLI and MCP implementations.
+2. Auto-reindex-on-query for small diffs, enabled by default. Define a
+   conservative, documented threshold using changed/added/deleted file count
+   and total changed bytes. Reuse the existing incremental Indexer; do not
+   create a second indexing path.
+3. For diffs over the threshold, do not serve stale facts silently and do not
+   launch an unexpectedly expensive rebuild. Return a clear actionable result
+   telling the caller to run `repobrain index`, including counts and threshold
+   values. Provide an explicit per-command opt-out for automation where an
+   agent needs a read-only check.
+4. Ensure `repobrain brief` and `project_brief` can never return stale facts:
+   small diffs are repaired first; large diffs produce only the freshness
+   warning/error envelope, not the old brief sections.
+5. Extend `repobrain install-agent` with optional, idempotent local git
+   post-commit and post-merge hooks that run incremental indexing. Preserve
+   existing hooks by using a RepoBrain-owned executable hook plus a safe
+   dispatcher strategy; never overwrite human hook content. Add uninstall or
+   exact removal for artifacts RepoBrain owns.
+6. Tests: threshold boundaries, additions/changes/deletions, CLI/MCP parity,
+   brief non-staleness, failure atomicity, hook coexistence/idempotency/removal,
+   fixture repositories, and self-hosting. Assert that a failed auto-index
+   never causes a query to serve stale graph facts.
 
 Constraints:
 - No external hosted API requirements; everything offline and deterministic.
-- Reuse repobrain/graph/queries.py — do not fork query logic into the CLI or
-  MCP layers (this drift was a review finding on PR #2).
-- Read the Known Pitfalls section of AGENT_HANDOFF.md before touching
-  indexing or edges.
+- Reuse scanner, incremental diff, Indexer, graph queries, and M11 briefing;
+  do not fork query or indexing logic into CLI/MCP layers.
+- Preserve D12's known size+mtime tradeoff unless a measured replacement is
+  explicitly documented in DECISIONS.md.
+- Keep query behavior source-grounded and JSON-safe, with matching semantics
+  across CLI and MCP.
+- Read Known Pitfalls before changing transaction order or reconciliation.
 
 When done: run the full test suite, update AGENT_HANDOFF.md and DECISIONS.md,
 and report what changed, how to run it, what tests pass, known limitations,
-and the recommended next milestone (expected: M12 freshness automation).
+and the recommended next milestone (expected: M13 diff-aware change context).
 ```
 
 ## Scoping notes
 
-- A minimal `install-agent` is pulled forward from the distribution item
-  (Suggested Next Steps #6) because a brief nobody wires up delivers no
-  value — distribution of the brief is part of the feature.
-- The staleness *check* (not auto-reindex) is folded in from M12: serving a
-  stale brief on day one would undermine trust in exactly the way the
-  handoff warns about. Full freshness automation (auto-reindex-on-query,
-  git hooks) remains M12.
+- M12 automates freshness only for a single already-initialized repository;
+  multi-repo orchestration remains a deliberate non-goal.
+- Hook installation is optional because teams may already manage hooks with a
+  framework. Coexistence and exact ownership are acceptance requirements.
+- The next prompt should scope M13 to working-diff/branch change context,
+  impacted symbols, recommended tests, and MENTIONS-based stale-doc detection.

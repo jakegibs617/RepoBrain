@@ -7,6 +7,8 @@ from pathlib import Path
 import click
 
 from .config import CONFIG_FILENAME, REPOBRAIN_DIR, RepoBrainConfig
+from .agent_install import install_agent as run_install_agent
+from .briefing import DEFAULT_BUDGET, MINIMUM_BUDGET, project_brief
 from .graph.queries import explain_file as run_explain_file
 from .graph.queries import code_for_docs as run_code_for_docs
 from .graph.queries import docs_for_code as run_docs_for_code
@@ -128,6 +130,31 @@ def status(path: str, as_json: bool) -> None:
     click.echo("\nEdges by type")
     for type_, count in edge_counts.items():
         click.echo(f"  {type_:<20} {count}")
+
+
+@main.command("brief")
+@click.option("--budget", type=click.IntRange(min=MINIMUM_BUDGET), default=DEFAULT_BUDGET,
+              show_default=True, help="Approximate token budget (ceil(chars/4)).")
+@click.option("--path", "path", type=click.Path(exists=True, file_okay=False), default=".",
+              show_default=True, help="Repository root whose database to query.")
+@click.option("--json", "as_json", is_flag=True, help="Machine-readable output.")
+def brief(budget: int, path: str, as_json: bool) -> None:
+    """Emit a compact, grounded orientation pack for a new agent session."""
+    root = _resolve_root(path)
+    with _open_store(root) as store:
+        result = project_brief(root, store, budget=budget)
+    click.echo(json.dumps(result, indent=2) if as_json else result["text"], nl=as_json)
+
+
+@main.command("install-agent")
+@click.argument("path", type=click.Path(exists=True, file_okay=False), default=".")
+def install_agent(path: str) -> None:
+    """Install an idempotent Claude Code SessionStart brief hook."""
+    try:
+        result = run_install_agent(_resolve_root(path))
+    except ValueError as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(json.dumps(result, indent=2))
 
 
 @main.command()

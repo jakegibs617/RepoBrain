@@ -7,6 +7,7 @@ that only appear when they collaborate on a real repository.
 from pathlib import Path
 
 from repobrain.graph.queries import code_for_docs, docs_for_code, explain_file, find_symbol
+from repobrain.briefing import project_brief
 from repobrain.graph.store import GraphStore
 from repobrain.indexing.indexer import Indexer
 from repobrain.retrieval.keyword import search
@@ -50,6 +51,11 @@ def test_repobrain_understands_its_own_repository(tmp_path):
             store, "AGENT_HANDOFF.md", heading="Current Architecture Understanding"
         )
         assert any(item["path"] == "repobrain/indexing/indexer.py" for item in code)
+
+        brief = project_brief(PROJECT_ROOT, store, budget=1200)
+        assert "local-first" in brief["text"].lower()
+        assert "coding agents" in brief["text"].lower()
+        assert "repobrain.cli [Module]" in brief["text"]
 
         unchanged = indexer.index(PROJECT_ROOT)
         assert unchanged.files_changed == 0
