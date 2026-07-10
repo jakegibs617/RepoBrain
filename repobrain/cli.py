@@ -8,10 +8,17 @@ import click
 
 from .config import CONFIG_FILENAME, REPOBRAIN_DIR, RepoBrainConfig
 from .graph.queries import explain_file as run_explain_file
+from .graph.queries import code_for_docs as run_code_for_docs
+from .graph.queries import docs_for_code as run_docs_for_code
 from .graph.queries import find_symbol as run_find_symbol
+from .graph.queries import impact_analysis as run_impact_analysis
+from .graph.queries import trace_data_flow as run_trace_data_flow
+from .graph.queries import trace_config as run_trace_config
 from .graph.store import GraphStore
 from .indexing.indexer import Indexer, RepoRootMismatchError
+from .memory import read_agent_memory, write_agent_memory
 from .retrieval.keyword import search as keyword_search
+from .reporting import generate_report, project_overview
 
 
 def _resolve_root(path: str) -> Path:
@@ -184,9 +191,87 @@ def find_symbol(name: str, exact: bool, limit: int, path: str, as_json: bool) ->
             click.echo(f"   {detail}")
 
 
+@main.command("docs-for-code")
+@click.argument("target")
+@click.option("--limit", type=click.IntRange(min=1), default=50, show_default=True)
+@click.option("--path", "path", type=click.Path(exists=True, file_okay=False), default=".",
+              show_default=True, help="Repository root whose database to query.")
+@click.option("--json", "as_json", is_flag=True, help="Machine-readable output.")
+def docs_for_code(target: str, limit: int, path: str, as_json: bool) -> None:
+    """Find Markdown sections that reference a code file or unique symbol."""
+    with _open_store(_resolve_root(path)) as store:
+        results = run_docs_for_code(store, target, limit=limit)
+
+    if as_json:
+        click.echo(json.dumps(results, indent=2))
+        return
+    if not results:
+        click.echo("No documentation references found.")
+        return
+    for i, result in enumerate(results, 1):
+        line = f":{result['start_line']}" if result["start_line"] else ""
+        click.echo(
+            f"{i}. {result['doc_path']}{line}  [{result['doc_type']}]  "
+            f"{result['section']}"
+        )
+        click.echo(
+            f"   {result['reference']} -> {result['target_name']}  "
+            f"[{result['target_type']}]  conf={result['confidence']:.2f}"
+        )
+
+
+@main.command("code-for-docs")
+@click.argument("doc_path")
+@click.option("--heading", default=None, help="Only references in this heading.")
+@click.option("--limit", type=click.IntRange(min=1), default=50, show_default=True)
+@click.option("--path", "path", type=click.Path(exists=True, file_okay=False), default=".",
+              show_default=True, help="Repository root whose database to query.")
+@click.option("--json", "as_json", is_flag=True, help="Machine-readable output.")
+def code_for_docs(
+    doc_path: str, heading: str | None, limit: int, path: str, as_json: bool
+) -> None:
+    """Find code and graph nodes referenced by a Markdown document."""
+    with _open_store(_resolve_root(path)) as store:
+        results = run_code_for_docs(store, doc_path, heading=heading, limit=limit)
+
+    if as_json:
+        click.echo(json.dumps(results, indent=2))
+        return
+    if not results:
+        click.echo("No related code found.")
+        return
+    for i, result in enumerate(results, 1):
+        source_line = f":{result['start_line']}" if result["start_line"] else ""
+        target_line = (
+            f":{result['target_start_line']}" if result["target_start_line"] else ""
+        )
+        click.echo(
+            f"{i}. {result['path']}{target_line}  [{result['type']}]  {result['name']}"
+        )
+        click.echo(
+            f"   {result['source_path']}{source_line} · {result['section']} · "
+            f"`{result['reference']}`  conf={result['confidence']:.2f}"
+        )
+
+
 @main.group()
 def explain() -> None:
     """Explain parts of the indexed repository."""
+
+
+@explain.command("project")
+@click.option("--path", "path", type=click.Path(exists=True, file_okay=False), default=".")
+@click.option("--json", "as_json", is_flag=True)
+def explain_project(path: str, as_json: bool) -> None:
+    """Show a source-grounded project overview."""
+    with _open_store(_resolve_root(path)) as store:
+        info = project_overview(store)
+    if as_json:
+        click.echo(json.dumps(info, indent=2)); return
+    click.echo(f"Repository: {info['root']}")
+    click.echo(f"Files: {info['files']}  Nodes: {sum(info['nodes_by_type'].values())}  Edges: {sum(info['edges_by_type'].values())}")
+    click.echo("Languages: " + ", ".join(f"{k}={v}" for k,v in info["languages"].items()))
+    click.echo("Entrypoints: " + (", ".join(x["name"] for x in info["entrypoints"]) or "none detected"))
 
 
 def _echo_symbol_tree(entries: list[dict], depth: int) -> None:
@@ -293,6 +378,173 @@ def explain_file(filepath: str, path: str, as_json: bool) -> None:
             click.echo(f"  {d['path']}  [{d['type']}] {d['name']}")
     else:
         click.echo("  none yet")
+
+
+@main.group()
+def trace() -> None:
+    """Trace relationships across the indexed repository."""
+
+
+@trace.command("config")
+@click.argument("name")
+@click.option("--path", "path", type=click.Path(exists=True, file_okay=False), default=".",
+              show_default=True, help="Repository root whose database to query.")
+@click.option("--json", "as_json", is_flag=True, help="Machine-readable output.")
+def trace_config(name: str, path: str, as_json: bool) -> None:
+    """Trace config or environment variable NAME to definitions and code reads."""
+    with _open_store(_resolve_root(path)) as store:
+        result = run_trace_config(store, name)
+    if as_json:
+        click.echo(json.dumps(result, indent=2))
+        return
+    if not result["definitions"] and not result["usages"]:
+        click.echo(f"No definitions or usages found for {name}.")
+        return
+    click.echo(f"Config trace: {name}")
+    click.echo("\nDefinitions")
+    if result["definitions"]:
+        for item in result["definitions"]:
+            line = f":{item['start_line']}" if item["start_line"] else ""
+            click.echo(f"  {item['path']}{line}  [{item['type']}]  {item['qualified_name']}")
+    else:
+        click.echo("  none")
+    click.echo("\nRuntime usages")
+    if result["usages"]:
+        for item in result["usages"]:
+            line = f":{item['start_line']}" if item["start_line"] else ""
+            click.echo(f"  {item['path']}{line}  [{item['type']}]  {item['qualified_name']}")
+    else:
+        click.echo("  none")
+
+
+@trace.command("data-flow")
+@click.argument("start")
+@click.option("--depth", type=click.IntRange(0, 10), default=4)
+@click.option("--direction", type=click.Choice(["in", "out", "both"]), default="both")
+@click.option("--path", "path", type=click.Path(exists=True, file_okay=False), default=".")
+@click.option("--json", "as_json", is_flag=True)
+def trace_data_flow(start: str, depth: int, direction: str, path: str, as_json: bool) -> None:
+    """Trace a route, event, file, or symbol through the graph."""
+    with _open_store(_resolve_root(path)) as store:
+        result = run_trace_data_flow(store, start, depth=depth, direction=direction)
+    if result is None:
+        raise click.ClickException(f"No unique indexed target found for '{start}'.")
+    if as_json:
+        click.echo(json.dumps(result, indent=2)); return
+    click.echo(f"Start: {result['start']['name']} [{result['start']['type']}]")
+    by_id = {n["id"]: n for n in result["nodes"]}
+    for e in result["edges"]:
+        click.echo(f"  d{e['depth']} {by_id[e['source']]['name']} -{e['type']}-> {by_id[e['target']]['name']} ({e['path']}:{e['start_line'] or '?'}, conf={e['confidence']:.2f})")
+
+
+@main.command("impact")
+@click.argument("target")
+@click.option("--change-type", default="modify")
+@click.option("--depth", type=click.IntRange(1, 10), default=3)
+@click.option("--path", "path", type=click.Path(exists=True, file_okay=False), default=".")
+@click.option("--json", "as_json", is_flag=True)
+def impact(target: str, change_type: str, depth: int, path: str, as_json: bool) -> None:
+    """Estimate likely blast radius for a file or symbol change."""
+    with _open_store(_resolve_root(path)) as store:
+        result = run_impact_analysis(store, target, change_type, depth)
+    if result is None:
+        raise click.ClickException(f"No unique indexed target found for '{target}'.")
+    if as_json:
+        click.echo(json.dumps(result, indent=2)); return
+    for title,key in (("High-confidence impact","high_confidence"),("Medium-confidence impact","medium_confidence"),("Low-confidence possible impact","low_confidence"),("Recommended tests","recommended_tests"),("Docs likely needing updates","docs_likely_needing_updates")):
+        click.echo(f"\n{title}")
+        for item in result[key]: click.echo(f"  {item['node']['path']} [{item['node']['type']}] via {item['via']} conf={item['confidence']:.2f}")
+        if not result[key]: click.echo("  none")
+
+
+@main.command("report")
+@click.option("--path", "path", type=click.Path(exists=True, file_okay=False), default=".")
+def report(path: str) -> None:
+    """Generate Markdown and HTML graph reports."""
+    root = _resolve_root(path)
+    with _open_store(root) as store:
+        md, html_path = generate_report(store, root)
+    click.echo(f"Generated {md}")
+    click.echo(f"Generated {html_path}")
+
+
+@main.group()
+def memory() -> None:
+    """Read and write durable agent handoff memory."""
+
+
+@memory.command("read")
+@click.option("--topic", default=None, help="Only sessions mentioning this topic.")
+@click.option("--limit", type=click.IntRange(min=1), default=10, show_default=True)
+@click.option("--path", "path", type=click.Path(exists=True, file_okay=False), default=".",
+              show_default=True, help="Repository root.")
+@click.option("--json", "as_json", is_flag=True, help="Machine-readable output.")
+def memory_read(topic: str | None, limit: int, path: str, as_json: bool) -> None:
+    """Read recent durable agent sessions."""
+    result = read_agent_memory(_resolve_root(path), topic=topic, limit=limit)
+    if as_json:
+        click.echo(json.dumps(result, indent=2))
+        return
+    if not result["entries"]:
+        click.echo("No agent memory found.")
+        return
+    for entry in result["entries"]:
+        click.echo(f"{entry['created_at']}  {entry['summary']}")
+        for label, key in (("decisions", "decisions"), ("assumptions", "assumptions"),
+                           ("questions", "open_questions"), ("next", "next_steps")):
+            if entry.get(key):
+                click.echo(f"  {label}: {'; '.join(entry[key])}")
+
+
+@memory.command("write")
+@click.option("--from-file", type=click.Path(exists=True, dir_okay=False), default=None,
+              help="JSON object or Markdown/text to use as the session summary.")
+@click.option("--summary", default=None, help="Session summary.")
+@click.option("--decision", "decisions", multiple=True)
+@click.option("--assumption", "assumptions", multiple=True)
+@click.option("--open-question", "open_questions", multiple=True)
+@click.option("--changed-file", "changed_files", multiple=True)
+@click.option("--next-step", "next_steps", multiple=True)
+@click.option("--path", "path", type=click.Path(exists=True, file_okay=False), default=".",
+              show_default=True, help="Repository root.")
+def memory_write(from_file: str | None, summary: str | None, decisions: tuple[str, ...],
+                 assumptions: tuple[str, ...], open_questions: tuple[str, ...],
+                 changed_files: tuple[str, ...], next_steps: tuple[str, ...], path: str) -> None:
+    """Append a structured session to graph memory and AGENT_HANDOFF.md."""
+    payload: dict = {}
+    if from_file:
+        content = Path(from_file).read_text(encoding="utf-8")
+        try:
+            parsed = json.loads(content)
+            payload = parsed if isinstance(parsed, dict) else {"summary": content}
+        except json.JSONDecodeError:
+            payload = {"summary": content.strip()}
+    payload.update({key: value for key, value in {
+        "summary": summary, "decisions": decisions, "assumptions": assumptions,
+        "open_questions": open_questions, "changed_files": changed_files,
+        "next_steps": next_steps,
+    }.items() if value})
+    if not payload.get("summary"):
+        raise click.UsageError("Provide --summary or --from-file.")
+    try:
+        result = write_agent_memory(_resolve_root(path), **payload)
+    except (TypeError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(json.dumps(result, indent=2))
+
+
+@main.command()
+@click.option("--path", "path", type=click.Path(exists=True, file_okay=False), default=".",
+              show_default=True, help="Repository root served by MCP.")
+def mcp(path: str) -> None:
+    """Run the local RepoBrain MCP server over stdio."""
+    try:
+        from .mcp_server import run_server
+        run_server(_resolve_root(path))
+    except ImportError as exc:
+        raise click.ClickException(
+            "MCP support is not installed. Run `pip install 'repobrain[mcp]'`."
+        ) from exc
 
 
 if __name__ == "__main__":

@@ -198,6 +198,20 @@ class GraphStore:
             """
         )
 
+    def delete_edges(self, type_: str, extractor: str | None = None) -> None:
+        """Delete a family of edges, optionally scoped to its owner.
+
+        Reconcilers use this to replace only the derived facts they own,
+        without reaching through the persistence boundary with raw SQL.
+        """
+        if extractor is None:
+            self.conn.execute("DELETE FROM edges WHERE type = ?", (str(type_),))
+        else:
+            self.conn.execute(
+                "DELETE FROM edges WHERE type = ? AND extractor = ?",
+                (str(type_), extractor),
+            )
+
     def touch_paths(self, paths: Iterable[str]) -> None:
         """Refresh last_seen_at for nodes/edges of unchanged files."""
         now = _now()

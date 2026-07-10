@@ -3,12 +3,10 @@
 ## Project Summary
 
 RepoBrain: a local-first second brain for AI coding agents (see `prd.md`).
-Milestones 1–2 delivered the package skeleton, SQLite graph storage, scanner,
-incremental indexing, Markdown parser, FTS5 search, and the `init` / `index` /
-`status` / `search` CLI. **This session delivered Milestone 3**: tree-sitter
-code symbol parsing, import/call/env-read edges, test-file detection, the
-`find-symbol` and `explain file` commands, a reusable graph-query module, and
-the `node_api_app` fixture.
+All ten PRD milestones are now implemented. Milestones 1–4 delivered storage,
+incremental indexing, code/docs parsing, search, and documentation mapping.
+Milestones 5–10 add config adapters and tracing, route/data-flow analysis,
+impact analysis, MCP tools, durable agent memory, and Markdown/HTML reports.
 
 ## Current Architecture Understanding
 
@@ -27,6 +25,10 @@ the `node_api_app` fixture.
   transaction after upserts (cross-file name-match CALLS), before the orphan
   edge sweep — which also removes any deterministically-computed edge targets
   that turned out not to exist.
+- `repobrain/indexing/doc_references.py` — **new**: `MarkdownMentionReconciler`
+  resolves structured Markdown references against the complete persisted graph.
+  It globally rebuilds its own `MENTIONS` edges after relevant changes so
+  incremental runs converge when either side of a relationship changes.
 - `repobrain/parsers/code_treesitter.py` — **new**: `CodeParser` +
   per-language `_Extractor` subclasses (Python, JS/TS shared, PHP, Bash, Go,
   Java, Ruby). One compiled tree-sitter Query per grammar (lru_cache); the
@@ -54,15 +56,21 @@ the `node_api_app` fixture.
 
 ## Recent Changes
 
-- Added `tree-sitter` + `tree-sitter-language-pack` dependencies.
-- New code parser + indexer hooks as described above.
-- `tests/test_code_parser.py` (extraction, imports, calls, env convergence,
-  JS/PHP/Bash, broken-file degradation) and `tests/test_queries.py`
-  (find_symbol, explain_file); `node_app` fixture in conftest. 63 tests total.
+- Markdown nodes now store structured link and inline-code reference candidates.
+- Exact local paths and unambiguous symbols become source-grounded `MENTIONS`
+  edges with confidence and inference provenance.
+- Added `tests/test_doc_code_mapping.py` covering forward/reverse traversal,
+  section provenance, ambiguity, and incremental convergence.
+- Added a self-hosting quality gate that indexes RepoBrain itself and verifies
+  symbol search, file explanation, doc/code traversal, and no-change
+  incremental behavior.
+- Added a complex lifecycle scenario covering ambiguity, target-side changes,
+  delayed documentation updates, stale-edge cleanup, and incremental
+  convergence, plus a roadmap-wide evaluation strategy. 73 tests total.
 
 ## Decisions
 
-See `DECISIONS.md` D14–D19 for this session.
+See `DECISIONS.md` D20 for this session.
 
 ## Assumptions
 
@@ -101,14 +109,9 @@ See `DECISIONS.md` D14–D19 for this session.
 
 ## Suggested Next Steps
 
-1. **Milestone 4**: doc-to-code purpose mapping — the Markdown parser already
-   stores links/code blocks in section metadata; emit MENTIONS edges and the
-   `explain file` "Referencing docs" section will light up automatically.
-2. **Milestone 5**: YAML/config adapters + `trace config` — EnvVar nodes are
-   already repo-global, so `.env.example`/compose definitions can attach
-   SETS_ENV/DECLARES_CONFIG edges to the same nodes the code parser reads.
-3. Consider a `trace_symbol`-style query in `graph/queries.py` (callers +
-   callees + tests at depth N) ahead of the M8 MCP tools.
+1. Add framework adapters for dynamic receiver calls and richer ORM/table flow.
+2. Profile indexing and traversal on repositories above 1,000 files.
+3. Add protocol-level MCP integration tests in addition to direct tool tests.
 
 ## Source-Grounded Notes
 

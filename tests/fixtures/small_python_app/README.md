@@ -6,7 +6,7 @@ A tiny flask-style user API used as a RepoBrain test fixture.
 
 The `POST /api/users` route is declared in `app/api/routes.py`. It delegates to
 the handler in `app/handlers/user_handler.py`, which calls
-`app/services/user_service.py`, which persists through
+`app/services/user_service.py` via `create_user`, which persists through
 `app/repositories/user_repository.py`.
 
 ## Database

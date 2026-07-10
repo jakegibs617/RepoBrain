@@ -77,7 +77,10 @@ def test_explain_file_python(indexer, store, small_app):
 
     tests = {t["path"] for t in info["tests"]}
     assert "tests/test_users.py" in tests
-    assert info["docs"] == []  # no MENTIONS edges until M4
+    assert any(
+        doc["path"] == "README.md" and doc["name"] == "Architecture"
+        for doc in info["docs"]
+    )
 
 
 def test_explain_file_symbol_tree_nests_methods(indexer, store, small_app):

@@ -10,6 +10,7 @@ from ..config import RepoBrainConfig
 from ..graph.store import GraphStore
 from ..parsers.base import ParseResult, ParserRegistry, default_registry
 from .incremental import compute_diff
+from .doc_references import MarkdownMentionReconciler
 from .scanner import ScannedFile, scan
 
 
@@ -51,10 +52,12 @@ class Indexer:
         store: GraphStore,
         config: RepoBrainConfig | None = None,
         registry: ParserRegistry | None = None,
+        mention_reconciler: MarkdownMentionReconciler | None = None,
     ):
         self.store = store
         self.config = config or RepoBrainConfig()
         self.registry = registry or default_registry()
+        self.mention_reconciler = mention_reconciler or MarkdownMentionReconciler()
 
     def index(self, root: str | Path, incremental: bool = True) -> IndexStats:
         """Index `root`. Incremental runs only re-parse changed/added files."""
@@ -120,6 +123,12 @@ class Indexer:
                 edge.commit_hash = commit
             self.store.upsert_edges(extra_edges)
             combined.edges.extend(extra_edges)
+            if diff.to_parse or diff.deleted:
+                mention_edges = self.mention_reconciler.reconcile(self.store)
+                for edge in mention_edges:
+                    edge.commit_hash = commit
+                self.store.upsert_edges(mention_edges)
+                combined.edges.extend(mention_edges)
             self._cleanup_directories(diff)
             self.store.delete_orphan_edges()
             stats.nodes_created = len({n.id for n in combined.nodes})

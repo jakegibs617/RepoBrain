@@ -21,6 +21,9 @@ dependencies = [
 dev = [
     "pytest>=8.0",
 ]
+mcp = [
+    "mcp>=1.0,<2",
+]
 
 [project.scripts]
 repobrain = "repobrain.cli:main"

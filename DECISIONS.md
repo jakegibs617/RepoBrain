@@ -212,3 +212,41 @@ README table). Structs/interfaces/enums/traits/Ruby modules are emitted as
 Tree-sitter Query objects and parsers are compiled once per language
 (lru_cache) and reused across files; grammars come from
 `tree-sitter-language-pack` (no compilation step, no network at runtime).
+
+## 2026-07-09 — Milestone 4 (Markdown purpose mapping)
+
+### D20: Parse reference candidates locally; reconcile MENTIONS globally
+
+`MarkdownParser` extracts links and inline-code spans as structured reference
+candidates but does not resolve them. Resolution depends on the complete graph,
+so `MarkdownMentionReconciler` runs inside the index transaction after node
+upserts and rebuilds only the `MENTIONS` edges it owns. This global rebuild is
+deliberate: an unchanged document must gain or lose a relationship when a code
+file or symbol is added, renamed, deleted, or becomes ambiguous.
+
+The matching ladder favors precision: exact normalized links target File nodes
+(confidence 1.0), backticked paths target File nodes (0.95), exact qualified
+symbols target symbol nodes (0.9), and globally unique bare symbol names are
+inferred at 0.75. Fuzzy text and ambiguous names create no edge. Route literals
+remain unresolved until Milestone 6 creates real Route or Endpoint nodes.
+
+The reconciler is an explicit Indexer collaborator, while `GraphStore` remains
+the persistence boundary through a narrow `delete_edges` operation. This keeps
+syntax extraction, cross-file resolution, storage, and CLI rendering separate
+without introducing a speculative class hierarchy or dependency-injection
+framework.
+
+## 2026-07-09 — Milestones 5–10 (MVP completion)
+
+### D21: Deterministic adapters and reusable query functions remain the core boundary
+
+Config, route, memory, data-flow, impact, and reporting features produce or
+traverse the same SQLite node/edge model. CLI and MCP layers render plain
+JSON-safe dictionaries returned by reusable functions instead of duplicating
+graph logic. Route/config reconcilers resolve cross-file identities only after
+nodes are persisted, preserving incremental convergence and orphan-edge safety.
+
+Impact results are confidence-bucketed evidence, not correctness claims.
+Structural containment hops do not consume data-flow depth, allowing a route
+to cross handler/service/repository module boundaries while keeping each
+reported relationship source-grounded.

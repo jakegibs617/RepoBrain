@@ -1,0 +1,9 @@
+name: tests
+on: push
+jobs:
+  test:
+    env:
+      DATABASE_URL: sqlite:///test.db
+    steps:
+      - name: Run tests
+        run: pytest

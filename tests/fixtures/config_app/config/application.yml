@@ -1,0 +1,4 @@
+database:
+  DATABASE_URL: postgres://localhost/app
+logging:
+  level: info

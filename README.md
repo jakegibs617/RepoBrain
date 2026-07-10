@@ -8,7 +8,7 @@ things live, and what connects to what.
 
 Everything runs offline. No API keys, no network calls.
 
-## Current status (Milestones 1–3)
+## Current status (Milestones 1–10 complete)
 
 Implemented:
 
@@ -31,9 +31,21 @@ Implemented:
   edges, TestFile/TestCase detection, and symbol names in full-text search
 - `find-symbol` and `explain file` CLI commands backed by reusable graph
   queries (`repobrain/graph/queries.py`)
+- Markdown-to-code purpose mapping: local links and backticked file/symbol
+  references become source-grounded `MENTIONS` edges; ambiguous symbol names
+  are deliberately skipped
+- Bidirectional `docs-for-code` and `code-for-docs` queries, also surfaced in
+  the "Referencing docs" section of `explain file`
+- YAML and dotenv parsing with GitHub Actions, Docker Compose, and Kubernetes
+  adapters; config definitions connect to code-level environment reads
+- HTTP route extraction, grounded route-to-handler edges, data-flow tracing,
+  and confidence-bucketed impact analysis
+- A local FastMCP server exposing all 13 core tools
+- Append-only structured agent memory mirrored into Markdown handoff files
+- Grounded project overviews and Markdown/HTML graph reports
 
-Not yet implemented: YAML/config adapters, doc-to-code purpose mapping,
-data-flow and impact analysis, the MCP server, agent memory, and reports.
+The ten-milestone MVP is implemented. Dynamic dispatch and framework-specific
+runtime wiring remain intentionally conservative; see Limitations.
 
 ### Supported languages (code parsing)
 
@@ -52,6 +64,8 @@ Unresolvable or third-party imports are stored as `external_imports` metadata
 on the module node — never as dangling graph nodes.
 
 ## Install
+
+Prefer a visual walkthrough? Open [`setup/index.html`](setup/index.html) in your browser for the interactive setup guide.
 
 Requires Python 3.11+ and [uv](https://docs.astral.sh/uv/).
 
@@ -87,6 +101,28 @@ uv pip install -p .venv/bin/python -e ".[dev]"
 # explain a file: symbols, imports/imported-by, callers/callees, env vars,
 # related tests, referencing docs (--json for machine output)
 .venv/bin/repobrain explain file app/services/user_service.py --path tests/fixtures/small_python_app
+
+# navigate between documentation and implementation
+.venv/bin/repobrain docs-for-code app/services/user_service.py --path tests/fixtures/small_python_app
+.venv/bin/repobrain docs-for-code create_user --path tests/fixtures/small_python_app
+.venv/bin/repobrain code-for-docs README.md --heading Architecture --path tests/fixtures/small_python_app
+
+# trace config and runtime flow, then estimate change impact
+.venv/bin/repobrain trace config DATABASE_URL --path tests/fixtures/small_python_app
+.venv/bin/repobrain trace data-flow "POST /api/users" --path tests/fixtures/small_python_app
+.venv/bin/repobrain impact app/services/user_service.py --path tests/fixtures/small_python_app
+
+# grounded overview and human-readable reports
+.venv/bin/repobrain explain project --json
+.venv/bin/repobrain report
+
+# durable agent memory
+.venv/bin/repobrain memory write --summary "Implemented auth flow" --next-step "Add expiry tests"
+.venv/bin/repobrain memory read --topic auth
+
+# MCP (install the optional extra first)
+uv pip install -p .venv/bin/python -e ".[mcp]"
+.venv/bin/repobrain mcp --path .
 ```
 
 Each database is pinned to the repository root it indexes (stored in a `meta`
@@ -152,6 +188,37 @@ Example `find-symbol` output:
 Tests copy the fixture repos in `tests/fixtures/` into temp directories, so
 they never mutate the checked-in fixtures.
 
+### Dogfooding RepoBrain
+
+RepoBrain's integration suite indexes this repository into a temporary
+database and verifies that it can find its own symbols, explain internal
+dependencies, connect architecture docs to implementation, and complete a
+no-change incremental run without rewriting graph facts:
+
+```bash
+.venv/bin/pytest tests/test_self_hosting.py -v
+```
+
+For interactive inspection, build the gitignored local graph and query it:
+
+```bash
+.venv/bin/repobrain index .
+.venv/bin/repobrain find-symbol MarkdownMentionReconciler --exact
+.venv/bin/repobrain explain file repobrain/indexing/doc_references.py
+.venv/bin/repobrain docs-for-code repobrain/indexing/doc_references.py
+.venv/bin/repobrain code-for-docs AGENT_HANDOFF.md
+```
+
+The broader capability, adversarial, and whole-system evaluation approach is
+documented in [`docs/EVALUATION_STRATEGY.md`](docs/EVALUATION_STRATEGY.md).
+
+Export the current local graph for the interactive companion page:
+
+```bash
+.venv/bin/python scripts/export_graph_html.py
+open setup/graph.html
+```
+
 ## Limitations
 
 - Gitignore support is a simple fnmatch-based subset: no `!negation`, no
@@ -172,6 +239,9 @@ they never mutate the checked-in fixtures.
 - Incremental runs only re-parse changed files, so a new function in file A
   will not gain inferred CALLS edges from an unchanged caller in file B until
   B changes (or a `--no-incremental` run).
+- Markdown mention matching is intentionally strict: exact local paths and
+  exact unique symbol names are linked; fuzzy text, ambiguous symbols,
+  external URLs, and route literals without a Route node are skipped.
 - Go/Java imports are recorded as module metadata only (resolving them needs
   module/package roots, deferred).
 - Empty directories produce no Directory nodes (directories are derived from
