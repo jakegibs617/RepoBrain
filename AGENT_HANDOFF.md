@@ -8,6 +8,17 @@ incremental indexing, code/docs parsing, search, and documentation mapping.
 Milestones 5–10 add config adapters and tracing, route/data-flow analysis,
 impact analysis, MCP tools, durable agent memory, and Markdown/HTML reports.
 
+## Delivery Status
+
+- PR #2, `feat: complete RepoBrain MVP (Milestones 3-10)`, was reviewed and
+  merged into `main` on 2026-07-10.
+- Merge commit: `6039214305c1f435fbe1b120d1dc1e1284c9a94b`.
+- Review fixed MCP/CLI query drift and confined MCP indexing to its configured
+  repository root before merge.
+- Final verification: 90 pytest tests passed; Python compilation and whitespace
+  checks were clean. GitHub reported a clean, mergeable PR with no configured
+  remote status checks.
+
 ## Current Architecture Understanding
 
 - `repobrain/graph/schema.py` — full NodeType/EdgeType enums, `Node`/`Edge`/
@@ -15,9 +26,9 @@ impact analysis, MCP tools, durable agent memory, and Markdown/HTML reports.
 - `repobrain/graph/store.py` — `GraphStore`: WAL SQLite, tables `nodes`,
   `edges`, `files`, `index_runs`, `meta` (repo-root pin), FTS5
   `content_fts(path, name, content, node_id UNINDEXED)`.
-- `repobrain/graph/queries.py` — **new**: reusable traversals returning plain
-  dicts (`find_symbol`, `explain_file`, `resolve_file_path`). The CLI is a
-  thin renderer over these; M8 MCP tools should call them directly.
+- `repobrain/graph/queries.py` — reusable traversals returning plain dicts
+  (`find_symbol`, `explain_file`, config/data-flow tracing, impact analysis,
+  and doc/code mapping). CLI and MCP layers call these shared queries.
 - `repobrain/indexing/indexer.py` — scan → diff → parse → single-transaction
   store. Two optional parser hooks (duck-typed via `getattr`):
   `begin_run(known_paths)` before parsing (import resolution needs the full
