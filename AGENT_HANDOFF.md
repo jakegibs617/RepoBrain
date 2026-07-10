@@ -3,13 +3,22 @@
 ## Project Summary
 
 RepoBrain: a local-first second brain for AI coding agents (see `prd.md`).
-All ten PRD milestones and post-MVP Milestone 11 are now implemented. Milestones 1–4 delivered storage,
+All ten PRD milestones and post-MVP Milestones 11–12 are now implemented. Milestones 1–4 delivered storage,
 incremental indexing, code/docs parsing, search, and documentation mapping.
 Milestones 5–10 add config adapters and tracing, route/data-flow analysis,
 impact analysis, MCP tools, durable agent memory, and Markdown/HTML reports.
 
 ## Delivery Status
 
+- M12 is implemented on `feat/m12-freshness-automation`: every read-only CLI
+  and MCP query passes through one freshness gate. Small diffs are repaired
+  incrementally; large, opted-out, or failed repairs refuse to serve stale
+  facts with a structured/actionable envelope.
+- `install-agent --git-hooks` adds marker-owned post-commit/post-merge
+  dispatch blocks and an owned index runner. `uninstall-agent` removes only
+  RepoBrain-owned settings, Markdown, runner, and dispatcher blocks.
+- M12 verification: 133 pytest tests passed; Python compilation and whitespace
+  checks were clean before review.
 - M11 is implemented on `feat/m11-session-start-briefing`: `repobrain brief`
   and the matching `project_brief` MCP tool produce a fixed-priority,
   source-grounded orientation pack under an approximate token budget.
@@ -66,7 +75,8 @@ impact analysis, MCP tools, durable agent memory, and Markdown/HTML reports.
   facts and structured memory. Sections degrade atomically in fixed priority
   order using `ceil(characters / 4)` as the documented token estimate.
 - `repobrain/freshness.py` — read-only working-tree comparison using the same
-  scanner configuration and size+mtime shortcut as incremental indexing.
+  scanner configuration and size+mtime shortcut as incremental indexing, plus
+  the M12 shared pre-query gate and conservative auto-index thresholds.
 - `repobrain/agent_install.py` — conservative merge of the RepoBrain
   SessionStart hook plus a marker-owned CLAUDE.md snippet.
 
@@ -96,7 +106,7 @@ impact analysis, MCP tools, durable agent memory, and Markdown/HTML reports.
 
 ## Decisions
 
-See `DECISIONS.md` D22 for the M11 session.
+See `DECISIONS.md` D23 for the M12 session.
 
 ## Assumptions
 
@@ -136,10 +146,13 @@ See `DECISIONS.md` D22 for the M11 session.
   indexing (D12), a same-size edit whose mtime is restored can evade it.
 - Brief budgets are approximate, not model-tokenizer exact. Facts are never
   cut mid-item, so a very small budget may omit whole lower-priority sections.
+- M12 counts the full current size of added/changed files and the last indexed
+  size of deleted files toward its byte threshold; it does not compute byte
+  deltas. Queries over either threshold deliberately fail closed.
 
 ## Suggested Next Steps
 
-A ready-to-use prompt for the next session (scoped to M12) is in
+A ready-to-use prompt for the next session (scoped to M13) is in
 `docs/NEXT_SESSION_PROMPT.md`.
 
 ### Product direction (post-MVP review, 2026-07-10)
@@ -156,7 +169,7 @@ priority order:
    open questions, recent memory), injectable via a Claude Code SessionStart
    hook or generated CLAUDE.md section. Zero agent behavior change required;
    makes the "fewer tokens" goal measurable.
-2. **M12 — Freshness automation.** A stale brain misleads and destroys trust.
+2. **M12 — Freshness automation.** **Delivered.** A stale brain misleads and destroys trust.
    Add a staleness check on every query (size+mtime diff is already cheap),
    auto-reindex-on-query for small diffs, and optional git post-commit /
    post-merge hooks. The brief in M11 must never be served stale.

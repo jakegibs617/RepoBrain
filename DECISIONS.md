@@ -269,3 +269,27 @@ size+mtime trust model as D12. M11 warns but never mutates; automatic repair is
 reserved for M12. Agent installation owns only one exact SessionStart command
 and a marker-delimited CLAUDE.md section, preserving unrelated JSON keys,
 hooks, and human-authored Markdown.
+
+## 2026-07-10 — Milestone 12 (freshness automation)
+
+### D23: Queries fail closed; only bounded stale diffs auto-repair
+
+Every read-only CLI and MCP surface calls the shared gate in
+`repobrain/freshness.py` before its graph query. A stale diff auto-indexes only
+when it contains at most 10 added/changed/deleted files and at most 256 KiB of
+changed content. Added and changed files contribute their current full size;
+deleted files contribute their last indexed size. Exact boundary values are
+allowed. This is conservative, deterministic, and avoids reading content a
+second time merely to estimate work.
+
+The opt-out (`--no-auto-index` / MCP `auto_index=false`) is non-mutating and
+does not mean "allow stale": it refuses the query. Threshold excess, index
+failure, and post-index residual staleness likewise return/raise an actionable
+freshness envelope before query code runs. This fail-closed rule is especially
+important for M11 briefs, which now either repair first or return no facts.
+
+Git lifecycle automation is optional. Installation owns a dedicated runner
+and only marker-delimited blocks inside post-commit/post-merge dispatchers;
+uninstall removes those exact artifacts while preserving human hooks and agent
+instructions. The runner uses the interpreter that performed installation and
+resolves the Git top-level at execution time.

@@ -5,7 +5,7 @@ import json
 import re
 from pathlib import Path
 
-from .freshness import check_freshness
+from .freshness import require_fresh
 from .graph.store import GraphStore
 from .memory import read_agent_memory
 
@@ -102,7 +102,13 @@ def _render(staleness: dict, sections: list[dict]) -> str:
     return "\n".join(lines) + "\n"
 
 
-def project_brief(root: str | Path, store: GraphStore, budget: int = DEFAULT_BUDGET) -> dict:
+def project_brief(
+    root: str | Path,
+    store: GraphStore,
+    budget: int = DEFAULT_BUDGET,
+    *,
+    auto_index: bool = True,
+) -> dict:
     """Build a brief whose approximate token count never exceeds ``budget``.
 
     Tokens use the documented deterministic chars/4 heuristic. Facts are added
@@ -111,7 +117,8 @@ def project_brief(root: str | Path, store: GraphStore, budget: int = DEFAULT_BUD
     if budget < MINIMUM_BUDGET:
         raise ValueError(f"budget must be at least {MINIMUM_BUDGET} tokens")
     root = Path(root).resolve()
-    freshness = check_freshness(root, store)
+    freshness_gate = require_fresh(root, store, auto_index=auto_index)
+    freshness = freshness_gate.get("after") or freshness_gate["before"]
     recent, assumptions, questions = _memory_sections(root)
     candidates = [
         ("Purpose", _purpose_facts(store)),
@@ -137,6 +144,7 @@ def project_brief(root: str | Path, store: GraphStore, budget: int = DEFAULT_BUD
         "budget": budget,
         "token_estimate": (len(text) + 3) // 4,
         "token_heuristic": "ceil(characters / 4)",
+        "freshness": freshness_gate,
         "staleness": freshness,
         "sections": selected,
         "text": text,

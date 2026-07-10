@@ -2,12 +2,14 @@
 from __future__ import annotations
 
 import json
+from contextlib import contextmanager
 from pathlib import Path
 
 import click
 
 from .config import CONFIG_FILENAME, REPOBRAIN_DIR, RepoBrainConfig
 from .agent_install import install_agent as run_install_agent
+from .agent_install import uninstall_agent as run_uninstall_agent
 from .briefing import DEFAULT_BUDGET, MINIMUM_BUDGET, project_brief
 from .graph.queries import explain_file as run_explain_file
 from .graph.queries import code_for_docs as run_code_for_docs
@@ -17,6 +19,7 @@ from .graph.queries import impact_analysis as run_impact_analysis
 from .graph.queries import trace_data_flow as run_trace_data_flow
 from .graph.queries import trace_config as run_trace_config
 from .graph.store import GraphStore
+from .freshness import FreshnessBlockedError, require_fresh
 from .indexing.indexer import Indexer, RepoRootMismatchError
 from .memory import read_agent_memory, write_agent_memory
 from .retrieval.keyword import search as keyword_search
@@ -27,15 +30,34 @@ def _resolve_root(path: str) -> Path:
     return Path(path).resolve()
 
 
-def _open_store(root: Path) -> GraphStore:
-    """Open the database that lives inside `root`'s own .repobrain/."""
+@contextmanager
+def _open_store(root: Path, *, auto_index: bool = True, gate: bool = True):
+    """Open a query-safe store, repairing small stale diffs before yielding."""
     config = RepoBrainConfig.load(root)
     db_path = root / config.db_path
     if not db_path.exists():
         raise click.ClickException(
             f"No RepoBrain database at {db_path}. Run `repobrain index {root}` first."
         )
-    return GraphStore(db_path)
+    store = GraphStore(db_path)
+    try:
+        if gate:
+            freshness = require_fresh(root, store, auto_index=auto_index)
+            if (freshness["status"] == "reindexed"
+                    and not click.get_current_context().params.get("as_json", False)):
+                click.echo(f"Freshness: {freshness['message']}", err=True)
+        yield store
+    except FreshnessBlockedError as exc:
+        raise click.ClickException(exc.result["message"]) from exc
+    finally:
+        store.close()
+
+
+def _freshness_option(function):
+    return click.option(
+        "--no-auto-index", is_flag=True,
+        help="Check freshness but never mutate; stale queries are refused.",
+    )(function)
 
 
 @click.group()
@@ -93,9 +115,10 @@ def index(path: str, no_incremental: bool) -> None:
 @click.option("--path", "path", type=click.Path(exists=True, file_okay=False), default=".",
               show_default=True, help="Repository root whose database to inspect.")
 @click.option("--json", "as_json", is_flag=True, help="Machine-readable output.")
-def status(path: str, as_json: bool) -> None:
+@_freshness_option
+def status(path: str, as_json: bool, no_auto_index: bool) -> None:
     """Show last index run stats and node/edge counts by type."""
-    with _open_store(_resolve_root(path)) as store:
+    with _open_store(_resolve_root(path), auto_index=not no_auto_index) as store:
         run = store.last_index_run()
         node_counts = store.counts_by_type("nodes")
         edge_counts = store.counts_by_type("edges")
@@ -138,20 +161,36 @@ def status(path: str, as_json: bool) -> None:
 @click.option("--path", "path", type=click.Path(exists=True, file_okay=False), default=".",
               show_default=True, help="Repository root whose database to query.")
 @click.option("--json", "as_json", is_flag=True, help="Machine-readable output.")
-def brief(budget: int, path: str, as_json: bool) -> None:
+@_freshness_option
+def brief(budget: int, path: str, as_json: bool, no_auto_index: bool) -> None:
     """Emit a compact, grounded orientation pack for a new agent session."""
     root = _resolve_root(path)
-    with _open_store(root) as store:
-        result = project_brief(root, store, budget=budget)
+    with _open_store(root, gate=False) as store:
+        result = project_brief(root, store, budget=budget, auto_index=not no_auto_index)
+    if result["freshness"]["status"] == "reindexed" and not as_json:
+        click.echo(f"Freshness: {result['freshness']['message']}", err=True)
     click.echo(json.dumps(result, indent=2) if as_json else result["text"], nl=as_json)
 
 
 @main.command("install-agent")
 @click.argument("path", type=click.Path(exists=True, file_okay=False), default=".")
-def install_agent(path: str) -> None:
+@click.option("--git-hooks", is_flag=True,
+              help="Also install idempotent post-commit and post-merge indexing hooks.")
+def install_agent(path: str, git_hooks: bool) -> None:
     """Install an idempotent Claude Code SessionStart brief hook."""
     try:
-        result = run_install_agent(_resolve_root(path))
+        result = run_install_agent(_resolve_root(path), git_hooks=git_hooks)
+    except ValueError as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(json.dumps(result, indent=2))
+
+
+@main.command("uninstall-agent")
+@click.argument("path", type=click.Path(exists=True, file_okay=False), default=".")
+def uninstall_agent(path: str) -> None:
+    """Remove only RepoBrain-owned agent integration and Git hook blocks."""
+    try:
+        result = run_uninstall_agent(_resolve_root(path))
     except ValueError as exc:
         raise click.ClickException(str(exc)) from exc
     click.echo(json.dumps(result, indent=2))
@@ -164,9 +203,11 @@ def install_agent(path: str) -> None:
 @click.option("--limit", type=int, default=10, show_default=True)
 @click.option("--type", "node_type", default=None, help="Filter by node type, e.g. MarkdownSection.")
 @click.option("--json", "as_json", is_flag=True, help="Machine-readable output.")
-def search(query: str, path: str, limit: int, node_type: str | None, as_json: bool) -> None:
+@_freshness_option
+def search(query: str, path: str, limit: int, node_type: str | None,
+           as_json: bool, no_auto_index: bool) -> None:
     """Full-text + name search across the indexed graph."""
-    with _open_store(_resolve_root(path)) as store:
+    with _open_store(_resolve_root(path), auto_index=not no_auto_index) as store:
         results = keyword_search(store, query, limit=limit, node_type=node_type)
 
     if as_json:
@@ -193,9 +234,11 @@ def search(query: str, path: str, limit: int, node_type: str | None, as_json: bo
 @click.option("--path", "path", type=click.Path(exists=True, file_okay=False), default=".",
               show_default=True, help="Repository root whose database to search.")
 @click.option("--json", "as_json", is_flag=True, help="Machine-readable output.")
-def find_symbol(name: str, exact: bool, limit: int, path: str, as_json: bool) -> None:
+@_freshness_option
+def find_symbol(name: str, exact: bool, limit: int, path: str,
+                as_json: bool, no_auto_index: bool) -> None:
     """Find code symbols (functions, classes, methods, variables, modules)."""
-    with _open_store(_resolve_root(path)) as store:
+    with _open_store(_resolve_root(path), auto_index=not no_auto_index) as store:
         results = run_find_symbol(store, name, exact=exact, limit=limit)
 
     if as_json:
@@ -224,9 +267,11 @@ def find_symbol(name: str, exact: bool, limit: int, path: str, as_json: bool) ->
 @click.option("--path", "path", type=click.Path(exists=True, file_okay=False), default=".",
               show_default=True, help="Repository root whose database to query.")
 @click.option("--json", "as_json", is_flag=True, help="Machine-readable output.")
-def docs_for_code(target: str, limit: int, path: str, as_json: bool) -> None:
+@_freshness_option
+def docs_for_code(target: str, limit: int, path: str,
+                  as_json: bool, no_auto_index: bool) -> None:
     """Find Markdown sections that reference a code file or unique symbol."""
-    with _open_store(_resolve_root(path)) as store:
+    with _open_store(_resolve_root(path), auto_index=not no_auto_index) as store:
         results = run_docs_for_code(store, target, limit=limit)
 
     if as_json:
@@ -254,11 +299,13 @@ def docs_for_code(target: str, limit: int, path: str, as_json: bool) -> None:
 @click.option("--path", "path", type=click.Path(exists=True, file_okay=False), default=".",
               show_default=True, help="Repository root whose database to query.")
 @click.option("--json", "as_json", is_flag=True, help="Machine-readable output.")
+@_freshness_option
 def code_for_docs(
-    doc_path: str, heading: str | None, limit: int, path: str, as_json: bool
+    doc_path: str, heading: str | None, limit: int, path: str,
+    as_json: bool, no_auto_index: bool,
 ) -> None:
     """Find code and graph nodes referenced by a Markdown document."""
-    with _open_store(_resolve_root(path)) as store:
+    with _open_store(_resolve_root(path), auto_index=not no_auto_index) as store:
         results = run_code_for_docs(store, doc_path, heading=heading, limit=limit)
 
     if as_json:
@@ -289,9 +336,10 @@ def explain() -> None:
 @explain.command("project")
 @click.option("--path", "path", type=click.Path(exists=True, file_okay=False), default=".")
 @click.option("--json", "as_json", is_flag=True)
-def explain_project(path: str, as_json: bool) -> None:
+@_freshness_option
+def explain_project(path: str, as_json: bool, no_auto_index: bool) -> None:
     """Show a source-grounded project overview."""
-    with _open_store(_resolve_root(path)) as store:
+    with _open_store(_resolve_root(path), auto_index=not no_auto_index) as store:
         info = project_overview(store)
     if as_json:
         click.echo(json.dumps(info, indent=2)); return
@@ -316,9 +364,10 @@ def _echo_symbol_tree(entries: list[dict], depth: int) -> None:
 @click.option("--path", "path", type=click.Path(exists=True, file_okay=False), default=".",
               show_default=True, help="Repository root whose database to query.")
 @click.option("--json", "as_json", is_flag=True, help="Machine-readable output.")
-def explain_file(filepath: str, path: str, as_json: bool) -> None:
+@_freshness_option
+def explain_file(filepath: str, path: str, as_json: bool, no_auto_index: bool) -> None:
     """Explain FILEPATH: symbols, imports, callers, env vars, tests, docs."""
-    with _open_store(_resolve_root(path)) as store:
+    with _open_store(_resolve_root(path), auto_index=not no_auto_index) as store:
         info = run_explain_file(store, filepath)
 
     if info is None:
@@ -417,9 +466,10 @@ def trace() -> None:
 @click.option("--path", "path", type=click.Path(exists=True, file_okay=False), default=".",
               show_default=True, help="Repository root whose database to query.")
 @click.option("--json", "as_json", is_flag=True, help="Machine-readable output.")
-def trace_config(name: str, path: str, as_json: bool) -> None:
+@_freshness_option
+def trace_config(name: str, path: str, as_json: bool, no_auto_index: bool) -> None:
     """Trace config or environment variable NAME to definitions and code reads."""
-    with _open_store(_resolve_root(path)) as store:
+    with _open_store(_resolve_root(path), auto_index=not no_auto_index) as store:
         result = run_trace_config(store, name)
     if as_json:
         click.echo(json.dumps(result, indent=2))
@@ -450,9 +500,11 @@ def trace_config(name: str, path: str, as_json: bool) -> None:
 @click.option("--direction", type=click.Choice(["in", "out", "both"]), default="both")
 @click.option("--path", "path", type=click.Path(exists=True, file_okay=False), default=".")
 @click.option("--json", "as_json", is_flag=True)
-def trace_data_flow(start: str, depth: int, direction: str, path: str, as_json: bool) -> None:
+@_freshness_option
+def trace_data_flow(start: str, depth: int, direction: str, path: str,
+                    as_json: bool, no_auto_index: bool) -> None:
     """Trace a route, event, file, or symbol through the graph."""
-    with _open_store(_resolve_root(path)) as store:
+    with _open_store(_resolve_root(path), auto_index=not no_auto_index) as store:
         result = run_trace_data_flow(store, start, depth=depth, direction=direction)
     if result is None:
         raise click.ClickException(f"No unique indexed target found for '{start}'.")
@@ -470,9 +522,11 @@ def trace_data_flow(start: str, depth: int, direction: str, path: str, as_json: 
 @click.option("--depth", type=click.IntRange(1, 10), default=3)
 @click.option("--path", "path", type=click.Path(exists=True, file_okay=False), default=".")
 @click.option("--json", "as_json", is_flag=True)
-def impact(target: str, change_type: str, depth: int, path: str, as_json: bool) -> None:
+@_freshness_option
+def impact(target: str, change_type: str, depth: int, path: str,
+           as_json: bool, no_auto_index: bool) -> None:
     """Estimate likely blast radius for a file or symbol change."""
-    with _open_store(_resolve_root(path)) as store:
+    with _open_store(_resolve_root(path), auto_index=not no_auto_index) as store:
         result = run_impact_analysis(store, target, change_type, depth)
     if result is None:
         raise click.ClickException(f"No unique indexed target found for '{target}'.")
@@ -486,10 +540,11 @@ def impact(target: str, change_type: str, depth: int, path: str, as_json: bool) 
 
 @main.command("report")
 @click.option("--path", "path", type=click.Path(exists=True, file_okay=False), default=".")
-def report(path: str) -> None:
+@_freshness_option
+def report(path: str, no_auto_index: bool) -> None:
     """Generate Markdown and HTML graph reports."""
     root = _resolve_root(path)
-    with _open_store(root) as store:
+    with _open_store(root, auto_index=not no_auto_index) as store:
         md, html_path = generate_report(store, root)
     click.echo(f"Generated {md}")
     click.echo(f"Generated {html_path}")
@@ -506,9 +561,13 @@ def memory() -> None:
 @click.option("--path", "path", type=click.Path(exists=True, file_okay=False), default=".",
               show_default=True, help="Repository root.")
 @click.option("--json", "as_json", is_flag=True, help="Machine-readable output.")
-def memory_read(topic: str | None, limit: int, path: str, as_json: bool) -> None:
+@_freshness_option
+def memory_read(topic: str | None, limit: int, path: str,
+                as_json: bool, no_auto_index: bool) -> None:
     """Read recent durable agent sessions."""
-    result = read_agent_memory(_resolve_root(path), topic=topic, limit=limit)
+    root = _resolve_root(path)
+    with _open_store(root, auto_index=not no_auto_index):
+        result = read_agent_memory(root, topic=topic, limit=limit)
     if as_json:
         click.echo(json.dumps(result, indent=2))
         return

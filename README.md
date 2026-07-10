@@ -96,8 +96,14 @@ uv pip install -p .venv/bin/python -e ".[dev]"
 .venv/bin/repobrain brief --budget 2000
 .venv/bin/repobrain brief --budget 800 --json
 
+# every read-only query auto-reindexes small stale diffs before serving facts;
+# --no-auto-index performs a non-mutating check and refuses stale reads
+.venv/bin/repobrain search "database" --no-auto-index
+
 # install an idempotent Claude Code SessionStart hook and CLAUDE.md snippet
 .venv/bin/repobrain install-agent .
+.venv/bin/repobrain install-agent . --git-hooks
+.venv/bin/repobrain uninstall-agent .
 
 # full-text + name search (--path DIR, --limit N, --type NodeType, --json)
 .venv/bin/repobrain search "database" --path tests/fixtures/small_python_app

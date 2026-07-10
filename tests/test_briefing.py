@@ -61,11 +61,13 @@ def test_brief_detects_added_changed_and_deleted_files(small_app):
         (small_app / "README.md").unlink()
         stale = project_brief(small_app, store)
 
-    assert stale["staleness"]["out_of_date_count"] == 3
-    assert stale["staleness"]["added"] == ["new.py"]
-    assert stale["staleness"]["changed"] == ["app/services/user_service.py"]
-    assert stale["staleness"]["deleted"] == ["README.md"]
-    assert stale["text"].splitlines()[1].startswith("STALE INDEX: 3")
+    assert stale["freshness"]["status"] == "reindexed"
+    assert stale["freshness"]["before"]["out_of_date_count"] == 3
+    assert stale["freshness"]["before"]["added"] == ["new.py"]
+    assert stale["freshness"]["before"]["changed"] == ["app/services/user_service.py"]
+    assert stale["freshness"]["before"]["deleted"] == ["README.md"]
+    assert stale["staleness"]["is_stale"] is False
+    assert stale["text"].splitlines()[1] == "Index freshness: current."
 
 
 def test_brief_includes_structured_memory_with_provenance(small_app):
