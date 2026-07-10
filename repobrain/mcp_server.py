@@ -6,10 +6,19 @@ from pathlib import Path
 from typing import Any
 
 from .config import RepoBrainConfig
-from .graph.queries import code_for_docs, docs_for_code, explain_file, find_symbol
+from .graph.queries import (
+    code_for_docs,
+    docs_for_code,
+    explain_file,
+    find_symbol,
+    impact_analysis,
+    trace_config,
+    trace_data_flow,
+)
 from .graph.store import GraphStore
 from .indexing.indexer import Indexer
 from .memory import read_agent_memory, write_agent_memory
+from .reporting import project_overview
 from .retrieval.keyword import search
 
 
@@ -43,6 +52,10 @@ class RepoBrainTools:
                    include_patterns: list[str] | None = None,
                    exclude_patterns: list[str] | None = None) -> dict:
         target = (self.root / path).resolve() if not Path(path).is_absolute() else Path(path).resolve()
+        if target != self.root:
+            raise ValueError(
+                f"RepoBrain MCP is scoped to {self.root}; refusing to index {target}"
+            )
         config = RepoBrainConfig.load(target)
         if include_patterns:
             config.include_patterns = include_patterns
@@ -69,14 +82,7 @@ class RepoBrainTools:
 
     def explain_project(self, focus: str = "overall") -> dict:
         with self._store() as store:
-            sample = store.conn.execute(
-                "SELECT path, type, name FROM nodes WHERE type IN ('Module','MarkdownDocument',"
-                "'ConfigFile','Route','TestFile') ORDER BY path LIMIT 100"
-            ).fetchall()
-            result = {"status": "ok", "focus": focus, "files": store.file_count(),
-                      "nodes_by_type": store.counts_by_type("nodes"),
-                      "edges_by_type": store.counts_by_type("edges"),
-                      "key_nodes": [_safe(row) for row in sample]}
+            result = {"status": "ok", "focus": focus, **project_overview(store)}
         return _safe(result)
 
     def explain_file(self, path: str) -> dict:
@@ -131,26 +137,21 @@ class RepoBrainTools:
         return self._trace(symbol, depth)
 
     def trace_config(self, key: str, depth: int = 3) -> dict:
-        return self._trace(key, depth)
+        with self._store() as store:
+            result = trace_config(store, key)
+        return {"status": "ok", **_safe(result)}
 
     def trace_data_flow(self, start: str, depth: int = 4, direction: str = "both") -> dict:
         if direction not in ("in", "out", "both"):
             raise ValueError("direction must be in, out, or both")
-        return self._trace(start, depth, direction)
+        with self._store() as store:
+            result = trace_data_flow(store, start, depth=depth, direction=direction)
+        return {"status": "ok" if result else "not_found", "flow": _safe(result)}
 
     def impact_analysis(self, target: str, change_type: str = "modify") -> dict:
-        trace = self._trace(target, 3, "both")
-        nodes = trace["nodes"]
-        files = sorted({node["path"] for node in nodes if node.get("path") and node["path"] != target})
-        tests = [path for path in files if "test" in path.lower()]
-        docs = [path for path in files if path.lower().endswith((".md", ".mdx"))]
-        config = [path for path in files if any(part in path.lower() for part in
-                                                ("config", ".env", "yaml", "toml"))]
-        return {"status": "ok", "target": target, "change_type": change_type,
-                "impacted_files": files, "recommended_tests": tests,
-                "docs_likely_needing_updates": docs, "impacted_config": config,
-                "confidence": 0.8 if trace["edges"] else 0.2,
-                "evidence": trace["edges"]}
+        with self._store() as store:
+            result = impact_analysis(store, target, change_type=change_type)
+        return {"status": "ok" if result else "not_found", "impact": _safe(result)}
 
     def docs_for_code(self, target: str, limit: int = 50) -> dict:
         with self._store() as store:
