@@ -1,0 +1,92 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="description" content="Explore RepoBrain's self-indexed knowledge graph." />
+    <title>Knowledge graph · RepoBrain</title>
+    <link rel="stylesheet" href="styles.css" />
+    <link rel="stylesheet" href="graph.css" />
+  </head>
+  <body>
+    <header class="site-header">
+      <a class="brand" href="index.html" aria-label="RepoBrain setup">
+        <span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i></span>
+        <span>RepoBrain</span>
+      </a>
+      <div class="header-actions">
+        <nav class="page-nav" aria-label="Project pages">
+          <a href="index.html">Setup</a>
+          <a href="evaluation.html">Quality</a>
+          <a class="active" href="graph.html" aria-current="page">Graph</a>
+        </nav>
+        <span class="local-pill"><span></span> Live snapshot</span>
+        <a class="ghost-link" href="../README.md">Documentation <span aria-hidden="true">↗</span></a>
+      </div>
+    </header>
+
+    <main class="graph-page">
+      <section class="graph-intro">
+        <div>
+          <div class="eyebrow"><span>03</span> Self-indexed graph</div>
+          <h1>See what the<br />agent <em>sees.</em></h1>
+        </div>
+        <p>Every point is a source-grounded repository fact. Explore files, symbols, documentation, tests, and the relationships connecting them.</p>
+      </section>
+
+      <section class="graph-stats" aria-label="Graph summary">
+        <div><strong id="node-count">—</strong><span>nodes</span></div>
+        <div><strong id="edge-count">—</strong><span>relationships</span></div>
+        <div><strong id="type-count">—</strong><span>node types</span></div>
+        <div><strong id="visible-count">—</strong><span>visible now</span></div>
+      </section>
+
+      <section class="graph-controls" aria-label="Graph controls">
+        <label><span>Find a fact</span><input id="graph-search" type="search" placeholder="File, symbol, path…" /></label>
+        <label><span>Node type</span><select id="node-filter"><option value="all">All node types</option></select></label>
+        <label><span>Relationship</span><select id="edge-filter"><option value="all">All relationships</option></select></label>
+        <button id="reset-view" type="button">Reset view</button>
+      </section>
+
+      <section class="graph-workspace">
+        <div class="canvas-wrap">
+          <canvas id="graph-canvas" role="img" aria-label="Interactive knowledge graph. Drag to pan, scroll to zoom, and select nodes for provenance details."></canvas>
+          <div class="canvas-hint">Drag to pan · Scroll to zoom · Click a node to inspect</div>
+          <div id="graph-empty" hidden>No matching nodes.</div>
+        </div>
+        <aside class="node-inspector" aria-live="polite">
+          <div class="inspector-empty" id="inspector-empty">
+            <span>✦</span>
+            <h2>Select a node</h2>
+            <p>Inspect its source location and immediate relationships.</p>
+          </div>
+          <div id="inspector-content" hidden>
+            <div class="node-kind"><i id="node-swatch"></i><span id="node-type"></span></div>
+            <h2 id="node-name"></h2>
+            <p id="node-qualified"></p>
+            <dl>
+              <div><dt>Source</dt><dd id="node-source"></dd></div>
+              <div><dt>Language</dt><dd id="node-language"></dd></div>
+              <div><dt>Confidence</dt><dd id="node-confidence"></dd></div>
+              <div><dt>Connections</dt><dd id="node-connections"></dd></div>
+            </dl>
+            <div class="relation-list"><h3>Immediate relationships</h3><div id="relation-list"></div></div>
+          </div>
+        </aside>
+      </section>
+
+      <section class="graph-legend">
+        <span><i class="legend-code"></i> Code</span>
+        <span><i class="legend-file"></i> Files & directories</span>
+        <span><i class="legend-doc"></i> Documentation</span>
+        <span><i class="legend-test"></i> Tests</span>
+        <span><i class="legend-env"></i> Environment</span>
+        <p>Layout is clustered by node type. Edges preserve direction from source to target.</p>
+      </section>
+    </main>
+
+    <footer><span>RepoBrain</span><p>Generated from the local self-index.</p><a href="evaluation.html">View quality metrics →</a></footer>
+    <script src="graph-data.js"></script>
+    <script src="graph.js"></script>
+  </body>
+</html>

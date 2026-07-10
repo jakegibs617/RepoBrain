@@ -1,0 +1,9 @@
+services:
+  api:
+    image: example/api:latest
+    environment:
+      DATABASE_URL: ${DATABASE_URL}
+    depends_on:
+      - database
+  database:
+    image: postgres:16

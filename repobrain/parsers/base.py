@@ -111,11 +111,22 @@ class ParserRegistry:
     def parsers_for(self, path: str, language: str | None) -> list[Parser]:
         return [p for p in self._parsers if p.can_parse(path, language)]
 
+    def all(self) -> list[Parser]:
+        return list(self._parsers)
+
 
 def default_registry() -> ParserRegistry:
+    from .code_treesitter import CodeParser
+    from .config_parser import EnvFileParser
     from .markdown_parser import MarkdownParser
+    from .yaml_parser import YamlParser
+    from .route_parser import RouteParser
 
     registry = ParserRegistry()
     registry.register(GenericFileParser())
+    registry.register(EnvFileParser())
+    registry.register(YamlParser())
     registry.register(MarkdownParser())
+    registry.register(CodeParser())
+    registry.register(RouteParser())
     return registry

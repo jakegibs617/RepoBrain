@@ -1,0 +1,120 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="description" content="RepoBrain quality metrics and system evaluation coverage." />
+    <title>Quality · RepoBrain</title>
+    <link rel="stylesheet" href="styles.css" />
+    <link rel="stylesheet" href="evaluation.css" />
+  </head>
+  <body>
+    <header class="site-header">
+      <a class="brand" href="index.html" aria-label="RepoBrain setup">
+        <span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i></span>
+        <span>RepoBrain</span>
+      </a>
+      <div class="header-actions">
+        <nav class="page-nav" aria-label="Project pages">
+          <a href="index.html">Setup</a>
+          <a class="active" href="evaluation.html" aria-current="page">Quality</a>
+          <a href="graph.html">Graph</a>
+        </nav>
+        <span class="local-pill"><span></span> Self-indexed</span>
+        <a class="ghost-link" href="../docs/EVALUATION_STRATEGY.md">Evaluation strategy <span aria-hidden="true">↗</span></a>
+      </div>
+    </header>
+
+    <main>
+      <section class="quality-hero">
+        <div class="eyebrow"><span>02</span> Quality system</div>
+        <div class="quality-title-row">
+          <div>
+            <h1>Trust is a<br /><em>feature.</em></h1>
+            <p>RepoBrain tests isolated capabilities, adversarial repository changes, and complete agent journeys—then turns the lens on its own codebase.</p>
+          </div>
+          <div class="release-gauge" aria-label="Current milestone coverage: 4 of 10">
+            <svg viewBox="0 0 120 120" role="img">
+              <circle class="gauge-track" cx="60" cy="60" r="48" />
+              <circle class="gauge-value" cx="60" cy="60" r="48" pathLength="100" />
+            </svg>
+            <div><strong>4<span>/10</span></strong><small>milestones<br />evaluated</small></div>
+          </div>
+        </div>
+        <div class="verified-line"><span></span> Last verified July 9, 2026 · macOS · Python 3.11</div>
+      </section>
+
+      <section class="quality-content">
+        <div class="metric-grid" aria-label="Measured project metrics">
+          <article class="metric primary"><p>Test suite</p><strong>73<span>/73</span></strong><small>passing in 1.47s</small><i>100%</i></article>
+          <article class="metric"><p>Self-index</p><strong>71</strong><small>real project files</small><i>live</i></article>
+          <article class="metric"><p>Knowledge graph</p><strong>2,077</strong><small>nodes + edges</small><i>local</i></article>
+          <article class="metric"><p>Index warnings</p><strong>0</strong><small>across self-index</small><i>clean</i></article>
+          <article class="metric"><p>No-change writes</p><strong>0</strong><small>incremental convergence</small><i>stable</i></article>
+        </div>
+
+        <section class="panel capability-panel">
+          <div class="panel-head">
+            <div><p class="section-label">Capability scorecard</p><h2>Measured independently. Proven together.</h2></div>
+            <div class="filter-tabs" role="tablist" aria-label="Filter capabilities">
+              <button class="active" data-filter="all" role="tab" aria-selected="true">All</button>
+              <button data-filter="verified" role="tab" aria-selected="false">Verified</button>
+              <button data-filter="planned" role="tab" aria-selected="false">Planned</button>
+            </div>
+          </div>
+          <div class="capability-list">
+            <article data-status="verified"><span class="cap-num">01</span><div><h3>File scanning</h3><p>Ignore rules, binary detection, size limits, incremental hashing</p></div><b class="status verified">Verified</b><div class="bar"><i style="--score: 100%"></i></div></article>
+            <article data-status="verified"><span class="cap-num">02</span><div><h3>Code intelligence</h3><p>Symbols, imports, calls, tests, and environment reads</p></div><b class="status verified">Verified</b><div class="bar"><i style="--score: 92%"></i></div></article>
+            <article data-status="verified"><span class="cap-num">03</span><div><h3>Markdown mapping</h3><p>Paths, unique symbols, provenance, ambiguity rejection</p></div><b class="status verified">Verified</b><div class="bar"><i style="--score: 100%"></i></div></article>
+            <article data-status="planned"><span class="cap-num">04</span><div><h3>Config tracing</h3><p>Environment definitions, Compose, Actions, and Kubernetes</p></div><b class="status planned">Milestone 5</b><div class="bar"><i style="--score: 8%"></i></div></article>
+            <article data-status="planned"><span class="cap-num">05</span><div><h3>Data flow</h3><p>Endpoint to handler, service, repository, and storage</p></div><b class="status planned">Milestone 6</b><div class="bar"><i style="--score: 15%"></i></div></article>
+            <article data-status="planned"><span class="cap-num">06</span><div><h3>Impact analysis</h3><p>Ranked callers, tests, docs, configuration, and blast radius</p></div><b class="status planned">Milestone 7</b><div class="bar"><i style="--score: 12%"></i></div></article>
+            <article data-status="planned"><span class="cap-num">07</span><div><h3>Layered memory</h3><p>Vocabulary, decisions, pitfalls, guidance, and episodes</p></div><b class="status planned">Designed</b><div class="bar"><i style="--score: 5%"></i></div></article>
+          </div>
+          <p class="method-note"><span>i</span> Progress bars show implementation coverage—not quality scores. Verified capabilities are backed by executable tests.</p>
+        </section>
+
+        <div class="two-column">
+          <section class="panel scenario-panel">
+            <div class="panel-head"><div><p class="section-label">Adversarial lifecycle</p><h2>One fact, under pressure.</h2></div><span class="pass-pill">✓ Passing</span></div>
+            <div class="scenario-flow" aria-label="Documented symbol lifecycle scenario">
+              <div class="scenario-step done"><span>1</span><p><b>Unique symbol</b><small>Grounded mention created</small></p></div>
+              <div class="scenario-step done"><span>2</span><p><b>Collision added</b><small>Ambiguous edge removed</small></p></div>
+              <div class="scenario-step done"><span>3</span><p><b>Collision deleted</b><small>Relationship restored</small></p></div>
+              <div class="scenario-step done"><span>4</span><p><b>Code renamed</b><small>Stale fact disappears</small></p></div>
+              <div class="scenario-step done"><span>5</span><p><b>Docs repaired</b><small>New evidence connected</small></p></div>
+              <div class="scenario-step done"><span>6</span><p><b>No-op index</b><small>Zero graph writes</small></p></div>
+            </div>
+          </section>
+
+          <section class="panel dimensions-panel">
+            <div class="panel-head"><div><p class="section-label">Release dimensions</p><h2>No hidden averages.</h2></div></div>
+            <div class="dimension-list">
+              <div><span>Correctness</span><b>Passing</b></div>
+              <div><span>False-positive resistance</span><b>Passing</b></div>
+              <div><span>Source provenance</span><b>Passing</b></div>
+              <div><span>Confidence calibration</span><b>Passing</b></div>
+              <div><span>Incremental convergence</span><b>Passing</b></div>
+              <div><span>Malformed-input resilience</span><b>Passing</b></div>
+              <div class="partial"><span>1,000-file performance</span><b>Not measured</b></div>
+              <div class="partial"><span>Agent context quality</span><b>Planned</b></div>
+            </div>
+          </section>
+        </div>
+
+        <section class="journeys">
+          <div class="journey-intro"><p class="section-label">Whole-system journeys</p><h2>The final exam is useful work.</h2><p>Each milestone contributes focused tests and adversarial mutations. These journeys become the release gate when the systems meet.</p></div>
+          <div class="journey-grid">
+            <article><span>A</span><p>Configuration safety</p><h3>Change a database setting without missing an override.</h3><small>Begins in Milestone 5</small></article>
+            <article><span>B</span><p>Runtime understanding</p><h3>Modify an endpoint across its complete data flow.</h3><small>Begins in Milestone 6</small></article>
+            <article><span>C</span><p>Durable context</p><h3>Resume a refactor without repeating failed work.</h3><small>Begins with layered memory</small></article>
+            <article><span>D</span><p>Project explanation</p><h3>Explain an unfamiliar polyglot system with evidence.</h3><small>Integrated release gate</small></article>
+          </div>
+        </section>
+      </section>
+    </main>
+
+    <footer><span>RepoBrain</span><p>Quality is source-grounded, too.</p><a href="../docs/EVALUATION_STRATEGY.md">Read the full methodology ↗</a></footer>
+    <script src="evaluation.js"></script>
+  </body>
+</html>

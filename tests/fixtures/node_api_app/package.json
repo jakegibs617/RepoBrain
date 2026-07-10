@@ -1,0 +1,16 @@
+{
+  "name": "node-api-app",
+  "version": "1.0.0",
+  "description": "Fixture Express-style API used by RepoBrain tests.",
+  "main": "src/server.js",
+  "scripts": {
+    "start": "node src/server.js",
+    "test": "jest"
+  },
+  "dependencies": {
+    "express": "^4.19.0"
+  },
+  "devDependencies": {
+    "jest": "^29.7.0"
+  }
+}

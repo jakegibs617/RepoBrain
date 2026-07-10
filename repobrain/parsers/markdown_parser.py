@@ -32,6 +32,7 @@ class _Section:
     node: Node | None = None
     links: list[dict] = field(default_factory=list)
     code_blocks: list[dict] = field(default_factory=list)
+    references: list[dict] = field(default_factory=list)
 
 
 class MarkdownParser(Parser):
@@ -54,6 +55,7 @@ class MarkdownParser(Parser):
 
         sections = self._collect_sections(tokens, total_lines=len(lines))
         links = self._collect_links(tokens)
+        inline_code = self._collect_inline_code(tokens)
         fences = self._collect_code_blocks(tokens)
         tasks = self._collect_tasks(tokens)
 
@@ -69,6 +71,10 @@ class MarkdownParser(Parser):
             metadata={
                 "title": title,
                 "links": links,
+                "references": [
+                    *({"kind": "link", "value": link["href"], "line": link["line"]} for link in links),
+                    *inline_code,
+                ],
                 "code_blocks": fences,
                 "heading_count": len(sections),
             },
@@ -76,7 +82,9 @@ class MarkdownParser(Parser):
         )
         result.nodes.append(doc_node)
 
-        self._build_section_nodes(sections, links, fences, path, lines, doc_node, result)
+        self._build_section_nodes(
+            sections, links, inline_code, fences, path, lines, doc_node, result
+        )
         self._build_task_nodes(tasks, sections, path, doc_node, result)
         return result
 
@@ -139,6 +147,24 @@ class MarkdownParser(Parser):
                 )
         return blocks
 
+    def _collect_inline_code(self, tokens: list[Token]) -> list[dict]:
+        """Collect backticked reference candidates without interpreting them.
+
+        Resolution needs the complete graph and therefore happens after all
+        files have been parsed and stored.
+        """
+        references: list[dict] = []
+        for tok in tokens:
+            if tok.type != "inline" or not tok.children:
+                continue
+            line = (tok.map[0] + 1) if tok.map else None
+            for child in tok.children:
+                if child.type == "code_inline" and child.content.strip():
+                    references.append(
+                        {"kind": "inline_code", "value": child.content.strip(), "line": line}
+                    )
+        return references
+
     def _collect_tasks(self, tokens: list[Token]) -> list[dict]:
         tasks: list[dict] = []
         for i, tok in enumerate(tokens):
@@ -164,6 +190,7 @@ class MarkdownParser(Parser):
         self,
         sections: list["_Section"],
         links: list[dict],
+        inline_code: list[dict],
         fences: list[dict],
         path: str,
         lines: list[str],
@@ -184,6 +211,13 @@ class MarkdownParser(Parser):
             sec = deepest_section(link.get("line"))
             if sec is not None:
                 sec.links.append(link)
+                sec.references.append(
+                    {"kind": "link", "value": link["href"], "line": link["line"]}
+                )
+        for reference in inline_code:
+            sec = deepest_section(reference.get("line"))
+            if sec is not None:
+                sec.references.append(reference)
         for fence in fences:
             sec = deepest_section(fence.get("start_line"))
             if sec is not None:
@@ -214,6 +248,7 @@ class MarkdownParser(Parser):
                     "level": sec.level,
                     "links": sec.links,
                     "code_blocks": sec.code_blocks,
+                    "references": sec.references,
                 },
                 extractor=self.name,
             )

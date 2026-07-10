@@ -13,11 +13,16 @@ dependencies = [
     "click>=8.1",
     "markdown-it-py>=3.0",
     "pyyaml>=6.0",
+    "tree-sitter>=0.23",
+    "tree-sitter-language-pack>=0.7",
 ]
 
 [project.optional-dependencies]
 dev = [
     "pytest>=8.0",
+]
+mcp = [
+    "mcp>=1.0,<2",
 ]
 
 [project.scripts]
