@@ -120,6 +120,49 @@ See `DECISIONS.md` D20 for this session.
 
 ## Suggested Next Steps
 
+A ready-to-use prompt for the next session (scoped to M11) is in
+`docs/NEXT_SESSION_PROMPT.md`.
+
+### Product direction (post-MVP review, 2026-07-10)
+
+The MVP measures graph quality, but the PRD's product goals (§6.2) are about
+agent outcomes: fewer tokens rediscovering structure, safer changes, durable
+knowledge. The biggest remaining risks are that agents won't call the tools,
+the graph goes stale, and memory rots. Recommended next milestones, in
+priority order:
+
+1. **M11 — Session-start briefing (push, don't pull).** Agents don't call MCP
+   tools unprompted. Add `repobrain brief --budget N` emitting a token-budgeted
+   orientation pack (purpose, subsystems, entrypoints, active assumptions,
+   open questions, recent memory), injectable via a Claude Code SessionStart
+   hook or generated CLAUDE.md section. Zero agent behavior change required;
+   makes the "fewer tokens" goal measurable.
+2. **M12 — Freshness automation.** A stale brain misleads and destroys trust.
+   Add a staleness check on every query (size+mtime diff is already cheap),
+   auto-reindex-on-query for small diffs, and optional git post-commit /
+   post-merge hooks. The brief in M11 must never be served stale.
+3. **M13 — Diff-aware change context.** The agent's unit of work is a change,
+   not a lookup. `repobrain change-context` over the working diff/branch:
+   impacted symbols, tests to run, and — the differentiator — **stale-doc
+   detection** using existing MENTIONS edges (code changed, referencing doc
+   section didn't). Natural pre-commit/PR hook surface.
+4. **Git history as an extractor.** Co-change coupling catches impact
+   relationships static analysis misses (templates, migrations, config);
+   blend it into impact analysis. Also churn hotspots, ownership, and
+   commit-message mining. Local and deterministic — on-vision.
+5. **Memory verification.** Anchor memory entries to graph nodes and validate
+   on reindex ("decision references `create_user`, which no longer exists →
+   flag stale"). Turns append-only memory into a validated knowledge base and
+   feeds the M11 brief ("2 assumptions invalidated since last session").
+6. **Distribution.** `uvx repobrain` packaging plus `repobrain install-agent`
+   writing `.mcp.json`, the CLAUDE.md snippet, and hooks in one step. Adoption
+   friction matters more than a ninth language.
+
+Deliberate non-goals for now: embeddings and multi-repo support — keep the
+deterministic-first stance (D-series) until the delivery loop above proves out.
+
+### Engineering follow-ups (carried over)
+
 1. Add framework adapters for dynamic receiver calls and richer ORM/table flow.
 2. Profile indexing and traversal on repositories above 1,000 files.
 3. Add protocol-level MCP integration tests in addition to direct tool tests.
