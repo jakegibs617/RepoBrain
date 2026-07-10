@@ -7,6 +7,7 @@ from typing import Any
 
 from .config import RepoBrainConfig
 from .briefing import DEFAULT_BUDGET, project_brief
+from .change_context import GitDiffError, change_context
 from .graph.queries import (
     code_for_docs,
     docs_for_code,
@@ -105,6 +106,14 @@ class RepoBrainTools:
             lambda store: project_brief(self.root, store, budget=budget, auto_index=False),
             auto_index=auto_index,
         )
+
+    def change_context(self, base: str | None = None, auto_index: bool = True) -> dict:
+        try:
+            with self._store() as store:
+                return _safe(change_context(self.root, store, base=base,
+                                            auto_index=auto_index))
+        except GitDiffError as exc:
+            return {"status": "error", "error": str(exc), "changes": []}
 
     def explain_file(self, path: str, auto_index: bool = True) -> dict:
         def run(store):
@@ -221,7 +230,7 @@ def create_server(root: str | Path):
     server = FastMCP("RepoBrain")
     tools = RepoBrainTools(root)
     for name in (
-        "index_repo", "search_project", "explain_project", "project_brief", "explain_file", "find_symbol",
+        "index_repo", "search_project", "explain_project", "project_brief", "change_context", "explain_file", "find_symbol",
         "trace_symbol", "trace_config", "trace_data_flow", "impact_analysis",
         "docs_for_code", "code_for_docs", "write_agent_memory", "read_agent_memory",
     ):
