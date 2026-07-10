@@ -3,13 +3,21 @@
 ## Project Summary
 
 RepoBrain: a local-first second brain for AI coding agents (see `prd.md`).
-All ten PRD milestones are now implemented. Milestones 1–4 delivered storage,
+All ten PRD milestones and post-MVP Milestone 11 are now implemented. Milestones 1–4 delivered storage,
 incremental indexing, code/docs parsing, search, and documentation mapping.
 Milestones 5–10 add config adapters and tracing, route/data-flow analysis,
 impact analysis, MCP tools, durable agent memory, and Markdown/HTML reports.
 
 ## Delivery Status
 
+- M11 is implemented on `feat/m11-session-start-briefing`: `repobrain brief`
+  and the matching `project_brief` MCP tool produce a fixed-priority,
+  source-grounded orientation pack under an approximate token budget.
+- The brief performs a read-only size+mtime freshness check before serving
+  facts. `repobrain install-agent` adds an idempotent Claude Code SessionStart
+  hook and a marker-owned CLAUDE.md section without replacing human content.
+- M11 verification: 99 pytest tests passed; compilation and whitespace checks
+  were clean before review.
 - PR #2, `feat: complete RepoBrain MVP (Milestones 3-10)`, was reviewed and
   merged into `main` on 2026-07-10.
 - Merge commit: `6039214305c1f435fbe1b120d1dc1e1284c9a94b`.
@@ -54,6 +62,13 @@ impact analysis, MCP tools, durable agent memory, and Markdown/HTML reports.
 - `repobrain/cli.py` — click CLI: `init`, `index`, `status`, `search`,
   **`find-symbol NAME [--exact] [--limit] [--path] [--json]`**, and the new
   `explain` group with **`explain file FILEPATH [--path] [--json]`**.
+- `repobrain/briefing.py` — assembles the M11 project brief from indexed graph
+  facts and structured memory. Sections degrade atomically in fixed priority
+  order using `ceil(characters / 4)` as the documented token estimate.
+- `repobrain/freshness.py` — read-only working-tree comparison using the same
+  scanner configuration and size+mtime shortcut as incremental indexing.
+- `repobrain/agent_install.py` — conservative merge of the RepoBrain
+  SessionStart hook plus a marker-owned CLAUDE.md snippet.
 
 ## Important Files
 
@@ -81,7 +96,7 @@ impact analysis, MCP tools, durable agent memory, and Markdown/HTML reports.
 
 ## Decisions
 
-See `DECISIONS.md` D20 for this session.
+See `DECISIONS.md` D22 for the M11 session.
 
 ## Assumptions
 
@@ -117,10 +132,14 @@ See `DECISIONS.md` D20 for this session.
   collection — don't remove.
 - Never leave `.repobrain/` dirs inside `tests/fixtures/*` after manual CLI
   runs (conftest ignores them when copying, but keep the tree clean).
+- The M11 freshness check is deliberately stat-only. As with incremental
+  indexing (D12), a same-size edit whose mtime is restored can evade it.
+- Brief budgets are approximate, not model-tokenizer exact. Facts are never
+  cut mid-item, so a very small budget may omit whole lower-priority sections.
 
 ## Suggested Next Steps
 
-A ready-to-use prompt for the next session (scoped to M11) is in
+A ready-to-use prompt for the next session (scoped to M12) is in
 `docs/NEXT_SESSION_PROMPT.md`.
 
 ### Product direction (post-MVP review, 2026-07-10)
@@ -131,7 +150,7 @@ knowledge. The biggest remaining risks are that agents won't call the tools,
 the graph goes stale, and memory rots. Recommended next milestones, in
 priority order:
 
-1. **M11 — Session-start briefing (push, don't pull).** Agents don't call MCP
+1. **M11 — Session-start briefing (push, don't pull).** **Delivered.** Agents don't call MCP
    tools unprompted. Add `repobrain brief --budget N` emitting a token-budgeted
    orientation pack (purpose, subsystems, entrypoints, active assumptions,
    open questions, recent memory), injectable via a Claude Code SessionStart

@@ -19,6 +19,11 @@ def test_transport_independent_mcp_tools_return_json_safe_results(small_app):
     assert project["files"] > 0
     json.dumps(project)
 
+    brief = tools.project_brief(budget=300)
+    assert brief["status"] == "ok"
+    assert brief["token_estimate"] <= 300
+    json.dumps(brief)
+
     symbols = tools.find_symbol("UserRepository")
     assert symbols["symbols"]
     json.dumps(symbols)

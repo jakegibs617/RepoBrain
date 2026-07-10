@@ -91,6 +91,14 @@ uv pip install -p .venv/bin/python -e ".[dev]"
 .venv/bin/repobrain status
 .venv/bin/repobrain status --path tests/fixtures/small_python_app
 
+# source-grounded session orientation (plain text or JSON)
+# --budget uses the deterministic ceil(characters / 4) token estimate
+.venv/bin/repobrain brief --budget 2000
+.venv/bin/repobrain brief --budget 800 --json
+
+# install an idempotent Claude Code SessionStart hook and CLAUDE.md snippet
+.venv/bin/repobrain install-agent .
+
 # full-text + name search (--path DIR, --limit N, --type NodeType, --json)
 .venv/bin/repobrain search "database" --path tests/fixtures/small_python_app
 .venv/bin/repobrain search "users" --type File --json

@@ -250,3 +250,22 @@ Impact results are confidence-bucketed evidence, not correctness claims.
 Structural containment hops do not consume data-flow depth, allowing a route
 to cross handler/service/repository module boundaries while keeping each
 reported relationship source-grounded.
+
+## 2026-07-10 — Milestone 11 (session-start briefing)
+
+### D22: Briefs are atomic grounded facts under a deterministic character budget
+
+The project brief is assembled once in `repobrain/briefing.py`; CLI and MCP
+surfaces call that shared function and do not duplicate selection logic. Its
+fixed priority is purpose, subsystems, entrypoints, routes/config, assumptions,
+open questions, then recent memory. Each fact carries `path:line` provenance
+(memory uses its durable Markdown path), and facts are admitted atomically so
+budget pressure never slices evidence mid-item.
+
+Budgeting uses `ceil(characters / 4)`, an intentionally approximate and
+tokenizer-independent heuristic suitable for offline deterministic behavior.
+Freshness is a read-only scan using the same configured file universe and
+size+mtime trust model as D12. M11 warns but never mutates; automatic repair is
+reserved for M12. Agent installation owns only one exact SessionStart command
+and a marker-delimited CLAUDE.md section, preserving unrelated JSON keys,
+hooks, and human-authored Markdown.
