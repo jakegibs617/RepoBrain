@@ -17,6 +17,7 @@ from .graph.queries import (
     trace_data_flow,
 )
 from .graph.store import GraphStore
+from .freshness import ensure_fresh
 from .indexing.indexer import Indexer
 from .memory import read_agent_memory, write_agent_memory
 from .reporting import project_overview
@@ -49,6 +50,17 @@ class RepoBrainTools:
             raise ValueError(f"No RepoBrain database at {db_path}; call index_repo first")
         return GraphStore(db_path)
 
+    def _query(self, callback, *, auto_index: bool = True) -> dict:
+        """Run one MCP read behind the shared freshness gate."""
+        with self._store() as store:
+            freshness = ensure_fresh(self.root, store, auto_index=auto_index)
+            if not freshness["can_query"]:
+                return {"status": freshness["status"], "freshness": _safe(freshness)}
+            result = callback(store)
+        result = _safe(result)
+        result["freshness"] = _safe(freshness)
+        return result
+
     def index_repo(self, path: str = ".", incremental: bool = True,
                    include_patterns: list[str] | None = None,
                    exclude_patterns: list[str] | None = None) -> dict:
@@ -70,8 +82,8 @@ class RepoBrainTools:
                       "warnings": stats.warnings})
 
     def search_project(self, query: str, limit: int = 10,
-                       types: list[str] | None = None) -> dict:
-        with self._store() as store:
+                       types: list[str] | None = None, auto_index: bool = True) -> dict:
+        def run(store):
             if not types:
                 results = search(store, query, limit=limit)
             else:
@@ -79,31 +91,38 @@ class RepoBrainTools:
                 for type_ in types:
                     combined.extend(search(store, query, limit=limit, node_type=type_))
                 results = sorted(combined, key=lambda item: item.score, reverse=True)[:limit]
-        return {"status": "ok", "results": [_safe(result.to_dict()) for result in results]}
+            return {"status": "ok", "results": [_safe(result.to_dict()) for result in results]}
+        return self._query(run, auto_index=auto_index)
 
-    def explain_project(self, focus: str = "overall") -> dict:
-        with self._store() as store:
-            result = {"status": "ok", "focus": focus, **project_overview(store)}
-        return _safe(result)
+    def explain_project(self, focus: str = "overall", auto_index: bool = True) -> dict:
+        return self._query(
+            lambda store: {"status": "ok", "focus": focus, **project_overview(store)},
+            auto_index=auto_index,
+        )
 
-    def project_brief(self, budget: int = DEFAULT_BUDGET) -> dict:
-        with self._store() as store:
-            result = project_brief(self.root, store, budget=budget)
-        return _safe(result)
+    def project_brief(self, budget: int = DEFAULT_BUDGET, auto_index: bool = True) -> dict:
+        return self._query(
+            lambda store: project_brief(self.root, store, budget=budget, auto_index=False),
+            auto_index=auto_index,
+        )
 
-    def explain_file(self, path: str) -> dict:
-        with self._store() as store:
+    def explain_file(self, path: str, auto_index: bool = True) -> dict:
+        def run(store):
             result = explain_file(store, path)
-        return {"status": "ok" if result else "not_found", "file": _safe(result)}
+            return {"status": "ok" if result else "not_found", "file": _safe(result)}
+        return self._query(run, auto_index=auto_index)
 
-    def find_symbol(self, name: str, exact: bool = False, limit: int = 20) -> dict:
-        with self._store() as store:
+    def find_symbol(self, name: str, exact: bool = False, limit: int = 20,
+                    auto_index: bool = True) -> dict:
+        def run(store):
             result = find_symbol(store, name, exact=exact, limit=limit)
-        return {"status": "ok", "symbols": _safe(result)}
+            return {"status": "ok", "symbols": _safe(result)}
+        return self._query(run, auto_index=auto_index)
 
-    def _trace(self, start: str, depth: int, direction: str = "both") -> dict:
+    def _trace(self, start: str, depth: int, direction: str = "both",
+               auto_index: bool = True) -> dict:
         depth = max(0, min(depth, 10))
-        with self._store() as store:
+        def run(store):
             starts = store.conn.execute(
                 "SELECT id, type, name, path FROM nodes WHERE lower(name)=lower(?) "
                 "OR lower(qualified_name)=lower(?) OR path=? LIMIT 20", (start, start, start)
@@ -137,38 +156,46 @@ class RepoBrainTools:
                     f"SELECT id,type,name,qualified_name,path,start_line,end_line FROM nodes "
                     f"WHERE id IN ({placeholders})", list(seen)
                 ).fetchall()
-        return {"status": "ok", "start": start, "nodes": _safe(nodes), "edges": edges}
+            return {"status": "ok", "start": start, "nodes": _safe(nodes), "edges": edges}
+        return self._query(run, auto_index=auto_index)
 
-    def trace_symbol(self, symbol: str, depth: int = 2) -> dict:
-        return self._trace(symbol, depth)
+    def trace_symbol(self, symbol: str, depth: int = 2, auto_index: bool = True) -> dict:
+        return self._trace(symbol, depth, auto_index=auto_index)
 
-    def trace_config(self, key: str, depth: int = 3) -> dict:
-        with self._store() as store:
+    def trace_config(self, key: str, depth: int = 3, auto_index: bool = True) -> dict:
+        def run(store):
             result = trace_config(store, key)
-        return {"status": "ok", **_safe(result)}
+            return {"status": "ok", **_safe(result)}
+        return self._query(run, auto_index=auto_index)
 
-    def trace_data_flow(self, start: str, depth: int = 4, direction: str = "both") -> dict:
+    def trace_data_flow(self, start: str, depth: int = 4, direction: str = "both",
+                        auto_index: bool = True) -> dict:
         if direction not in ("in", "out", "both"):
             raise ValueError("direction must be in, out, or both")
-        with self._store() as store:
+        def run(store):
             result = trace_data_flow(store, start, depth=depth, direction=direction)
-        return {"status": "ok" if result else "not_found", "flow": _safe(result)}
+            return {"status": "ok" if result else "not_found", "flow": _safe(result)}
+        return self._query(run, auto_index=auto_index)
 
-    def impact_analysis(self, target: str, change_type: str = "modify") -> dict:
-        with self._store() as store:
+    def impact_analysis(self, target: str, change_type: str = "modify",
+                        auto_index: bool = True) -> dict:
+        def run(store):
             result = impact_analysis(store, target, change_type=change_type)
-        return {"status": "ok" if result else "not_found", "impact": _safe(result)}
+            return {"status": "ok" if result else "not_found", "impact": _safe(result)}
+        return self._query(run, auto_index=auto_index)
 
-    def docs_for_code(self, target: str, limit: int = 50) -> dict:
-        with self._store() as store:
+    def docs_for_code(self, target: str, limit: int = 50, auto_index: bool = True) -> dict:
+        def run(store):
             result = docs_for_code(store, target, limit=limit)
-        return {"status": "ok", "documents": _safe(result)}
+            return {"status": "ok", "documents": _safe(result)}
+        return self._query(run, auto_index=auto_index)
 
     def code_for_docs(self, doc_path: str, heading: str | None = None,
-                      limit: int = 50) -> dict:
-        with self._store() as store:
+                      limit: int = 50, auto_index: bool = True) -> dict:
+        def run(store):
             result = code_for_docs(store, doc_path, heading=heading, limit=limit)
-        return {"status": "ok", "code": _safe(result)}
+            return {"status": "ok", "code": _safe(result)}
+        return self._query(run, auto_index=auto_index)
 
     def write_agent_memory(self, summary: str, decisions: list[str] | None = None,
                            assumptions: list[str] | None = None,
@@ -179,8 +206,12 @@ class RepoBrainTools:
                                   assumptions=assumptions, open_questions=open_questions,
                                   changed_files=changed_files, next_steps=next_steps)
 
-    def read_agent_memory(self, topic: str | None = None, limit: int = 10) -> dict:
-        return read_agent_memory(self.root, topic=topic, limit=limit)
+    def read_agent_memory(self, topic: str | None = None, limit: int = 10,
+                          auto_index: bool = True) -> dict:
+        return self._query(
+            lambda _store: read_agent_memory(self.root, topic=topic, limit=limit),
+            auto_index=auto_index,
+        )
 
 
 def create_server(root: str | Path):
