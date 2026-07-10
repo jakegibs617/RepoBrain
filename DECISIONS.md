@@ -293,3 +293,29 @@ and only marker-delimited blocks inside post-commit/post-merge dispatchers;
 uninstall removes those exact artifacts while preserving human hooks and agent
 instructions. The runner uses the interpreter that performed installation and
 resolves the Git top-level at execution time.
+
+## 2026-07-10 — Milestone 13 (diff-aware change context)
+
+### D24: Capture Git first, repair freshness second, resolve context third
+
+`change_context` captures immutable path/status/hunk evidence before invoking
+the M12 gate. This preserves the user's unit of work even though automatic
+indexing updates graph facts for that same working tree. Only after the gate
+returns `can_query=true` does M13 traverse symbols, impact evidence, tests, or
+MENTIONS; blocked/failed freshness returns no change facts.
+
+Working mode compares HEAD to the combined index/working tree and adds
+untracked files; branch mode compares merge-base(BASE, HEAD) to HEAD. Git
+plumbing is read-only and rename-aware. Changed line ranges map by span
+intersection to the refreshed graph. A deleted path cannot remain in that
+graph, so its old blob is parsed deterministically and labeled with
+`git:<revision>:path:line` provenance; its removed impact edges are reported as
+an unknown rather than reconstructed speculatively.
+
+Stale-document output remains a review recommendation. Live targets reuse
+MENTIONS edges and retain their confidence/inference fields. Rename/delete
+reconciliation necessarily removes the old target edge, so M13 has one narrow
+fallback: run the same exact path normalizer over persisted structured
+Markdown reference candidates. It never fuzzy-matches or resurrects ambiguous
+symbol references. Multi-target impact evidence deduplicates by node, edge
+kind, and edge provenance while retaining every changed-path reason.

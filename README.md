@@ -100,6 +100,10 @@ uv pip install -p .venv/bin/python -e ".[dev]"
 # --no-auto-index performs a non-mutating check and refuses stale reads
 .venv/bin/repobrain search "database" --no-auto-index
 
+# analyze the working change (staged + unstaged + untracked), or a branch diff
+.venv/bin/repobrain change-context
+.venv/bin/repobrain change-context --base main --json
+
 # install an idempotent Claude Code SessionStart hook and CLAUDE.md snippet
 .venv/bin/repobrain install-agent .
 .venv/bin/repobrain install-agent . --git-hooks

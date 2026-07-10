@@ -11,6 +11,7 @@ from .config import CONFIG_FILENAME, REPOBRAIN_DIR, RepoBrainConfig
 from .agent_install import install_agent as run_install_agent
 from .agent_install import uninstall_agent as run_uninstall_agent
 from .briefing import DEFAULT_BUDGET, MINIMUM_BUDGET, project_brief
+from .change_context import GitDiffError, change_context as run_change_context
 from .graph.queries import explain_file as run_explain_file
 from .graph.queries import code_for_docs as run_code_for_docs
 from .graph.queries import docs_for_code as run_docs_for_code
@@ -169,6 +170,26 @@ def brief(budget: int, path: str, as_json: bool, no_auto_index: bool) -> None:
         result = project_brief(root, store, budget=budget, auto_index=not no_auto_index)
     if result["freshness"]["status"] == "reindexed" and not as_json:
         click.echo(f"Freshness: {result['freshness']['message']}", err=True)
+    click.echo(json.dumps(result, indent=2) if as_json else result["text"], nl=as_json)
+
+
+@main.command("change-context")
+@click.option("--base", default=None, help="Compare merge-base(BASE, HEAD) to HEAD.")
+@click.option("--path", "path", type=click.Path(exists=True, file_okay=False), default=".",
+              show_default=True, help="Repository root whose change set to inspect.")
+@click.option("--json", "as_json", is_flag=True, help="Machine-readable output.")
+@_freshness_option
+def change_context(base: str | None, path: str, as_json: bool, no_auto_index: bool) -> None:
+    """Explain a working-tree or branch diff with impact, tests, and doc review."""
+    root = _resolve_root(path)
+    try:
+        with _open_store(root, gate=False) as store:
+            result = run_change_context(root, store, base=base,
+                                        auto_index=not no_auto_index)
+    except GitDiffError as exc:
+        raise click.ClickException(str(exc)) from exc
+    if result["status"] != "ok":
+        raise click.ClickException(result["freshness"]["message"])
     click.echo(json.dumps(result, indent=2) if as_json else result["text"], nl=as_json)
 
 

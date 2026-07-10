@@ -3,13 +3,24 @@
 ## Project Summary
 
 RepoBrain: a local-first second brain for AI coding agents (see `prd.md`).
-All ten PRD milestones and post-MVP Milestones 11–12 are now implemented. Milestones 1–4 delivered storage,
+All ten PRD milestones and post-MVP Milestones 11–13 are now implemented. Milestones 1–4 delivered storage,
 incremental indexing, code/docs parsing, search, and documentation mapping.
 Milestones 5–10 add config adapters and tracing, route/data-flow analysis,
 impact analysis, MCP tools, durable agent memory, and Markdown/HTML reports.
 
 ## Delivery Status
 
+- M13 is implemented on `feat/m13-diff-aware-change-context`:
+  `repobrain change-context` and the matching MCP tool capture a working or
+  merge-base branch diff before freshness repair, then map changed lines to
+  symbols, aggregate impact/tests, and flag unchanged docs that mention the
+  changed code.
+- Change capture distinguishes add/modify/rename/delete/copy/type changes,
+  preserves old/new paths and old/new line ranges, exposes binary/special
+  files honestly, and never mutates Git state. Deleted symbols are parsed
+  deterministically from the captured Git blob with revision provenance.
+- M13 verification: 146 pytest tests passed; Python compilation and whitespace
+  checks were clean before review.
 - M12 is implemented on `feat/m12-freshness-automation`: every read-only CLI
   and MCP query passes through one freshness gate. Small diffs are repaired
   incrementally; large, opted-out, or failed repairs refuse to serve stale
@@ -79,6 +90,9 @@ impact analysis, MCP tools, durable agent memory, and Markdown/HTML reports.
   the M12 shared pre-query gate and conservative auto-index thresholds.
 - `repobrain/agent_install.py` — conservative merge of the RepoBrain
   SessionStart hook plus a marker-owned CLAUDE.md snippet.
+- `repobrain/change_context.py` — M13 Git plumbing, changed-line mapping,
+  impact/test aggregation, live MENTIONS traversal, historical exact-path doc
+  evidence for renamed/deleted targets, and shared plain/JSON-ready results.
 
 ## Important Files
 
@@ -106,7 +120,7 @@ impact analysis, MCP tools, durable agent memory, and Markdown/HTML reports.
 
 ## Decisions
 
-See `DECISIONS.md` D23 for the M12 session.
+See `DECISIONS.md` D24 for the M13 session.
 
 ## Assumptions
 
@@ -149,10 +163,16 @@ See `DECISIONS.md` D23 for the M12 session.
 - M12 counts the full current size of added/changed files and the last indexed
   size of deleted files toward its byte threshold; it does not compute byte
   deltas. Queries over either threshold deliberately fail closed.
+- M13 captures Git state before M12 auto-indexing. Deleted nodes and their
+  graph edges are gone afterward, so deleted symbol spans come from the old
+  Git blob and deleted impact relationships are reported as unavailable.
+- Stale-doc candidates are review evidence, not semantic claims. Live targets
+  use MENTIONS edges; renamed/deleted paths use only exact structured path
+  references because their live MENTIONS edge necessarily disappears.
 
 ## Suggested Next Steps
 
-A ready-to-use prompt for the next session (scoped to M13) is in
+A ready-to-use prompt for the next session (scoped to Git history extraction) is in
 `docs/NEXT_SESSION_PROMPT.md`.
 
 ### Product direction (post-MVP review, 2026-07-10)
@@ -173,7 +193,7 @@ priority order:
    Add a staleness check on every query (size+mtime diff is already cheap),
    auto-reindex-on-query for small diffs, and optional git post-commit /
    post-merge hooks. The brief in M11 must never be served stale.
-3. **M13 — Diff-aware change context.** The agent's unit of work is a change,
+3. **M13 — Diff-aware change context.** **Delivered.** The agent's unit of work is a change,
    not a lookup. `repobrain change-context` over the working diff/branch:
    impacted symbols, tests to run, and — the differentiator — **stale-doc
    detection** using existing MENTIONS edges (code changed, referencing doc
