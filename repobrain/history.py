@@ -24,7 +24,7 @@ from .indexing.scanner import build_ignore_matcher
 EXTRACTOR = "git-history"
 #: bump when extraction/scoring output changes shape, so refresh_history
 #: re-extracts on upgrade even when HEAD is unchanged
-EXTRACTOR_VERSION = 2
+EXTRACTOR_VERSION = 3
 #: edge metadata keeps the newest N supporting commits; the full set stays
 #: derivable from git_commit_files, so evidence is preserved without letting
 #: chronically coupled pairs grow multi-KB metadata rows
@@ -220,7 +220,10 @@ def _resolve_identities(commits: list[_Commit]) -> dict[str, dict[str, list]]:
         rows: dict[str, list] = {}
         for added, deleted, path, old_path in commit.entries:
             current = resolve(path)
-            row = rows.setdefault(current, [0, 0, path])
+            # Preserve the old side on the rename commit itself. Otherwise a
+            # rename at the oldest window boundary has no old->current row and
+            # downstream continuity checks falsely report the identity gone.
+            row = rows.setdefault(current, [0, 0, old_path or path])
             row[0] += added or 0
             row[1] += deleted or 0
         resolved[commit.sha] = rows

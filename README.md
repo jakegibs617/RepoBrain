@@ -41,7 +41,8 @@ Implemented:
 - HTTP route extraction, grounded route-to-handler edges, data-flow tracing,
   and confidence-bucketed impact analysis
 - A local FastMCP server exposing all 13 core tools
-- Append-only structured agent memory mirrored into Markdown handoff files
+- Append-only structured agent memory mirrored into Markdown handoff files,
+  with deterministic graph-anchor verification and drift evidence
 - Grounded project overviews and Markdown/HTML graph reports
 - Deterministic Git history extraction over a bounded recent window:
   file-level co-change coupling with supporting commits and broad-commit
@@ -148,6 +149,8 @@ uv pip install -p .venv/bin/python -e ".[dev]"
 # durable agent memory
 .venv/bin/repobrain memory write --summary "Implemented auth flow" --next-step "Add expiry tests"
 .venv/bin/repobrain memory read --topic auth
+.venv/bin/repobrain memory verify
+.venv/bin/repobrain memory verify --json --no-auto-index
 
 # MCP (install the optional extra first)
 uv pip install -p .venv/bin/python -e ".[mcp]"

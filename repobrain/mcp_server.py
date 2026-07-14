@@ -26,7 +26,7 @@ from .history import (
     refresh_history,
 )
 from .indexing.indexer import Indexer
-from .memory import read_agent_memory, write_agent_memory
+from .memory import read_agent_memory, verify_agent_memory, write_agent_memory
 from .reporting import project_overview
 from .retrieval.keyword import search
 
@@ -250,7 +250,16 @@ class RepoBrainTools:
     def read_agent_memory(self, topic: str | None = None, limit: int = 10,
                           auto_index: bool = True) -> dict:
         return self._query(
-            lambda _store: read_agent_memory(self.root, topic=topic, limit=limit),
+            lambda store: read_agent_memory(
+                self.root, topic=topic, limit=limit, store=store,
+            ),
+            auto_index=auto_index,
+        )
+
+    def verify_agent_memory(self, limit: int = 1000,
+                            auto_index: bool = True) -> dict:
+        return self._query(
+            lambda store: verify_agent_memory(self.root, store, limit=limit),
             auto_index=auto_index,
         )
 
@@ -266,6 +275,7 @@ def create_server(root: str | Path):
         "trace_symbol", "trace_config", "trace_data_flow", "impact_analysis",
         "co_change", "churn_hotspots", "ownership",
         "docs_for_code", "code_for_docs", "write_agent_memory", "read_agent_memory",
+        "verify_agent_memory",
     ):
         server.tool(name=name)(getattr(tools, name))
     return server
