@@ -168,7 +168,8 @@ def test_install_agent_preserves_content_and_is_idempotent(tmp_path):
     commands = [hook["command"] for group in data["hooks"]["SessionStart"]
                 for hook in group["hooks"]]
     assert commands == [HOOK_COMMAND]
-    assert commands[0].startswith(str(Path(__import__("sys").executable)))
+    assert commands[0].startswith("uvx --from ")
+    assert " repobrain brief " in commands[0]
 
 
 def test_install_agent_repairs_owned_section_without_touching_later_content(tmp_path):

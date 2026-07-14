@@ -8,7 +8,7 @@ things live, and what connects to what.
 
 Everything runs offline. No API keys, no network calls.
 
-## Current status (Milestones 1–10 complete)
+## Current status (Milestones 1–15 plus distribution complete)
 
 Implemented:
 
@@ -69,15 +69,52 @@ runtime wiring remain intentionally conservative; see Limitations.
 Unresolvable or third-party imports are stored as `external_imports` metadata
 on the module node — never as dangling graph nodes.
 
-## Install
+## Try it with uvx
 
 Prefer a visual walkthrough? Open [`setup/index.html`](setup/index.html) in your browser for the interactive setup guide.
 
 Requires Python 3.11+ and [uv](https://docs.astral.sh/uv/).
 
 ```bash
+# one-off commands run in an isolated environment
+uvx repobrain --help
+uvx repobrain index .
+
+# install the MCP server entry and Claude session context in this repository
+# add --git-hooks to also keep the index fresh after commits and merges
+uvx repobrain install-agent .
+
+# restart the agent client, then verify that its RepoBrain MCP tools are listed
+# and call explain_project (or inspect the generated argument-array config)
+cat .mcp.json
+
+# remove only RepoBrain-owned entries and marker blocks
+uvx repobrain uninstall-agent .
+```
+
+The generated `.mcp.json` launches the repository-scoped server as
+`uvx --from <installed-repobrain[mcp]-requirement> repobrain mcp --path
+<absolute-root>`. Registry installs are pinned to the installed version; local
+wheel and editable installs retain their direct artifact/source URL. The JSON
+stores every token as a separate argument, so repository paths containing
+spaces do not depend on shell quoting. The `mcp` extra is optional for normal
+CLI use and installed automatically by that MCP launch command.
+
+For development from a source checkout:
+
+```bash
 uv venv .venv
 uv pip install -p .venv/bin/python -e ".[dev]"
+```
+
+To prove the package locally without publishing it:
+
+```bash
+uv build
+uvx --from dist/repobrain-0.1.0-py3-none-any.whl repobrain --help
+uv run --isolated --no-project \
+  --with "repobrain[mcp] @ file://$PWD/dist/repobrain-0.1.0-py3-none-any.whl" \
+  python -c "import mcp, repobrain"
 ```
 
 ## Usage
@@ -110,7 +147,7 @@ uv pip install -p .venv/bin/python -e ".[dev]"
 .venv/bin/repobrain change-context
 .venv/bin/repobrain change-context --base main --json
 
-# install an idempotent Claude Code SessionStart hook and CLAUDE.md snippet
+# install MCP config plus an idempotent Claude SessionStart hook and CLAUDE.md snippet
 .venv/bin/repobrain install-agent .
 .venv/bin/repobrain install-agent . --git-hooks
 .venv/bin/repobrain uninstall-agent .
@@ -289,3 +326,9 @@ open setup/graph.html
   copies are not followed (only renames); shallow clones and non-Git
   directories report history as unavailable while static queries keep
   working.
+- The generated MCP launch entry uses a cross-platform JSON argument array.
+  Claude SessionStart commands and optional Git hook dispatchers are shell
+  strings/scripts and currently require a POSIX-compatible shell; on native
+  Windows, use the MCP integration without `--git-hooks`, or run RepoBrain
+  under WSL. CLI indexing and MCP repository scoping do not otherwise rely on
+  shell parsing.

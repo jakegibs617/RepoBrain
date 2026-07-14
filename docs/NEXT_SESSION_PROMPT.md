@@ -1,6 +1,6 @@
 # Next Session Prompt
 
-Copy-paste the prompt below to start the distribution milestone.
+Copy-paste the prompt below to start the framework/runtime adapter milestone.
 
 ```text
 You are continuing work on RepoBrain, a local-first second brain for AI
@@ -8,59 +8,58 @@ coding agents. Development runs as a self-paced milestone loop: one milestone
 per feat/ branch, merge only when the full pytest suite passes and all
 confirmed /code-review findings are fixed.
 
-Start by reading AGENT_HANDOFF.md (especially Known Pitfalls), README.md,
-pyproject.toml, DECISIONS.md D21, D23, D25, and D26, plus
-repobrain/agent_install.py, repobrain/cli.py, and repobrain/mcp_server.py.
+Start by reading AGENT_HANDOFF.md (especially Known Pitfalls), prd.md runtime
+and impact-analysis sections, DECISIONS.md D14-D21 and D24-D25, plus
+repobrain/parsers/code_treesitter.py, repobrain/parsers/route_parser.py,
+repobrain/graph/queries.py, repobrain/indexing/indexer.py, and the Node/Express
+fixture and its tests.
 
-Your milestone is distribution: make RepoBrain genuinely one-step to try and
-one-step to install into an agent workflow, without weakening its local-first
-or conservative file-ownership guarantees.
+Your milestone is deterministic framework/runtime adapters: improve impact and
+data-flow precision for common Python and JavaScript web/ORM idioms without
+introducing speculative dynamic analysis or framework runtime dependencies.
 
 Implement:
-1. uvx-ready packaging. Verify a clean environment can run `uvx repobrain`
-   (or the correct project command) without a source checkout. Include all
-   runtime package data and keep MCP dependencies available through a clear,
-   tested install path.
-2. One-step agent installation. Extend `repobrain install-agent` so one
-   command can install the MCP configuration, marker-owned CLAUDE.md session
-   context, and optional Git hooks together. Generate `.mcp.json` in the
-   repository with a command that reliably launches RepoBrain for that exact
-   root.
-3. Conservative ownership and uninstall. Preserve unrelated JSON keys,
-   servers, hooks, and human Markdown. Repeated install must converge;
-   uninstall removes only RepoBrain-owned entries and files. Detect malformed
-   or conflicting user configuration and fail safely instead of overwriting.
-4. Cross-platform launch details. Avoid shell-dependent quoting; use argument
-   arrays and resolved paths. Cover spaces in repository paths and document
-   Windows limitations or support explicitly.
-5. Documentation and smoke path. README should provide a minimal sequence from
-   `uvx`/installation through `index`, `install-agent`, MCP verification, and
-   uninstall. Add a clean-environment packaging smoke test where practical.
-6. Tests. Cover wheel/sdist contents, console entry point, MCP config merge,
-   idempotency, conflict behavior, paths with spaces, combined install options,
-   exact uninstall, and existing hook/CLAUDE.md preservation.
+1. Define a narrow adapter interface or reconciler boundary that consumes
+   persisted syntax facts and emits source-grounded nodes/edges. Keep parser,
+   reconciliation, storage, and query responsibilities separate.
+2. Make Express-style inline/module-level route callbacks resolve to precise
+   Route/Endpoint-to-handler relationships instead of falling back to a Module
+   source when syntax provides a better identity.
+3. Add one high-value Python web-framework adapter (choose Flask or FastAPI
+   based on deterministic fixture coverage) for decorators, route methods,
+   handlers, and import-qualified calls.
+4. Add conservative ORM/table flow for one existing fixture path (for example
+   SQLAlchemy or a simple model/repository convention). Emit relationships only
+   when model/table identity is exact and unambiguous; label inference and
+   confidence honestly.
+5. Feed the new evidence through shared data-flow, impact-analysis, and
+   change-context queries without creating a framework-specific CLI/MCP fork.
+6. Cover full and incremental convergence: adapter-side additions, renames,
+   deletions, ambiguity, stale-edge cleanup, unchanged callers, and no-change
+   idempotency. Add adversarial fixtures that prove fuzzy/dynamic receivers are
+   skipped rather than guessed.
+7. Document supported patterns, confidence, and explicit limitations.
 
 Constraints:
-- No hosted API or model requirement.
-- Do not broaden ownership beyond marker-delimited Markdown, the exact
-  RepoBrain MCP server entry, and RepoBrain-owned hook artifacts.
-- Reuse agent_install.py and the existing CLI/MCP entry points; do not fork
-  installation logic into command handlers.
-- Keep current per-repository database scoping and freshness behavior.
-- Do not publish a package or push remotely unless the user explicitly asks;
-  prove distributability locally.
+- No imports or execution of the target application's framework/ORM.
+- No hosted API, model, embeddings, or network requirement.
+- Reuse deterministic node IDs and run cross-file reconciliation inside the
+  index transaction before orphan-edge cleanup.
+- Preserve existing Route/Endpoint, CALLS, data-flow depth, history-evidence,
+  freshness, and repository-root contracts.
+- Do not push or publish without explicit user permission.
 
 When done, run the full suite, run /code-review and fix confirmed findings,
-update AGENT_HANDOFF.md and DECISIONS.md, and report commands, test results,
-packaging artifacts checked, and known platform limitations. Rewrite this
-file for the next highest-priority milestone.
+update AGENT_HANDOFF.md and DECISIONS.md, and report supported framework
+patterns, skipped ambiguous cases, test results, and known limitations. Rewrite
+this file for the next highest-priority milestone.
 ```
 
 ## Scoping notes
 
-- Distribution is the adoption milestone after M15 memory verification.
-- Local-model semantic extraction remains deferred; installing RepoBrain must
-  not introduce Ollama, hosted APIs, embeddings, or model downloads.
-- Publishing to PyPI and pushing Git branches are external release actions and
-  require explicit user authorization; local wheel/sdist and isolated `uvx`
-  smoke tests are in scope.
+- Prefer one well-tested Python framework and one existing Express path over a
+  broad but shallow framework matrix.
+- Dynamic receiver dispatch remains out of scope unless a framework adapter
+  can ground the receiver through exact import/assignment syntax.
+- Protocol-level MCP integration tests and >1,000-file profiling remain the
+  next adoption-hardening follow-ups after adapter precision.
