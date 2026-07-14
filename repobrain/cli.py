@@ -21,6 +21,12 @@ from .graph.queries import trace_data_flow as run_trace_data_flow
 from .graph.queries import trace_config as run_trace_config
 from .graph.store import GraphStore
 from .freshness import FreshnessBlockedError, require_fresh
+from .history import (
+    co_change_report,
+    churn_report,
+    ownership_report,
+    refresh_history,
+)
 from .indexing.indexer import Indexer, RepoRootMismatchError
 from .memory import read_agent_memory, write_agent_memory
 from .retrieval.keyword import search as keyword_search
@@ -41,9 +47,11 @@ def _open_store(root: Path, *, auto_index: bool = True, gate: bool = True):
             f"No RepoBrain database at {db_path}. Run `repobrain index {root}` first."
         )
     store = GraphStore(db_path)
+    store.last_freshness = None
     try:
         if gate:
             freshness = require_fresh(root, store, auto_index=auto_index)
+            store.last_freshness = freshness
             if (freshness["status"] == "reindexed"
                     and not click.get_current_context().params.get("as_json", False)):
                 click.echo(f"Freshness: {freshness['message']}", err=True)
@@ -86,12 +94,14 @@ def init(path: str) -> None:
 @main.command()
 @click.argument("path", type=click.Path(exists=True, file_okay=False), default=".")
 @click.option("--no-incremental", is_flag=True, help="Re-parse every file, ignoring stored hashes.")
-def index(path: str, no_incremental: bool) -> None:
+@click.option("--no-history", is_flag=True, help="Skip the Git history extraction phase.")
+def index(path: str, no_incremental: bool, no_history: bool) -> None:
     """Index PATH (default: cwd) into PATH's own .repobrain/ database.
 
     The database is pinned to the indexed root; indexing a different root
     always uses (or creates) that root's own database instead of purging
-    this one.
+    this one. After files are indexed, an explicit history phase extracts
+    the recent Git commit window (skip with --no-history).
     """
     root = _resolve_root(path)
     config = RepoBrainConfig.load(root)
@@ -102,14 +112,29 @@ def index(path: str, no_incremental: bool) -> None:
             stats = indexer.index(root, incremental=not no_incremental)
         except RepoRootMismatchError as exc:
             raise click.ClickException(str(exc))
+        history = None if no_history else refresh_history(root, store, config=config)
     click.echo(f"Indexed {path}")
     click.echo(f"  files scanned : {stats.files_scanned}")
     click.echo(f"  files changed : {stats.files_changed}")
     click.echo(f"  files deleted : {stats.files_deleted}")
     click.echo(f"  nodes written : {stats.nodes_created}")
     click.echo(f"  edges written : {stats.edges_created}")
+    if history is not None:
+        click.echo(f"  history       : {_history_summary(history)}")
     for warning in stats.warnings:
         click.echo(f"  warning: {warning}")
+
+
+def _history_summary(history: dict) -> str:
+    status = history["status"]
+    if status == "extracted":
+        return (f"extracted {history['commits']} commit(s), "
+                f"{history['co_change_edges']} co-change edge(s)")
+    if status == "current":
+        return "up to date"
+    if status == "unavailable":
+        return f"unavailable ({history['reason']})"
+    return f"{status} ({history.get('error') or history.get('message', '')})"
 
 
 @main.command()
@@ -191,6 +216,65 @@ def change_context(base: str | None, path: str, as_json: bool, no_auto_index: bo
     if result["status"] != "ok":
         raise click.ClickException(result["freshness"]["message"])
     click.echo(json.dumps(result, indent=2) if as_json else result["text"], nl=as_json)
+
+
+@main.group()
+def history() -> None:
+    """Query deterministic Git history evidence (co-change, churn, ownership)."""
+
+
+def _emit_history_report(result: dict, as_json: bool) -> None:
+    if result["status"] != "ok":
+        raise click.ClickException(result["message"])
+    click.echo(json.dumps(result, indent=2) if as_json else result["text"], nl=as_json)
+
+
+@history.command("co-change")
+@click.argument("filepath")
+@click.option("--limit", type=click.IntRange(min=1), default=20, show_default=True)
+@click.option("--path", "path", type=click.Path(exists=True, file_okay=False), default=".",
+              show_default=True, help="Repository root whose history to query.")
+@click.option("--json", "as_json", is_flag=True, help="Machine-readable output.")
+@_freshness_option
+def history_co_change(filepath: str, limit: int, path: str,
+                      as_json: bool, no_auto_index: bool) -> None:
+    """Files that historically change together with FILEPATH (heuristic)."""
+    root = _resolve_root(path)
+    with _open_store(root, gate=False) as store:
+        result = co_change_report(root, store, filepath, limit=limit,
+                                  auto_index=not no_auto_index)
+    _emit_history_report(result, as_json)
+
+
+@history.command("hotspots")
+@click.option("--limit", type=click.IntRange(min=1), default=20, show_default=True)
+@click.option("--path", "path", type=click.Path(exists=True, file_okay=False), default=".",
+              show_default=True, help="Repository root whose history to query.")
+@click.option("--json", "as_json", is_flag=True, help="Machine-readable output.")
+@_freshness_option
+def history_hotspots(limit: int, path: str, as_json: bool, no_auto_index: bool) -> None:
+    """Churn hotspots: commit counts and added/deleted lines per file."""
+    root = _resolve_root(path)
+    with _open_store(root, gate=False) as store:
+        result = churn_report(root, store, limit=limit, auto_index=not no_auto_index)
+    _emit_history_report(result, as_json)
+
+
+@history.command("owners")
+@click.argument("filepath", required=False, default=None)
+@click.option("--limit", type=click.IntRange(min=1), default=10, show_default=True)
+@click.option("--path", "path", type=click.Path(exists=True, file_okay=False), default=".",
+              show_default=True, help="Repository root whose history to query.")
+@click.option("--json", "as_json", is_flag=True, help="Machine-readable output.")
+@_freshness_option
+def history_owners(filepath: str | None, limit: int, path: str,
+                   as_json: bool, no_auto_index: bool) -> None:
+    """Observed contribution history (not an authorization claim)."""
+    root = _resolve_root(path)
+    with _open_store(root, gate=False) as store:
+        result = ownership_report(root, store, filepath, limit=limit,
+                                  auto_index=not no_auto_index)
+    _emit_history_report(result, as_json)
 
 
 @main.command("install-agent")
@@ -548,7 +632,9 @@ def impact(target: str, change_type: str, depth: int, path: str,
            as_json: bool, no_auto_index: bool) -> None:
     """Estimate likely blast radius for a file or symbol change."""
     with _open_store(_resolve_root(path), auto_index=not no_auto_index) as store:
-        result = run_impact_analysis(store, target, change_type, depth)
+        history = (store.last_freshness or {}).get("history")
+        result = run_impact_analysis(store, target, change_type, depth,
+                                     history=history)
     if result is None:
         raise click.ClickException(f"No unique indexed target found for '{target}'.")
     if as_json:
@@ -557,6 +643,15 @@ def impact(target: str, change_type: str, depth: int, path: str,
         click.echo(f"\n{title}")
         for item in result[key]: click.echo(f"  {item['node']['path']} [{item['node']['type']}] via {item['via']} conf={item['confidence']:.2f}")
         if not result[key]: click.echo("  none")
+    click.echo("\nHistorical co-change (heuristic)")
+    historical = result["historical_evidence"]
+    for item in historical["items"]:
+        click.echo(f"  {item['node']['path']} via {item['via']} "
+                   f"support={item['support']} score={item['score']:.2f} "
+                   f"conf={item['confidence']:.2f}")
+    if not historical["items"]:
+        detail = f" ({historical['explanation']})" if historical.get("status") else ""
+        click.echo(f"  none{detail}")
 
 
 @main.command("report")

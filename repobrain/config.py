@@ -10,6 +10,8 @@ DB_FILENAME = "repobrain.sqlite"
 CONFIG_FILENAME = "config.json"
 
 DEFAULT_MAX_FILE_SIZE = 2 * 1024 * 1024  # 2 MB
+DEFAULT_HISTORY_MAX_COMMITS = 500
+DEFAULT_HISTORY_MAX_FILES_PER_COMMIT = 50
 
 
 @dataclass
@@ -18,6 +20,8 @@ class RepoBrainConfig:
     include_patterns: list[str] = field(default_factory=list)
     exclude_patterns: list[str] = field(default_factory=list)
     max_file_size_bytes: int = DEFAULT_MAX_FILE_SIZE
+    history_max_commits: int = DEFAULT_HISTORY_MAX_COMMITS
+    history_max_files_per_commit: int = DEFAULT_HISTORY_MAX_FILES_PER_COMMIT
 
     @classmethod
     def load(cls, root: str | Path) -> "RepoBrainConfig":

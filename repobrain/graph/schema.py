@@ -93,6 +93,7 @@ class EdgeType(StrEnum):
     COVERS = "COVERS"
     DEPENDS_ON = "DEPENDS_ON"
     MAY_IMPACT = "MAY_IMPACT"
+    CO_CHANGED_WITH = "CO_CHANGED_WITH"
     GENERATED_FROM = "GENERATED_FROM"
     OBSERVED_IN = "OBSERVED_IN"
     AUTHORED_BY_AGENT = "AUTHORED_BY_AGENT"
@@ -106,6 +107,16 @@ def node_id(type_: str, qualified_name_or_name: str, path: str) -> str:
     """
     raw = "\x00".join((str(type_), qualified_name_or_name or "", path or ""))
     return hashlib.sha1(raw.encode("utf-8")).hexdigest()
+
+
+def file_node_id(path: str) -> str:
+    """Deterministic id of the File node for `path`.
+
+    GenericFileParser keys File nodes on qualified_name == path (Node.id
+    prefers qualified_name over name), so every producer of File ids must go
+    through this helper instead of re-deriving that invariant.
+    """
+    return node_id(NodeType.FILE, path, path)
 
 
 def edge_id(type_: str, source_id: str, target_id: str, path: str, start_line: int | None) -> str:

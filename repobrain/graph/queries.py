@@ -594,9 +594,84 @@ def trace_data_flow(store: GraphStore, start: str, depth: int = 4,
     return {"start": _node_payload(row), "nodes": list(nodes.values()), "edges": edges}
 
 
+_CO_CHANGE_NODE_COLUMNS = ("id", "type", "name", "qualified_name", "path",
+                           "start_line", "end_line")
+
+
+def historical_co_change(store: GraphStore, paths: list[str], limit: int = 20,
+                         only_external: bool = False) -> dict:
+    """Separately labeled historical-evidence bucket for impact answers.
+
+    Co-change edges are correlation mined from recent Git history; they carry
+    their supporting commit ids and stay below static-impact confidence, so
+    callers must present them apart from observed dependency evidence.
+    With ``only_external`` the limit applies after excluding pairs entirely
+    inside ``paths``: intra-diff pairs rank highest (they co-change the most)
+    and would otherwise starve the unchanged partners callers actually want.
+    """
+    from ..history import CO_CHANGE_EXPLANATION, history_provenance
+
+    items = []
+    if paths:
+        marks = ",".join("?" for _ in paths)
+        select = ", ".join(
+            f"{alias}.{column} AS {alias}_{column}"
+            for alias in ("s", "t") for column in _CO_CHANGE_NODE_COLUMNS
+        )
+        external = (
+            f"AND ((s.path IN ({marks})) + (t.path IN ({marks}))) = 1"
+            if only_external else ""
+        )
+        args = [*paths, *paths] + ([*paths, *paths] if only_external else [])
+        rows = store.conn.execute(
+            f"""
+            SELECT {select}, e.confidence, e.metadata_json
+            FROM edges e
+            JOIN nodes s ON s.id = e.source_node_id
+            JOIN nodes t ON t.id = e.target_node_id
+            WHERE e.type = 'CO_CHANGED_WITH'
+              AND (s.path IN ({marks}) OR t.path IN ({marks}))
+              {external}
+            ORDER BY e.confidence DESC, s.path, t.path
+            LIMIT ?
+            """,
+            (*args, limit),
+        ).fetchall()
+        changed = set(paths)
+        for row in rows:
+            queried_side = "s" if row["s_path"] in changed else "t"
+            partner_side = "t" if queried_side == "s" else "s"
+            partner = {column: row[f"{partner_side}_{column}"]
+                       for column in _CO_CHANGE_NODE_COLUMNS}
+            meta = _meta(row)
+            items.append({
+                "node": _node_payload(partner), "via": "CO_CHANGED_WITH",
+                "co_changed_with": row[f"{queried_side}_path"],
+                "partner_changed": partner["path"] in changed,
+                "support": meta.get("support"), "score": meta.get("score"),
+                "confidence": row["confidence"],
+                "supporting_commits": meta.get("supporting_commits", []),
+                "supporting_commits_truncated":
+                    bool(meta.get("supporting_commits_truncated", False)),
+                "evidence": "git-history",
+            })
+    return {
+        "items": items,
+        "explanation": CO_CHANGE_EXPLANATION,
+        "provenance": history_provenance(store),
+    }
+
+
 def impact_analysis(store: GraphStore, target: str, change_type: str = "modify",
-                    depth: int = 3) -> dict | None:
-    """Estimate change blast radius with confidence buckets and evidence."""
+                    depth: int = 3, include_history: bool = True,
+                    history: dict | None = None) -> dict | None:
+    """Estimate change blast radius with confidence buckets and evidence.
+
+    ``history`` is the freshness gate's refresh_history envelope: when the
+    caller passes one that is not serveable (stale/unavailable/error), the
+    historical bucket is withheld with the reason instead of quietly serving
+    evidence extracted at a different HEAD.
+    """
     resolved = _resolve_code_target(store, target)
     if resolved is None:
         return None
@@ -637,10 +712,23 @@ def impact_analysis(store: GraphStore, target: str, change_type: str = "modify",
     low = [x for x in items if x["confidence"] < 0.6]
     tests = [x for x in items if x["node"]["type"] in {"TestFile", "TestCase"} or "/test" in x["node"]["path"]]
     docs = [x for x in items if x["node"]["type"] in {"MarkdownDocument", "MarkdownSection", "ADR"}]
+    from ..history import history_serveable, history_status_message
+
+    start_paths = sorted({r["path"] for r in start_rows if r["path"]})
+    if not include_history:
+        historical = {"items": [], "explanation": "History excluded by caller.",
+                      "provenance": None}
+    elif history is not None and not history_serveable(history):
+        historical = {"items": [], "status": history.get("status"),
+                      "explanation": history_status_message(history),
+                      "provenance": None}
+    else:
+        historical = historical_co_change(store, start_paths)
     return {
         "target": target, "change_type": change_type,
         "high_confidence": high, "medium_confidence": medium,
         "low_confidence": low, "recommended_tests": tests,
         "docs_likely_needing_updates": docs,
+        "historical_evidence": historical,
         "unknowns": ["Dynamic calls and runtime-only wiring are not statically observable."],
     }
