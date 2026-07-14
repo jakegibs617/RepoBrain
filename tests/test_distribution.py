@@ -145,7 +145,7 @@ def test_agent_install_migrates_legacy_interpreter_hook_without_duplication(tmp_
     assert json.loads(settings.read_text(encoding="utf-8")) == {}
 
 
-def test_agent_install_migrates_owned_package_requirement_versions(tmp_path):
+def test_agent_install_preserves_user_selected_package_requirement(tmp_path):
     old_hook = (
         'uvx --from "repobrain==0.0.9" repobrain brief '
         '--path "$CLAUDE_PROJECT_DIR" --budget 2000'
@@ -168,16 +168,35 @@ def test_agent_install_migrates_owned_package_requirement_versions(tmp_path):
         }},
     }), encoding="utf-8")
 
-    result = install_agent(tmp_path)
+    original_settings = settings.read_text(encoding="utf-8")
+    original_mcp = mcp.read_text(encoding="utf-8")
 
-    assert result["changed"] is True
-    data = json.loads(settings.read_text(encoding="utf-8"))
-    commands = [hook["command"] for group in data["hooks"]["SessionStart"]
-                for hook in group["hooks"]]
-    assert commands == [HOOK_COMMAND]
-    assert json.loads(mcp.read_text())["mcpServers"][MCP_SERVER_NAME] == mcp_server_entry(
-        tmp_path
+    with pytest.raises(ValueError, match="conflicting"):
+        install_agent(tmp_path)
+
+    assert settings.read_text(encoding="utf-8") == original_settings
+    assert mcp.read_text(encoding="utf-8") == original_mcp
+
+
+def test_agent_install_rejects_different_version_hook_without_mcp_config(tmp_path):
+    custom = (
+        'uvx --from "repobrain==0.0.9" repobrain brief '
+        '--path "$CLAUDE_PROJECT_DIR" --budget 2000'
     )
+    settings = tmp_path / ".claude" / "settings.json"
+    settings.parent.mkdir()
+    original = json.dumps({
+        "hooks": {"SessionStart": [
+            {"matcher": "", "hooks": [{"type": "command", "command": custom}]},
+        ]},
+    })
+    settings.write_text(original, encoding="utf-8")
+
+    with pytest.raises(ValueError, match="conflicting RepoBrain SessionStart"):
+        install_agent(tmp_path)
+
+    assert settings.read_text(encoding="utf-8") == original
+    assert not (tmp_path / ".mcp.json").exists()
 
 
 def test_agent_install_preserves_empty_groups_and_similar_user_commands(tmp_path):

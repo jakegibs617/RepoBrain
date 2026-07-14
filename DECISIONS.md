@@ -435,7 +435,9 @@ Installation reads and validates `.claude/settings.json` and `.mcp.json`,
 checks for an exact RepoBrain server conflict, and validates the Git repository
 when hooks are requested before changing configuration. Malformed JSON,
 invalid container shapes, or a pre-existing different `repobrain` server fail
-closed. Repeated installation converges on the same entries. Uninstall removes
+closed. A different RepoBrain version/source is also a conflict: command shape
+alone cannot prove that a user-selected fork was installer-owned. Repeated
+installation from the same provenance converges. Uninstall removes
 the exact generated server only when it still matches, the exact SessionStart
 command, marker-delimited Markdown, and owned Git artifacts; user-modified or
 unrelated configuration is preserved.
