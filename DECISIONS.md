@@ -380,3 +380,36 @@ Surrogateescaped Git bytes are mapped injectively into a NUL-tagged hex string
 before SQLite storage. Git identities cannot contain NUL, so the malformed
 namespace cannot collide with valid text; already-valid Unicode stays unchanged
 to preserve exact identity with scanner-produced graph paths.
+
+## 2026-07-14 — Milestone 15 (memory verification)
+
+### D26: Memory verdicts are pure, evidence-bearing read annotations
+
+Memory writes scan structured fields for syntactic path/code references and
+bounded code-shaped lexical tokens, then call one shared resolver: normalized exact/unique
+suffix paths first, followed by exact unambiguous symbol name or qualified
+name. Resolved anchors store the expected node identity, path/span, field and
+position, and resolution provenance. Ambiguous and unresolved attempts remain
+in resolution evidence but never become guessed anchors; an entry with no
+anchors is valid and `unanchored`.
+
+Verification never edits Markdown or stored node metadata. The shared read path
+copies each entry and annotates it deterministically: stable node id with the
+same span is `verified`; a changed span or a uniquely resolved M14 rename is
+`drifted`; a missing or ambiguous replacement is `invalidated`; no anchors is
+`unanchored`. Git rename fallback joins an anchor's old path through
+`git_commit_files.original_path` to one active current path and, for symbols,
+requires the same exact type/name within that file. Missing history degrades to
+explicit unavailable evidence rather than fuzzy matching.
+
+Rename commits persist their old path in `git_commit_files.original_path` even
+when they are the oldest commit in the bounded window; this M15-required raw
+evidence changes history extraction output and therefore bumps
+`EXTRACTOR_VERSION` to 3.
+
+CLI and MCP verification run only after the M12 gate. `repobrain index` updates
+graph and history facts but does not mutate memory verdicts; the next read
+recomputes them. Briefs use the same annotations, prioritize drifted/invalidated
+entries with a count line, and exclude those sessions from current memory
+sections. This keeps append-first human memory intact and makes repeated reads
+over an unchanged graph byte-for-byte convergent.

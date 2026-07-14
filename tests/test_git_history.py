@@ -207,7 +207,7 @@ def test_rename_continuity_attributes_old_commits_to_current_identity(tmp_path):
         original = store.conn.execute(
             "SELECT DISTINCT original_path FROM git_commit_files WHERE path='renamed.py' "
             "ORDER BY original_path").fetchall()
-        assert [row[0] for row in original] == ["a.py", "renamed.py"]
+        assert [row[0] for row in original] == ["a.py"]
         hot = {item["path"]: item for item in churn_hotspots(store)}
         assert hot["renamed.py"]["commits"] == 4
 

@@ -3,12 +3,26 @@
 ## Project Summary
 
 RepoBrain: a local-first second brain for AI coding agents (see `prd.md`).
-All ten PRD milestones and post-MVP Milestones 11–14 are now implemented. Milestones 1–4 delivered storage,
+All ten PRD milestones and post-MVP Milestones 11–15 are now implemented. Milestones 1–4 delivered storage,
 incremental indexing, code/docs parsing, search, and documentation mapping.
 Milestones 5–10 add config adapters and tracing, route/data-flow analysis,
 impact analysis, MCP tools, durable agent memory, and Markdown/HTML reports.
 
 ## Delivery Status
+
+- M15 memory verification is implemented on `feat/m15-memory-verification`.
+  New memory writes store exact file/unambiguous-symbol anchors plus resolution
+  evidence; every shared read annotates entries as verified, drifted,
+  invalidated, or unanchored without changing Markdown or stored metadata.
+- `repobrain memory verify` and MCP `verify_agent_memory` run behind the M12
+  gate with matching grounded JSON/plain results. Line moves use stable node
+  identity, path moves use M14 `git_commit_files` rename continuity, and
+  ambiguity is exposed rather than guessed.
+- M11 briefs put invalidated/drifted memory first, include an explicit count,
+  and omit invalidated sessions from current assumptions/recent-memory facts
+  while retaining atomic budget behavior.
+- M15 verification: 183 pytest tests passed; compilation and whitespace
+  checks were clean, and the final Codex review found no actionable regressions.
 
 - M14 is implemented on `feat/m14-git-history-extractor`: a deterministic
   Git history extractor (`repobrain/history.py`) mines a bounded recent
@@ -119,6 +133,9 @@ impact analysis, MCP tools, durable agent memory, and Markdown/HTML reports.
   ownership queries, `refresh_history` (the gate's history phase), and the
   gated CLI/MCP report builders. Raw evidence lives in `git_commits` /
   `git_commit_files`; only `CO_CHANGED_WITH` edges enter the graph (D25).
+- `repobrain/memory.py` — M15 append-first memory, deterministic anchor
+  extraction, pure verification annotations, Git rename fallback, and stable
+  plain/JSON report assembly. CLI/MCP/brief layers reuse this shared path.
 
 ## Important Files
 
@@ -147,8 +164,7 @@ impact analysis, MCP tools, durable agent memory, and Markdown/HTML reports.
 ## Decisions
 
 See `DECISIONS.md` D24 for the M13 session and D25 for the M14 Git history
-extractor (tables-not-nodes, bounded-window full rebuild, co-change scoring,
-confidence cap, gate interaction).
+extractor, and D26 for M15 memory anchoring and non-mutating validation.
 
 ## Assumptions
 
@@ -219,13 +235,21 @@ confidence cap, gate interaction).
 - History extraction errors are not persisted as permanent cache entries:
   Git timeouts and filesystem failures can be transient, so the next gated
   read retries and may recover at the same HEAD.
+- Memory anchors are write-time observations, not semantic truth. Validation
+  checks graph identity/existence and movement only; it cannot decide whether
+  unanchored prose remains conceptually correct.
+- Verification must stay a pure read. Never rewrite stored `metadata_json` or
+  Markdown with verdicts; unchanged graph state must produce identical output.
+- Rename drift requires unambiguous `git_commit_files` continuity. Without
+  history, a missing old identity is invalidated with honest unavailable
+  evidence rather than guessed from a similar name.
 - Non-UTF-8 Git metadata is escaped injectively into a SQLite-safe NUL-tagged
   hex representation. Valid Unicode remains unchanged so history paths retain
   graph identity; distinct malformed paths/authors must never collapse.
 
 ## Suggested Next Steps
 
-A ready-to-use prompt for the next session (scoped to memory verification) is
+A ready-to-use prompt for the next session (scoped to distribution) is
 in `docs/NEXT_SESSION_PROMPT.md`.
 
 ### Product direction (post-MVP review, 2026-07-10)
@@ -255,7 +279,7 @@ priority order:
    relationships static analysis misses (templates, migrations, config);
    blended into impact analysis and change context. Churn hotspots and
    observed ownership shipped too; commit-message mining deferred.
-5. **Memory verification.** Anchor memory entries to graph nodes and validate
+5. **Memory verification.** **Delivered (M15).** Anchor memory entries to graph nodes and validate
    on reindex ("decision references `create_user`, which no longer exists →
    flag stale"). Turns append-only memory into a validated knowledge base and
    feeds the M11 brief ("2 assumptions invalidated since last session").

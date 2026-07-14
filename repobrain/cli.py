@@ -28,7 +28,7 @@ from .history import (
     refresh_history,
 )
 from .indexing.indexer import Indexer, RepoRootMismatchError
-from .memory import read_agent_memory, write_agent_memory
+from .memory import read_agent_memory, verify_agent_memory, write_agent_memory
 from .retrieval.keyword import search as keyword_search
 from .reporting import generate_report, project_overview
 
@@ -682,8 +682,8 @@ def memory_read(topic: str | None, limit: int, path: str,
                 as_json: bool, no_auto_index: bool) -> None:
     """Read recent durable agent sessions."""
     root = _resolve_root(path)
-    with _open_store(root, auto_index=not no_auto_index):
-        result = read_agent_memory(root, topic=topic, limit=limit)
+    with _open_store(root, auto_index=not no_auto_index) as store:
+        result = read_agent_memory(root, topic=topic, limit=limit, store=store)
     if as_json:
         click.echo(json.dumps(result, indent=2))
         return
@@ -696,6 +696,21 @@ def memory_read(topic: str | None, limit: int, path: str,
                            ("questions", "open_questions"), ("next", "next_steps")):
             if entry.get(key):
                 click.echo(f"  {label}: {'; '.join(entry[key])}")
+        click.echo(f"  verification: {entry['verification']['verdict']}")
+
+
+@memory.command("verify")
+@click.option("--limit", type=click.IntRange(min=1), default=1000, show_default=True)
+@click.option("--path", "path", type=click.Path(exists=True, file_okay=False), default=".",
+              show_default=True, help="Repository root.")
+@click.option("--json", "as_json", is_flag=True, help="Machine-readable output.")
+@_freshness_option
+def memory_verify(limit: int, path: str, as_json: bool, no_auto_index: bool) -> None:
+    """Validate stored memory anchors against the current graph."""
+    root = _resolve_root(path)
+    with _open_store(root, auto_index=not no_auto_index) as store:
+        result = verify_agent_memory(root, store, limit=limit)
+    click.echo(json.dumps(result, indent=2) if as_json else result["text"], nl=as_json)
 
 
 @memory.command("write")

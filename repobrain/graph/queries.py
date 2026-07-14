@@ -173,6 +173,58 @@ def resolve_file_path(store: GraphStore, filepath: str) -> str | None:
     return None
 
 
+def resolve_graph_reference(store: GraphStore, value: str) -> dict:
+    """Resolve one exact file path or unambiguous symbol reference.
+
+    This is the shared deterministic boundary for memory anchoring. It never
+    fuzzy-matches: paths use ``resolve_file_path`` and symbols use the same
+    exact name/qualified-name uniqueness rule as Markdown reconciliation.
+    """
+    raw = value.strip()
+    if not raw:
+        return {"status": "unresolved", "reference": value,
+                "provenance": "empty-reference"}
+    path = resolve_file_path(store, raw)
+    if path is not None:
+        row = store.conn.execute(
+            "SELECT id,type,name,qualified_name,path,start_line,end_line "
+            "FROM nodes WHERE type='File' AND path=? LIMIT 1", (path,),
+        ).fetchone()
+        if row is not None:
+            normalized = raw.replace("\\", "/").removeprefix("./")
+            return {
+                "status": "resolved", "reference": value,
+                "provenance": "exact-path" if normalized == path else "unique-path-suffix",
+                "node": dict(row),
+            }
+    marks = ",".join("?" for _ in SYMBOL_TYPES)
+    rows = store.conn.execute(
+        f"SELECT id,type,name,qualified_name,path,start_line,end_line FROM nodes "
+        f"WHERE type IN ({marks}) AND (name=? OR qualified_name=?) "
+        "ORDER BY path,start_line,id LIMIT 3",
+        (*SYMBOL_TYPES, raw, raw),
+    ).fetchall()
+    unique = {row["id"]: row for row in rows}
+    if len(unique) == 1:
+        row = next(iter(unique.values()))
+        return {
+            "status": "resolved", "reference": value,
+            "provenance": (
+                "exact-qualified-symbol" if raw == row["qualified_name"]
+                and raw != row["name"] else "unique-symbol-name"
+            ),
+            "node": dict(row),
+        }
+    if len(unique) > 1:
+        return {
+            "status": "ambiguous", "reference": value,
+            "provenance": "ambiguous-exact-symbol",
+            "candidates": [dict(row) for row in unique.values()],
+        }
+    return {"status": "unresolved", "reference": value,
+            "provenance": "no-exact-match"}
+
+
 def _module_for_path(store: GraphStore, path: str):
     return store.conn.execute(
         "SELECT * FROM nodes WHERE type = 'Module' AND path = ? LIMIT 1", (path,)
