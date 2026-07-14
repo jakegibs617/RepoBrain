@@ -10,6 +10,25 @@ impact analysis, MCP tools, durable agent memory, and Markdown/HTML reports.
 
 ## Delivery Status
 
+- Distribution is implemented on `feat/distribution-agent-install`.
+  `repobrain install-agent` now installs one exact repository-scoped
+  `mcpServers.repobrain` entry in `.mcp.json`, the marker-owned CLAUDE.md
+  session context, the exact SessionStart hook, and optional Git hooks in one
+  command. JSON is preflighted before writes; malformed shapes and conflicting
+  RepoBrain servers fail closed, repeated installs converge, and uninstall
+  preserves unrelated or user-modified configuration.
+- The MCP entry uses `uvx --from <repobrain[mcp]-requirement> repobrain mcp
+  --path <resolved-root>` as a JSON argument array, pinning a registry install's exact
+  version or retaining a local wheel/editable direct URL. Persisted Claude/Git
+  automation uses the same stable provenance rather than an installation
+  environment's disposable interpreter; legacy interpreter-based SessionStart
+  entries are migrated without duplication.
+- Distribution verification builds and inspects wheel/sdist contents and the
+  console entry point. A clean local wheel ran under isolated `uvx`, and an
+  isolated environment imported the MCP extra successfully. Hatchling is an
+  explicit dev dependency so artifact inspection remains offline in the test
+  suite after normal dev installation. Full verification: 198 pytest tests
+  passed; compilation and whitespace checks were clean.
 - M15 memory verification is implemented on `feat/m15-memory-verification`.
   New memory writes store exact file/unambiguous-symbol anchors plus resolution
   evidence; every shared read annotates entries as verified, drifted,
@@ -122,8 +141,10 @@ impact analysis, MCP tools, durable agent memory, and Markdown/HTML reports.
 - `repobrain/freshness.py` — read-only working-tree comparison using the same
   scanner configuration and size+mtime shortcut as incremental indexing, plus
   the M12 shared pre-query gate and conservative auto-index thresholds.
-- `repobrain/agent_install.py` — conservative merge of the RepoBrain
-  SessionStart hook plus a marker-owned CLAUDE.md snippet.
+- `repobrain/agent_install.py` — preflighted conservative merge of the exact
+  RepoBrain `.mcp.json` server entry, SessionStart hook, marker-owned CLAUDE.md
+  snippet, and optional marker-owned Git hook artifacts, with exact uninstall
+  and legacy-hook migration.
 - `repobrain/change_context.py` — M13 Git plumbing, changed-line mapping,
   impact/test aggregation, live MENTIONS traversal, historical exact-path doc
   evidence for renamed/deleted targets, and shared plain/JSON-ready results.
@@ -246,10 +267,18 @@ extractor, and D26 for M15 memory anchoring and non-mutating validation.
 - Non-UTF-8 Git metadata is escaped injectively into a SQLite-safe NUL-tagged
   hex representation. Valid Unicode remains unchanged so history paths retain
   graph identity; distinct malformed paths/authors must never collapse.
+- Treat any existing `mcpServers.repobrain` value, including JSON `null`, as a
+  conflict unless it exactly matches the generated entry. Absence and a falsey
+  user value are not equivalent.
+- Persisted agent commands must not capture `sys.executable` from `uvx`; that
+  interpreter lives in a disposable cache. Use the stable `uvx` invocation and
+  retain recognition of the exact legacy interpreter command during migration
+  and uninstall.
 
 ## Suggested Next Steps
 
-A ready-to-use prompt for the next session (scoped to distribution) is
+A ready-to-use prompt for the next session (scoped to deterministic
+framework/runtime adapters) is
 in `docs/NEXT_SESSION_PROMPT.md`.
 
 ### Product direction (post-MVP review, 2026-07-10)
@@ -283,7 +312,7 @@ priority order:
    on reindex ("decision references `create_user`, which no longer exists →
    flag stale"). Turns append-only memory into a validated knowledge base and
    feeds the M11 brief ("2 assumptions invalidated since last session").
-6. **Distribution.** `uvx repobrain` packaging plus `repobrain install-agent`
+6. **Distribution.** **Delivered.** `uvx repobrain` packaging plus `repobrain install-agent`
    writing `.mcp.json`, the CLAUDE.md snippet, and hooks in one step. Adoption
    friction matters more than a ninth language.
 

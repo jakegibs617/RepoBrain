@@ -19,6 +19,7 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = [
+    "hatchling>=1.27",
     "pytest>=8.0",
 ]
 mcp = [

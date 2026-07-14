@@ -282,7 +282,7 @@ def history_owners(filepath: str | None, limit: int, path: str,
 @click.option("--git-hooks", is_flag=True,
               help="Also install idempotent post-commit and post-merge indexing hooks.")
 def install_agent(path: str, git_hooks: bool) -> None:
-    """Install an idempotent Claude Code SessionStart brief hook."""
+    """Install MCP and Claude context; optionally install Git indexing hooks."""
     try:
         result = run_install_agent(_resolve_root(path), git_hooks=git_hooks)
     except ValueError as exc:
@@ -293,7 +293,7 @@ def install_agent(path: str, git_hooks: bool) -> None:
 @main.command("uninstall-agent")
 @click.argument("path", type=click.Path(exists=True, file_okay=False), default=".")
 def uninstall_agent(path: str) -> None:
-    """Remove only RepoBrain-owned agent integration and Git hook blocks."""
+    """Remove only RepoBrain-owned MCP, Claude, and Git hook entries."""
     try:
         result = run_uninstall_agent(_resolve_root(path))
     except ValueError as exc:

@@ -413,3 +413,35 @@ recomputes them. Briefs use the same annotations, prioritize drifted/invalidated
 entries with a count line, and exclude those sessions from current memory
 sections. This keeps append-first human memory intact and makes repeated reads
 over an unchanged graph byte-for-byte convergent.
+
+## 2026-07-14 — Distribution milestone
+
+### D27: Agent installation owns one exact MCP entry and preflights conflicts
+
+The distributable command remains `repobrain`, with MCP support in the
+`repobrain[mcp]` extra so ordinary `uvx repobrain` runs do not install the MCP
+SDK. The `--from` requirement preserves installed provenance: direct local
+wheel/editable URLs remain direct references, while registry installs pin the
+exact installed version. Persisted Claude and Git automation also launches
+through that requirement rather than retaining the disposable interpreter path;
+the exact pre-distribution interpreter command is migrated as an owned legacy
+entry. The generated repository `.mcp.json` owns only
+`mcpServers.repobrain = {command: "uvx", args: [...]}`. Its argument array
+selects `repobrain[mcp]`, invokes the existing console entry point, and passes
+the resolved repository root as a single value; spaces therefore need no
+shell quoting and the MCP process remains pinned to the intended database.
+
+Installation reads and validates `.claude/settings.json` and `.mcp.json`,
+checks for an exact RepoBrain server conflict, and validates the Git repository
+when hooks are requested before changing configuration. Malformed JSON,
+invalid container shapes, or a pre-existing different `repobrain` server fail
+closed. Repeated installation converges on the same entries. Uninstall removes
+the exact generated server only when it still matches, the exact SessionStart
+command, marker-delimited Markdown, and owned Git artifacts; user-modified or
+unrelated configuration is preserved.
+
+Wheel and sdist contents are exercised in the test suite, including the
+console entry point and MCP extra metadata. Clean local artifacts are also
+smoked through isolated `uvx`/`uv` environments. Claude SessionStart and Git
+dispatchers remain documented POSIX-shell surfaces; the MCP launch itself is
+cross-platform JSON with no shell interpolation.
