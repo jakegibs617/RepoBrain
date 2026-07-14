@@ -349,7 +349,9 @@ discount), commits over `history_max_files_per_commit` (default 50) are
 recorded but excluded from pairing, and the score normalizes weighted support
 by the less frequently changed file's commit count. Rename continuity chains
 `old -> new` aliases newest-first so pre-rename commits attribute to the
-current identity. Supporting commit ids are preserved on every edge.
+current identity. To keep graph rows bounded, each edge stores the 20 newest
+supporting commit ids plus an explicit truncation flag; the full supporting
+set remains preserved and derivable from `git_commit_files`.
 
 History never impersonates static impact: edge confidence is capped at 0.55
 (below the 0.6 medium boundary), `impact_analysis` and `change_context`
@@ -361,3 +363,20 @@ rebases move HEAD without touching files); with auto-index disabled, history
 staleness fails closed for history-backed answers only, while non-Git and
 shallow repositories report `unavailable` honestly without blocking static
 queries.
+
+The repository probe is a single combined `rev-parse` process because it runs
+on every gated query. Bare repositories are distinguished from non-repositories
+and reported as unavailable. `history_params` includes extractor version,
+window limits, include/exclude patterns, and an ignore-file content digest, so
+any input that can change extraction output forces a rebuild even at the same
+HEAD. File identities are produced through `file_node_id(path)` to preserve
+the D2 qualified-name invariant across history, queries, and reconciliation.
+Extraction failures degrade the current read but are retried on the next gated
+read; persisting an error solely by HEAD and parameters would turn a transient
+Git timeout into permanent unavailability. Parameter-stamp construction is
+inside the same degradation boundary, so an unreadable ignore file cannot
+crash or block an otherwise valid static query.
+Surrogateescaped Git bytes are mapped injectively into a NUL-tagged hex string
+before SQLite storage. Git identities cannot contain NUL, so the malformed
+namespace cannot collide with valid text; already-valid Unicode stays unchanged
+to preserve exact identity with scanner-produced graph paths.

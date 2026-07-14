@@ -8,6 +8,7 @@ imports/calls/config/doc edges (DECISIONS D25).
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import subprocess
 from dataclasses import dataclass, field
@@ -16,14 +17,18 @@ from fnmatch import fnmatch
 from pathlib import Path
 
 from .config import RepoBrainConfig
-from .graph.schema import Edge, EdgeType, NodeType, node_id
+from .graph.schema import Edge, EdgeType, file_node_id
 from .graph.store import GraphStore
 from .indexing.scanner import build_ignore_matcher
 
 EXTRACTOR = "git-history"
 #: bump when extraction/scoring output changes shape, so refresh_history
 #: re-extracts on upgrade even when HEAD is unchanged
-EXTRACTOR_VERSION = 1
+EXTRACTOR_VERSION = 2
+#: edge metadata keeps the newest N supporting commits; the full set stays
+#: derivable from git_commit_files, so evidence is preserved without letting
+#: chronically coupled pairs grow multi-KB metadata rows
+MAX_SUPPORTING_COMMITS_STORED = 20
 
 #: a pair must co-change in at least this many qualifying commits to earn an edge
 MIN_CO_CHANGE_SUPPORT = 2
@@ -78,26 +83,59 @@ def _git_text(root: Path, *args: str) -> str:
 
 
 def probe_repository(root: str | Path) -> dict:
-    """Read-only availability probe: full local Git history or an honest reason."""
+    """Read-only availability probe: full local Git history or an honest reason.
+
+    One combined rev-parse answers everything: the probe runs on every gated
+    query, so it must cost a single process spawn. rev-parse prints answers in
+    argument order and stops at the first failure, which disambiguates
+    'not a repository' (no output) from 'repository without commits'
+    (flag lines printed, HEAD verification failed).
+    """
     root = Path(root).resolve()
     try:
-        inside = _run_git(root, "rev-parse", "--is-inside-work-tree")
+        probe = _run_git(
+            root, "rev-parse", "--is-inside-work-tree", "--is-bare-repository",
+            "--is-shallow-repository", "--verify", "HEAD",
+        )
     except GitHistoryError as exc:
         return {"available": False, "reason": "git_unavailable", "detail": str(exc), "head": None}
-    if inside.returncode != 0 or inside.stdout.strip() != b"true":
+    lines = probe.stdout.decode(errors="replace").splitlines()
+    if len(lines) < 3:
         return {"available": False, "reason": "not_a_git_repository", "head": None}
-    shallow = _run_git(root, "rev-parse", "--is-shallow-repository")
-    if shallow.returncode == 0 and shallow.stdout.strip() == b"true":
+    inside, bare, shallow = lines[0], lines[1], lines[2]
+    if bare == "true":
+        return {"available": False, "reason": "bare_repository", "head": None}
+    if inside != "true":
+        return {"available": False, "reason": "not_a_git_repository", "head": None}
+    if shallow == "true":
         return {"available": False, "reason": "shallow_repository", "head": None}
-    head = _run_git(root, "rev-parse", "--verify", "HEAD")
-    if head.returncode != 0:
+    if probe.returncode != 0 or len(lines) < 4:
         return {"available": False, "reason": "no_commits", "head": None}
-    return {"available": True, "reason": None, "head": head.stdout.decode().strip()}
+    return {"available": True, "reason": None, "head": lines[3].strip()}
 
 
 # -- log parsing -------------------------------------------------------------
 
 _HEADER_FIELDS = 4  # sha, committer time, author name, author email
+_BYTE_ESCAPE = "\0git-bytes:"
+
+
+def _clean(text: str) -> str:
+    """Make surrogateescape-decoded git output safe to store and render.
+
+    SQLite refuses to bind strings containing lone surrogates, so a single
+    non-UTF-8 path or author name anywhere in the window would otherwise
+    crash every gated query. Valid Unicode stays unchanged so history paths
+    match indexed paths. Malformed values use a NUL-tagged hex encoding: Git
+    identities cannot contain NUL, so the tag cannot collide with valid path
+    or author text and distinct byte sequences cannot merge.
+    """
+    try:
+        text.encode("utf-8")
+        return text
+    except UnicodeEncodeError:
+        raw = text.encode("utf-8", "surrogateescape")
+        return _BYTE_ESCAPE + raw.hex()
 
 
 def _parse_numstat_log(text: str) -> list[_Commit]:
@@ -116,7 +154,7 @@ def _parse_numstat_log(text: str) -> list[_Commit]:
     pending_paths: list[str] = []
     for token in text.split("\0"):
         if pending_counts is not None:
-            pending_paths.append(token)
+            pending_paths.append(_clean(token))
             if len(pending_paths) == 2:
                 old_path, new_path = pending_paths
                 commits[-1].entries.append(
@@ -133,7 +171,7 @@ def _parse_numstat_log(text: str) -> list[_Commit]:
             if len(parts) != _HEADER_FIELDS:
                 raise GitHistoryError("Malformed commit header from git log")
             commits.append(
-                _Commit(parts[0], int(parts[1]), parts[2], parts[3])
+                _Commit(parts[0], int(parts[1]), _clean(parts[2]), _clean(parts[3]))
             )
             expect_header = not separator
             if not token:
@@ -146,7 +184,7 @@ def _parse_numstat_log(text: str) -> list[_Commit]:
         if path == "":
             pending_counts = counts
         else:
-            commits[-1].entries.append((counts[0], counts[1], path, None))
+            commits[-1].entries.append((counts[0], counts[1], _clean(path), None))
     return commits
 
 
@@ -194,16 +232,35 @@ def _resolve_identities(commits: list[_Commit]) -> dict[str, dict[str, list]]:
 
 # -- extraction --------------------------------------------------------------
 
-def _history_params(config: RepoBrainConfig) -> dict:
+def _history_params(root: Path, config: RepoBrainConfig) -> dict:
+    """Everything extraction output depends on besides HEAD.
+
+    Include/exclude patterns and the ignore files shape which paths qualify,
+    so changing them must invalidate previously extracted history even when
+    HEAD has not moved.
+    """
+    digest = hashlib.sha1()
+    for name in (".gitignore", ".repobrainignore"):
+        ignore_file = root / name
+        if ignore_file.is_file():
+            digest.update(ignore_file.read_bytes())
+        digest.update(b"\0")
     return {
         "extractor_version": EXTRACTOR_VERSION,
         "max_commits": config.history_max_commits,
         "max_files_per_commit": config.history_max_files_per_commit,
+        "include_patterns": list(config.include_patterns),
+        "exclude_patterns": list(config.exclude_patterns),
+        "ignore_files_sha1": digest.hexdigest(),
     }
 
 
 def extract_history(
-    root: str | Path, store: GraphStore, *, config: RepoBrainConfig | None = None
+    root: str | Path,
+    store: GraphStore,
+    *,
+    config: RepoBrainConfig | None = None,
+    probe: dict | None = None,
 ) -> dict:
     """Extract the recent commit window and rebuild all extractor-owned facts.
 
@@ -212,7 +269,7 @@ def extract_history(
     """
     root = Path(root).resolve()
     config = config or RepoBrainConfig.load(root)
-    probe = probe_repository(root)
+    probe = probe or probe_repository(root)
     if not probe["available"]:
         raise GitHistoryError(f"Git history is unavailable: {probe['reason']}")
     commits = _read_window(root, config.history_max_commits)
@@ -260,10 +317,11 @@ def extract_history(
         store.upsert_edges(edges)
         store.set_meta("history_head", probe["head"])
         store.set_meta("history_extracted_at", now)
-        store.set_meta("history_params", json.dumps(_history_params(config), sort_keys=True))
+        store.set_meta("history_params",
+                       json.dumps(_history_params(root, config), sort_keys=True))
         store.set_meta("history_commit_count", str(len(commits)))
     return {
-        "status": "ok",
+        "status": "extracted",
         "head": probe["head"],
         "commits": len(commits),
         "oversized_commits": oversized,
@@ -314,15 +372,16 @@ def _co_change_edges(
         score = min(1.0, stats["weighted"] / denominator) if denominator else 0.0
         edges.append(Edge(
             type=EdgeType.CO_CHANGED_WITH,
-            # File nodes are keyed on qualified_name == path (GenericFileParser)
-            source_node_id=node_id(NodeType.FILE, first, first),
-            target_node_id=node_id(NodeType.FILE, second, second),
+            source_node_id=file_node_id(first),
+            target_node_id=file_node_id(second),
             path="",  # outside path-based cleanup; the orphan sweep owns removal
             metadata={
                 "support": stats["support"],
                 "weighted_support": round(stats["weighted"], 4),
                 "score": round(score, 4),
-                "supporting_commits": stats["commits"],
+                "supporting_commits": stats["commits"][:MAX_SUPPORTING_COMMITS_STORED],
+                "supporting_commits_truncated":
+                    len(stats["commits"]) > MAX_SUPPORTING_COMMITS_STORED,
                 "window_commits": window,
                 "head": head,
                 "paths": [first, second],
@@ -360,7 +419,10 @@ def refresh_history(
         return {"status": "error", "error": str(exc)}
     if not probe["available"]:
         return {"status": "unavailable", "reason": probe["reason"]}
-    params = json.dumps(_history_params(config), sort_keys=True)
+    try:
+        params = json.dumps(_history_params(root, config), sort_keys=True)
+    except Exception as exc:
+        return {"status": "error", "error": str(exc)}
     if (store.get_meta("history_head") == probe["head"]
             and store.get_meta("history_params") == params):
         return {"status": "current", "head": probe["head"]}
@@ -372,9 +434,22 @@ def refresh_history(
                        "disabled; run `repobrain index` to re-extract.",
         }
     try:
-        return {**extract_history(root, store, config=config), "status": "extracted"}
-    except GitHistoryError as exc:
+        return extract_history(root, store, config=config, probe=probe)
+    except Exception as exc:  # the gate must degrade, never crash a read query
         return {"status": "error", "error": str(exc)}
+
+
+def history_status_message(history: dict | None) -> str:
+    """One consistent human rendering of a refresh_history status dict."""
+    history = history or {"status": "unknown"}
+    if history.get("message"):
+        return history["message"]
+    if history.get("error"):
+        return f"Git history extraction failed: {history['error']}"
+    status = history.get("status", "unknown")
+    if history.get("reason"):
+        return f"Git history is {status}: {history['reason']}"
+    return f"Git history is {status}."
 
 
 def history_serveable(history: dict | None) -> bool:
@@ -420,12 +495,11 @@ def co_change_partners(store: GraphStore, path: str, limit: int = 20) -> list[di
         """,
         (path, path, limit),
     ).fetchall()
+    from .graph.queries import _meta
+
     items = []
     for row in rows:
-        try:
-            meta = json.loads(row["metadata_json"] or "{}")
-        except json.JSONDecodeError:
-            meta = {}
+        meta = _meta(row)
         partner = row["target_path"] if row["source_path"] == path else row["source_path"]
         items.append({
             "path": path,
@@ -435,6 +509,8 @@ def co_change_partners(store: GraphStore, path: str, limit: int = 20) -> list[di
             "score": meta.get("score"),
             "confidence": row["confidence"],
             "supporting_commits": meta.get("supporting_commits", []),
+            "supporting_commits_truncated":
+                bool(meta.get("supporting_commits_truncated", False)),
             "inference_reason": "git-co-change",
         })
     return items
@@ -494,7 +570,15 @@ def ownership(store: GraphStore, path: str | None = None, limit: int = 10) -> li
         """,
         (*args, limit),
     ).fetchall()
-    total = sum(row["commits"] for row in rows) or 1
+    # share must be of ALL matching commits, not just the displayed top-N
+    total = store.conn.execute(
+        f"""
+        SELECT COUNT(DISTINCT gc.sha)
+        FROM git_commits gc JOIN git_commit_files gcf ON gcf.sha = gc.sha
+        {where}
+        """,
+        args,
+    ).fetchone()[0] or 1
     return [
         {
             "author_name": row["author_name"], "author_email": row["author_email"],
@@ -522,10 +606,7 @@ def _gated_report(root: Path, store: GraphStore, auto_index: bool, build) -> dic
         return {
             "status": f"history_{history['status']}",
             "freshness": freshness, "history": history,
-            "message": history.get("message")
-                or history.get("error")
-                or f"Git history is {history['status']}"
-                   + (f": {history['reason']}" if history.get("reason") else "."),
+            "message": history_status_message(history),
         }
     result = build(store)
     result.update({
@@ -603,6 +684,8 @@ def _render_report(result: dict) -> str:
             more = len(item["supporting_commits"]) - 5
             if more > 0:
                 commits += f" (+{more} more)"
+            if item.get("supporting_commits_truncated"):
+                commits += " (newest sample; full set in git_commit_files)"
             lines.append(
                 f"- {item['partner_path']}  support={item['support']} "
                 f"score={item['score']:.2f} confidence={item['confidence']:.2f} "

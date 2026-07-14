@@ -47,9 +47,11 @@ def _open_store(root: Path, *, auto_index: bool = True, gate: bool = True):
             f"No RepoBrain database at {db_path}. Run `repobrain index {root}` first."
         )
     store = GraphStore(db_path)
+    store.last_freshness = None
     try:
         if gate:
             freshness = require_fresh(root, store, auto_index=auto_index)
+            store.last_freshness = freshness
             if (freshness["status"] == "reindexed"
                     and not click.get_current_context().params.get("as_json", False)):
                 click.echo(f"Freshness: {freshness['message']}", err=True)
@@ -630,7 +632,9 @@ def impact(target: str, change_type: str, depth: int, path: str,
            as_json: bool, no_auto_index: bool) -> None:
     """Estimate likely blast radius for a file or symbol change."""
     with _open_store(_resolve_root(path), auto_index=not no_auto_index) as store:
-        result = run_impact_analysis(store, target, change_type, depth)
+        history = (store.last_freshness or {}).get("history")
+        result = run_impact_analysis(store, target, change_type, depth,
+                                     history=history)
     if result is None:
         raise click.ClickException(f"No unique indexed target found for '{target}'.")
     if as_json:
@@ -639,6 +643,15 @@ def impact(target: str, change_type: str, depth: int, path: str,
         click.echo(f"\n{title}")
         for item in result[key]: click.echo(f"  {item['node']['path']} [{item['node']['type']}] via {item['via']} conf={item['confidence']:.2f}")
         if not result[key]: click.echo("  none")
+    click.echo("\nHistorical co-change (heuristic)")
+    historical = result["historical_evidence"]
+    for item in historical["items"]:
+        click.echo(f"  {item['node']['path']} via {item['via']} "
+                   f"support={item['support']} score={item['score']:.2f} "
+                   f"conf={item['confidence']:.2f}")
+    if not historical["items"]:
+        detail = f" ({historical['explanation']})" if historical.get("status") else ""
+        click.echo(f"  none{detail}")
 
 
 @main.command("report")

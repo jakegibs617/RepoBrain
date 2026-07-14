@@ -6,6 +6,8 @@ from pathlib import Path
 import pytest
 from click.testing import CliRunner
 
+import repobrain.history as history_module
+
 from repobrain.change_context import change_context
 from repobrain.cli import main
 from repobrain.config import RepoBrainConfig
@@ -13,8 +15,11 @@ from repobrain.freshness import ensure_fresh
 from repobrain.graph.queries import historical_co_change, impact_analysis
 from repobrain.graph.store import GraphStore
 from repobrain.history import (
+    EXTRACTOR_VERSION,
     GitHistoryError,
     MAX_CO_CHANGE_CONFIDENCE,
+    MAX_SUPPORTING_COMMITS_STORED,
+    _clean,
     _parse_numstat_log,
     co_change_partners,
     co_change_report,
@@ -114,6 +119,30 @@ def test_parse_numstat_log_handles_renames_binary_and_empty_commits():
     ]
     assert commits[1].entries == []
     assert commits[2].entries == [(5, 1, "x.py", None)]
+
+
+def test_non_utf8_git_identities_are_sqlite_safe_and_remain_distinct():
+    first = _clean("path-\udcff")
+    second = _clean("path-\udcfe")
+    valid_private_use = "path-\ue000\ue1ff"
+    assert first != second
+    assert first.startswith("\0git-bytes:")
+    assert _clean(valid_private_use) == valid_private_use
+    assert all(value.encode("utf-8") for value in (first, second))
+
+
+def test_valid_private_use_path_keeps_graph_and_history_identity(tmp_path):
+    root = tmp_path / "private_use_path"
+    root.mkdir()
+    _init_repo(root)
+    special = "a\ue000.py"
+    for revision in range(2):
+        _write(root, special, f"a = {revision}\n")
+        _write(root, "b.py", f"b = {revision}\n")
+        _commit_all(root, f"shared {revision}")
+    with _indexed(root) as store:
+        extract_history(root, store)
+        assert co_change_partners(store, special)[0]["partner_path"] == "b.py"
 
 
 def test_extraction_is_idempotent_and_score_math_is_exact(tmp_path):
@@ -235,6 +264,50 @@ def test_window_is_bounded_by_configured_commit_count(tmp_path):
         assert store.conn.execute("SELECT COUNT(*) FROM git_commits").fetchone()[0] == 2
 
 
+def test_extractor_version_change_forces_refresh_at_unchanged_head(tmp_path):
+    root = _pair_repo(tmp_path)
+    with _indexed(root) as store:
+        assert refresh_history(root, store)["status"] == "extracted"
+        params = json.loads(store.get_meta("history_params"))
+        params["extractor_version"] = EXTRACTOR_VERSION - 1
+        store.set_meta("history_params", json.dumps(params, sort_keys=True))
+        store.commit()
+
+        refreshed = refresh_history(root, store)
+        assert refreshed["status"] == "extracted"
+        assert refreshed["head"] == _git(root, "rev-parse", "HEAD")
+        assert json.loads(store.get_meta("history_params"))["extractor_version"] == EXTRACTOR_VERSION
+
+
+def test_supporting_commit_metadata_is_capped_without_losing_raw_evidence(tmp_path):
+    root = tmp_path / "many_shared_commits"
+    root.mkdir()
+    _init_repo(root)
+    for revision in range(MAX_SUPPORTING_COMMITS_STORED + 2):
+        _write(root, "a.py", f"a = {revision}\n")
+        _write(root, "b.py", f"b = {revision}\n")
+        _commit_all(root, f"shared {revision}")
+
+    with _indexed(root) as store:
+        extract_history(root, store)
+        pair = co_change_partners(store, "a.py")[0]
+        assert pair["support"] == MAX_SUPPORTING_COMMITS_STORED + 2
+        assert len(pair["supporting_commits"]) == MAX_SUPPORTING_COMMITS_STORED
+        assert pair["supporting_commits_truncated"] is True
+        historical = historical_co_change(store, ["a.py"])["items"][0]
+        assert historical["supporting_commits_truncated"] is True
+        metadata = json.loads(store.conn.execute(
+            "SELECT metadata_json FROM edges WHERE type='CO_CHANGED_WITH'"
+        ).fetchone()[0])
+        assert metadata["supporting_commits_truncated"] is True
+        raw_support = store.conn.execute(
+            "SELECT COUNT(*) FROM git_commit_files a "
+            "JOIN git_commit_files b ON b.sha=a.sha "
+            "WHERE a.path='a.py' AND b.path='b.py'"
+        ).fetchone()[0]
+        assert raw_support == pair["support"]
+
+
 def test_ownership_reports_share_and_recency_with_disclaimer(tmp_path):
     root = tmp_path / "owners_repo"
     root.mkdir()
@@ -319,6 +392,18 @@ def test_change_context_flags_unchanged_historical_partners(tmp_path):
                    for item in both["historical_impact"]["items"])
 
 
+def test_branch_context_does_not_claim_committed_rename_history_is_unavailable(tmp_path):
+    root = _pair_repo(tmp_path)
+    _git(root, "branch", "base")
+    _git(root, "mv", "a.py", "renamed.py")
+    _commit_all(root, "rename a")
+    with _indexed(root) as store:
+        result = change_context(root, store, base="base")
+        historical = result["historical_impact"]
+        assert any(item["node"]["path"] == "b.py" for item in historical["items"])
+        assert historical["notes"] == []
+
+
 def test_freshness_gate_reextracts_on_new_commits_and_fails_closed_when_disabled(tmp_path):
     root = _pair_repo(tmp_path)
     with _indexed(root) as store:
@@ -335,6 +420,42 @@ def test_freshness_gate_reextracts_on_new_commits_and_fails_closed_when_disabled
         repaired = co_change_report(root, store, "a.py")
         assert repaired["status"] == "ok"
         assert repaired["history"]["status"] == "extracted"
+
+
+def test_refresh_retries_a_transient_extraction_failure(tmp_path, monkeypatch):
+    root = _pair_repo(tmp_path)
+    original = history_module._read_window
+    calls = 0
+
+    def flaky_read_window(path, limit):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise TimeoutError("transient git timeout")
+        return original(path, limit)
+
+    monkeypatch.setattr(history_module, "_read_window", flaky_read_window)
+    with _indexed(root) as store:
+        first = refresh_history(root, store)
+        second = refresh_history(root, store)
+        assert first == {"status": "error", "error": "transient git timeout"}
+        assert second["status"] == "extracted"
+        assert calls == 2
+
+
+def test_history_parameter_io_failure_does_not_block_static_freshness(tmp_path, monkeypatch):
+    root = _pair_repo(tmp_path)
+
+    def unreadable_params(_root, _config):
+        raise OSError("ignore file unreadable")
+
+    monkeypatch.setattr(history_module, "_history_params", unreadable_params)
+    with _indexed(root) as store:
+        gate = ensure_fresh(root, store)
+        assert gate["can_query"] is True
+        assert gate["history"] == {
+            "status": "error", "error": "ignore file unreadable",
+        }
 
 
 def test_non_git_and_shallow_repositories_fail_honestly(tmp_path, small_app):
@@ -358,6 +479,12 @@ def test_non_git_and_shallow_repositories_fail_honestly(tmp_path, small_app):
         report = churn_report(shallow, store)
         assert report["status"] == "history_unavailable"
         assert "shallow_repository" in report["message"]
+
+    bare = tmp_path / "bare.git"
+    _git(tmp_path, "init", "-q", "--bare", str(bare))
+    assert probe_repository(bare) == {
+        "available": False, "reason": "bare_repository", "head": None,
+    }
 
 
 def test_extraction_never_mutates_git_state(tmp_path):
@@ -426,7 +553,7 @@ def test_self_hosting_history_extraction_is_grounded(tmp_path):
     with GraphStore(tmp_path / "self.sqlite") as store:
         Indexer(store).index(project_root, incremental=False)
         stats = extract_history(project_root, store)
-        assert stats["status"] == "ok" and stats["commits"] > 0
+        assert stats["status"] == "extracted" and stats["commits"] > 0
         assert stats["head"] == _git(project_root, "rev-parse", "HEAD")
         rows = store.conn.execute(
             "SELECT metadata_json, confidence FROM edges WHERE type='CO_CHANGED_WITH'"

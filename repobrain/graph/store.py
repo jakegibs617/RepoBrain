@@ -114,6 +114,9 @@ class GraphStore:
 
     def __init__(self, db_path: str | Path):
         self.db_path = Path(db_path)
+        #: the last freshness-gate result for this store, set by gated
+        #: surfaces so downstream queries can honor history serveability
+        self.last_freshness: dict | None = None
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self.conn = sqlite3.connect(str(self.db_path))
         self.conn.row_factory = sqlite3.Row

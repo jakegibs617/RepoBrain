@@ -63,6 +63,7 @@ class RepoBrainTools:
             freshness = ensure_fresh(self.root, store, auto_index=auto_index)
             if not freshness["can_query"]:
                 return {"status": freshness["status"], "freshness": _safe(freshness)}
+            store.last_freshness = freshness
             result = callback(store)
         result = _safe(result)
         result["freshness"] = _safe(freshness)
@@ -176,8 +177,11 @@ class RepoBrainTools:
                 if direction in ("in", "both"):
                     clauses.append(f"target_node_id IN ({placeholders})")
                     params.extend(frontier)
+                # CO_CHANGED_WITH is correlation evidence, not a structural
+                # dependency: traces must not present or expand through it
                 found = store.conn.execute(
-                    f"SELECT * FROM edges WHERE {' OR '.join(clauses)}", params
+                    f"SELECT * FROM edges WHERE type != 'CO_CHANGED_WITH' "
+                    f"AND ({' OR '.join(clauses)})", params
                 ).fetchall()
                 edges.extend(_safe(row) for row in found)
                 adjacent = {value for row in found for value in
@@ -215,7 +219,9 @@ class RepoBrainTools:
     def impact_analysis(self, target: str, change_type: str = "modify",
                         auto_index: bool = True) -> dict:
         def run(store):
-            result = impact_analysis(store, target, change_type=change_type)
+            history = (getattr(store, "last_freshness", None) or {}).get("history")
+            result = impact_analysis(store, target, change_type=change_type,
+                                     history=history)
             return {"status": "ok" if result else "not_found", "impact": _safe(result)}
         return self._query(run, auto_index=auto_index)
 

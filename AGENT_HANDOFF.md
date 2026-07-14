@@ -23,8 +23,13 @@ impact analysis, MCP tools, durable agent memory, and Markdown/HTML reports.
   `historical_evidence`/`historical_impact` bucket capped below static
   confidence. The M12 gate re-extracts when HEAD or history parameters move;
   shallow/non-Git repos report `unavailable` without blocking static queries.
-- M14 verification: 164 pytest tests passed; Python compilation and manual
-  CLI/MCP smoke runs were clean before review.
+- The M14 refinement pass uses one `rev-parse` probe spawn, reports bare
+  repositories explicitly, invalidates caches on extractor/ignore/config
+  changes, centralizes File identity in `file_node_id`, and caps edge metadata
+  at 20 newest supporting commits while retaining the complete evidence set in
+  `git_commit_files`.
+- M14 verification: 171 pytest tests passed; whitespace checks and the
+  uncommitted Codex review were clean before merge.
 - M13 is implemented on `feat/m13-diff-aware-change-context`:
   `repobrain change-context` and the matching MCP tool capture a working or
   merge-base branch diff before freshness repair, then map changed lines to
@@ -196,15 +201,27 @@ confidence cap, gate interaction).
   them; removal happens via the extractor-owned rebuild and the orphan-edge
   sweep. Don't give them a real path.
 - `refresh_history` compares HEAD **and** the `history_params` meta stamp
-  (window, file cap, extractor version). Bump `EXTRACTOR_VERSION` in
+  (window, file cap, include/exclude patterns, ignore-file digest, extractor
+  version). Bump `EXTRACTOR_VERSION` in
   `repobrain/history.py` whenever extraction or scoring output changes shape,
   or upgraded databases will keep serving old-shaped history as "current".
 - File node ids are `node_id("File", path, path)` — `Node.id` prefers
   `qualified_name` (the full path) over `name` (the basename). Building File
-  ids from basenames silently creates edges that join to nothing.
+  ids from basenames silently creates edges that join to nothing. Use
+  `file_node_id(path)` rather than re-deriving this invariant.
+- `CO_CHANGED_WITH.metadata.supporting_commits` is intentionally capped at
+  the 20 newest SHAs. `supporting_commits_truncated=true` says the display
+  sample is incomplete; the full intersection remains derivable from
+  `git_commit_files` and must not be inferred from the capped list.
 - History staleness never blocks static queries: with `--no-auto-index` the
   gate reports history `stale` and only history-backed answers fail closed.
   Non-Git and shallow repositories are `unavailable`, not errors.
+- History extraction errors are not persisted as permanent cache entries:
+  Git timeouts and filesystem failures can be transient, so the next gated
+  read retries and may recover at the same HEAD.
+- Non-UTF-8 Git metadata is escaped injectively into a SQLite-safe NUL-tagged
+  hex representation. Valid Unicode remains unchanged so history paths retain
+  graph identity; distinct malformed paths/authors must never collapse.
 
 ## Suggested Next Steps
 

@@ -10,8 +10,8 @@ from pathlib import Path
 from .config import RepoBrainConfig
 from .freshness import ensure_fresh
 from .graph.queries import historical_co_change, impact_analysis
-from .graph.schema import NodeType, node_id
-from .history import history_serveable
+from .graph.schema import file_node_id
+from .history import history_serveable, history_status_message
 from .graph.store import GraphStore
 from .indexing.doc_references import MarkdownMentionReconciler
 from .indexing.scanner import detect_language
@@ -77,7 +77,9 @@ def change_context(
         "freshness": freshness,
         "changes": changes,
         "impact": impacts,
-        "historical_impact": _historical_impact(store, freshness, changes),
+        "historical_impact": _historical_impact(
+            store, freshness, changes, mode=captured["mode"],
+        ),
         "tests_to_run": tests,
         "docs_to_review": docs,
         "unknowns": impact_unknowns,
@@ -298,7 +300,9 @@ def _node_record(node: dict, change: dict) -> dict:
     }
 
 
-def _historical_impact(store: GraphStore, freshness: dict, changes: list[dict]) -> dict:
+def _historical_impact(
+    store: GraphStore, freshness: dict, changes: list[dict], *, mode: str,
+) -> dict:
     """Historically co-changed files that are NOT part of this diff.
 
     Like stale-doc detection, this is review evidence: recent history says
@@ -309,17 +313,27 @@ def _historical_impact(store: GraphStore, freshness: dict, changes: list[dict]) 
     if not history_serveable(history):
         return {
             "status": history.get("status", "unknown"), "items": [],
-            "reason": history.get("reason") or history.get("error")
-            or history.get("message") or "history freshness unknown",
+            "reason": history_status_message(history),
         }
     paths = sorted({item["new_path"] for item in changes if item.get("new_path")})
-    evidence = historical_co_change(store, paths)
+    evidence = historical_co_change(store, paths, only_external=True)
     items = [
         {**item,
          "why": "Historically co-changed with this diff's files but unchanged here."}
         for item in evidence["items"] if not item["partner_changed"]
     ]
-    return {"status": "ok", "items": items,
+    notes = []
+    if any(
+        item["status"] == "deleted"
+        or (mode == "working" and item["status"] == "renamed")
+        for item in changes
+    ):
+        # graph reconciliation removed the old File node, and with it every
+        # co-change edge keyed on a deleted or uncommitted pre-rename identity;
+        # committed branch renames are rebuilt through history continuity
+        notes.append("Historical co-change partners of deleted or uncommitted "
+                     "renamed paths are unavailable after graph reconciliation.")
+    return {"status": "ok", "items": items, "notes": notes,
             "explanation": evidence["explanation"],
             "provenance": evidence["provenance"]}
 
@@ -469,9 +483,7 @@ def _historical_path_doc_candidates(
                 (document["path"], line or 1, line or 1),
             ).fetchone()
             old_path = change["old_path"]
-            target_id = (change.get("file_node") or {}).get("id") or node_id(
-                NodeType.FILE, old_path.rsplit("/", 1)[-1], old_path,
-            )
+            target_id = (change.get("file_node") or {}).get("id") or file_node_id(old_path)
             reason = {"changed_path": change.get("new_path") or old_path,
                       "old_path": old_path, "status": change["status"]}
             results.append({
@@ -527,6 +539,8 @@ def render_change_context(result: dict) -> str:
             )
     else:
         lines.append("- None identified.")
+    for note in historical.get("notes", []):
+        lines.append(f"- Note: {note}")
     lines.append("\nTests to run")
     lines.extend(f"- {item['node']['path']}" for item in result["tests_to_run"])
     if not result["tests_to_run"]:
