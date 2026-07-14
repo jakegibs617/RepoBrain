@@ -56,27 +56,26 @@ def mcp_server_entry(root: str | Path) -> dict:
     }
 
 
-def _is_repobrain_requirement(value: object, *, mcp: bool = False) -> bool:
-    project = f"{PACKAGE_NAME}[mcp]" if mcp else PACKAGE_NAME
-    return isinstance(value, str) and (
-        value == project
-        or (value.startswith(f"{project}==") and len(value) > len(project) + 2)
-        or (value.startswith(f"{project} @ ") and len(value) > len(project) + 3)
-    )
-
-
 def _is_owned_mcp_entry(entry: object, root: Path) -> bool:
-    if not isinstance(entry, dict) or set(entry) != {"command", "args"}:
+    return entry == mcp_server_entry(root)
+
+
+def _is_repobrain_uvx_hook_command(command: object) -> bool:
+    if not isinstance(command, str):
         return False
-    args = entry.get("args")
+    try:
+        tokens = shlex.split(command)
+    except ValueError:
+        return False
     return (
-        entry.get("command") == MCP_COMMAND
-        and isinstance(args, list)
-        and len(args) == 6
-        and args[0] == "--from"
-        and _is_repobrain_requirement(args[1], mcp=True)
-        and args[2:5] == ["repobrain", "mcp", "--path"]
-        and args[5] == str(root.resolve())
+        len(tokens) == 9
+        and tokens[:2] == ["uvx", "--from"]
+        and (tokens[2] == PACKAGE_NAME
+             or tokens[2].startswith(f"{PACKAGE_NAME}==")
+             or tokens[2].startswith(f"{PACKAGE_NAME} @ "))
+        and tokens[3:] == [
+            "repobrain", "brief", "--path", "$CLAUDE_PROJECT_DIR", "--budget", "2000",
+        ]
     )
 
 
@@ -96,18 +95,7 @@ def _is_owned_hook_command(command: object) -> bool:
     """Recognize the current hook and the exact pre-distribution command form."""
     if not isinstance(command, str):
         return False
-    try:
-        command_tokens = shlex.split(command)
-    except ValueError:
-        return False
-    if (
-        len(command_tokens) == 9
-        and command_tokens[:2] == ["uvx", "--from"]
-        and _is_repobrain_requirement(command_tokens[2])
-        and command_tokens[3:] == [
-            "repobrain", "brief", "--path", "$CLAUDE_PROJECT_DIR", "--budget", "2000",
-        ]
-    ):
+    if command == HOOK_COMMAND:
         return True
     if not command.endswith(LEGACY_HOOK_SUFFIX):
         return False
@@ -167,9 +155,14 @@ def _prepare_settings(path: Path) -> tuple[dict, bool, bool]:
             )
         normalized_hooks = []
         for hook in group_hooks:
+            command = hook.get("command") if isinstance(hook, dict) else None
+            if _is_repobrain_uvx_hook_command(command) and command != HOOK_COMMAND:
+                raise ValueError(
+                    f"Refusing to modify {path}: conflicting RepoBrain SessionStart hook"
+                )
             if (isinstance(hook, dict)
-                    and _is_owned_hook_command(hook.get("command"))
-                    and hook != {"type": "command", "command": hook.get("command")}):
+                    and _is_owned_hook_command(command)
+                    and hook != {"type": "command", "command": command}):
                 raise ValueError(
                     f"Refusing to modify {path}: conflicting RepoBrain SessionStart hook"
                 )
@@ -210,11 +203,11 @@ def _prepare_mcp(path: Path, root: Path) -> tuple[dict, bool, bool]:
     expected = mcp_server_entry(root)
     present = MCP_SERVER_NAME in servers
     current = servers.get(MCP_SERVER_NAME)
-    if present and current != expected and not _is_owned_mcp_entry(current, root):
+    if present and current != expected:
         raise ValueError(
             f"Refusing to overwrite conflicting mcpServers.{MCP_SERVER_NAME} in {path}"
         )
-    changed = not present or current != expected
+    changed = not present
     if changed:
         servers[MCP_SERVER_NAME] = expected
         config["mcpServers"] = servers

@@ -15,8 +15,9 @@ impact analysis, MCP tools, durable agent memory, and Markdown/HTML reports.
   `mcpServers.repobrain` entry in `.mcp.json`, the marker-owned CLAUDE.md
   session context, the exact SessionStart hook, and optional Git hooks in one
   command. JSON is preflighted before writes; malformed shapes and conflicting
-  RepoBrain servers fail closed, repeated installs converge, and uninstall
-  preserves unrelated or user-modified configuration.
+  RepoBrain servers fail closed (including different versions/sources),
+  repeated installs from the same provenance converge, and uninstall preserves
+  unrelated or user-modified configuration.
 - The MCP entry uses `uvx --from <repobrain[mcp]-requirement> repobrain mcp
   --path <resolved-root>` as a JSON argument array, pinning a registry install's exact
   version or retaining a local wheel/editable direct URL. Persisted Claude/Git
@@ -27,7 +28,7 @@ impact analysis, MCP tools, durable agent memory, and Markdown/HTML reports.
   console entry point. A clean local wheel ran under isolated `uvx`, and an
   isolated environment imported the MCP extra successfully. Hatchling is an
   explicit dev dependency so artifact inspection remains offline in the test
-  suite after normal dev installation. Full verification: 198 pytest tests
+  suite after normal dev installation. Full verification: 199 pytest tests
   passed; compilation and whitespace checks were clean.
 - M15 memory verification is implemented on `feat/m15-memory-verification`.
   New memory writes store exact file/unambiguous-symbol anchors plus resolution
