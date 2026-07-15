@@ -324,6 +324,8 @@ class _Extractor:
         self.seen_vars: set[str] = set()
         self.testcases: list[Node] = []
         self.module_node: Node | None = None
+        self.orm_models: list[dict] = []
+        self.orm_operations: list[dict] = []
 
     # -- pipeline -------------------------------------------------------------
 
@@ -334,6 +336,7 @@ class _Extractor:
         self._link_defs()
         self._extract_variables(captures)
         self._extract_imports(captures)
+        self._extract_runtime_facts(captures)
         self._extract_env(captures)
         self._extract_calls(captures)
         self._emit_testfile()
@@ -762,10 +765,23 @@ class _Extractor:
             )
 
     def _finish_module_metadata(self) -> None:
+        bindings = [
+            {"local": local, "kind": "symbol", "module": value[0],
+             "target_path": value[1], "symbol": value[2]}
+            for local, value in sorted(self.symbol_aliases.items())
+        ]
+        bindings.extend(
+            {"local": local, "kind": "module", "module": value[0],
+             "target_path": value[1]}
+            for local, value in sorted(self.module_aliases.items())
+        )
         self.module_node.metadata.update(
             {
                 "external_imports": sorted(self.external_imports),
+                "import_bindings": bindings,
                 "is_test_file": self.is_test,
+                "orm_models": self.orm_models,
+                "orm_operations": self.orm_operations,
             }
         )
 
@@ -778,6 +794,9 @@ class _Extractor:
         pass
 
     def _extract_imports(self, captures: dict[str, list]) -> None:
+        pass
+
+    def _extract_runtime_facts(self, captures: dict[str, list]) -> None:
         pass
 
     def _extract_env(self, captures: dict[str, list]) -> None:
@@ -818,6 +837,68 @@ class _PythonExtractor(_Extractor):
             left = assign.child_by_field_name("left")
             if left is not None and left.type == "identifier":
                 self._add_variable(self._text(left), assign)
+
+    def _extract_runtime_facts(self, captures: dict[str, list]) -> None:
+        for class_ts in captures.get("def.class", []):
+            class_name = self._def_name(class_ts)
+            body = class_ts.child_by_field_name("body")
+            if not class_name or body is None:
+                continue
+            for statement in body.named_children:
+                if statement.type != "expression_statement":
+                    assignment = statement
+                elif statement.named_children:
+                    assignment = statement.named_children[0]
+                else:
+                    continue
+                if assignment.type != "assignment":
+                    continue
+                left = assignment.child_by_field_name("left")
+                right = assignment.child_by_field_name("right")
+                if left is None or self._text(left) != "__tablename__":
+                    continue
+                table = self._string_value(right)
+                if table:
+                    self.orm_models.append({
+                        "framework": "sqlalchemy", "class": class_name,
+                        "table": table, "line": assignment.start_point[0] + 1,
+                    })
+
+        for call in captures.get("call", []):
+            fn = call.child_by_field_name("function")
+            if fn is None:
+                continue
+            callee = self._text(fn)
+            args = call.child_by_field_name("arguments")
+            named_args = list(args.named_children) if args is not None else []
+            model = None
+            operation = None
+            pattern = None
+            parts = callee.split(".")
+            if len(parts) >= 3 and parts[1] == "query":
+                model, operation, pattern = parts[0], "read", "Model.query.*"
+            elif callee == "select" and named_args and named_args[0].type == "identifier":
+                model, operation, pattern = self._text(named_args[0]), "read", "select(Model)"
+            elif callee.endswith(".get") and "session" in parts[:-1] and named_args:
+                if named_args[0].type == "identifier":
+                    model, operation, pattern = self._text(named_args[0]), "read", "session.get(Model, ...)"
+            elif callee.endswith((".add", ".merge")) and "session" in parts[:-1] and named_args:
+                candidate = named_args[0]
+                if candidate.type == "call":
+                    constructor = candidate.child_by_field_name("function")
+                    if constructor is not None and constructor.type == "identifier":
+                        model = self._text(constructor)
+                        operation = "write"
+                        pattern = f"session.{parts[-1]}(Model(...))"
+            if not model or not operation:
+                continue
+            source = self._call_source(call)
+            self.orm_operations.append({
+                "framework": "sqlalchemy", "operation": operation,
+                "model_binding": model, "source_id": source.id,
+                "source_qname": source.qualified_name,
+                "line": call.start_point[0] + 1, "pattern": pattern,
+            })
 
     def _extract_imports(self, captures: dict[str, list]) -> None:
         for stmt in captures.get("import.plain", []):

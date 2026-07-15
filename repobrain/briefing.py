@@ -54,8 +54,8 @@ def _purpose_facts(store: GraphStore, limit: int = 3) -> list[dict]:
     return facts
 
 
-def _memory_sections(root: Path, limit: int = 5) -> tuple[list[dict], list[dict], list[dict]]:
-    entries = read_agent_memory(root, limit=limit)["entries"]
+def _memory_sections(root: Path, store: GraphStore, limit: int = 5) -> tuple:
+    entries = read_agent_memory(root, limit=None, store=store)["entries"]
     memory_path = root / ".repobrain" / "agent_memory.md"
     memory_lines = memory_path.read_text(encoding="utf-8").splitlines() if memory_path.exists() else []
 
@@ -71,8 +71,31 @@ def _memory_sections(root: Path, limit: int = 5) -> tuple[list[dict], list[dict]
         line = relative + 1
         return f".repobrain/agent_memory.md:{line}"
 
-    recent, assumptions, questions = [], [], []
+    alerts, recent, assumptions, questions = [], [], [], []
+    counts = {"invalidated": 0, "drifted": 0}
+    current_entries = 0
     for entry in entries:
+        verdict = entry["verification"]["verdict"]
+        if verdict in counts:
+            counts[verdict] += 1
+            anchors = entry["verification"]["anchors"]
+            detail = next((anchor for anchor in anchors
+                           if anchor["verdict"] == verdict), None)
+            suffix = ""
+            if detail is not None:
+                found = detail["evidence"]["found"]
+                location = (f"{found['path']}:{found.get('start_line') or 1}"
+                            if found else "not found")
+                suffix = f" Anchor `{detail['reference']}`: {location}."
+            alerts.append({
+                "text": f"{entry.get('summary', '')}{suffix}",
+                "type": "MemoryInvalidated" if verdict == "invalidated" else "MemoryDrifted",
+                "source": source_for(entry, entry.get("summary", "")),
+            })
+            continue
+        if current_entries >= limit:
+            continue
+        current_entries += 1
         if entry.get("summary"):
             recent.append({"text": entry["summary"], "type": "AgentNote",
                            "source": source_for(entry, entry["summary"])})
@@ -80,14 +103,14 @@ def _memory_sections(root: Path, limit: int = 5) -> tuple[list[dict], list[dict]
                            for item in entry.get("assumptions", []))
         questions.extend({"text": item, "type": "OpenQuestion", "source": source_for(entry, item)}
                          for item in entry.get("open_questions", []))
-    return recent, assumptions, questions
+    return alerts, recent, assumptions, questions, counts
 
 
 def _fact_line(fact: dict) -> str:
     return f"- {fact['text']} [{fact['type']}] ({fact['source']})"
 
 
-def _render(staleness: dict, sections: list[dict]) -> str:
+def _render(staleness: dict, sections: list[dict], memory_counts: dict) -> str:
     lines = ["RepoBrain project brief"]
     if staleness["is_stale"]:
         lines.append(
@@ -96,6 +119,12 @@ def _render(staleness: dict, sections: list[dict]) -> str:
         )
     else:
         lines.append("Index freshness: current.")
+    if memory_counts["invalidated"] or memory_counts["drifted"]:
+        lines.append(
+            "Memory verification: "
+            f"{memory_counts['invalidated']} invalidated, "
+            f"{memory_counts['drifted']} drifted remembered entries need attention."
+        )
     for section in sections:
         lines.extend(["", section["title"]])
         lines.extend(_fact_line(fact) for fact in section["facts"])
@@ -119,8 +148,9 @@ def project_brief(
     root = Path(root).resolve()
     freshness_gate = require_fresh(root, store, auto_index=auto_index)
     freshness = freshness_gate.get("after") or freshness_gate["before"]
-    recent, assumptions, questions = _memory_sections(root)
+    alerts, recent, assumptions, questions, memory_counts = _memory_sections(root, store)
     candidates = [
+        ("Memory requiring attention", alerts),
         ("Purpose", _purpose_facts(store)),
         ("Subsystems", _node_facts(store, ("Directory", "Module", "Package"), 12)),
         ("Entrypoints", _node_facts(store, ("CLICommand", "Script"), 12)),
@@ -134,11 +164,11 @@ def project_brief(
         kept = []
         for fact in facts:
             trial = selected + [{"title": title, "facts": kept + [fact]}]
-            if len(_render(freshness, trial)) <= budget * 4:
+            if len(_render(freshness, trial, memory_counts)) <= budget * 4:
                 kept.append(fact)
         if kept:
             selected.append({"title": title, "facts": kept})
-    text = _render(freshness, selected)
+    text = _render(freshness, selected, memory_counts)
     return {
         "status": "ok",
         "budget": budget,
@@ -146,6 +176,7 @@ def project_brief(
         "token_heuristic": "ceil(characters / 4)",
         "freshness": freshness_gate,
         "staleness": freshness,
+        "memory_verification": memory_counts,
         "sections": selected,
         "text": text,
     }

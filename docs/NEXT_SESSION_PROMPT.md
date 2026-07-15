@@ -1,75 +1,70 @@
 # Next Session Prompt
 
-Copy-paste the prompt below to start the next agent session. It scopes the
-session to deterministic Git history extraction, the highest-priority
-undelivered item under Suggested Next Steps in `AGENT_HANDOFF.md`.
+Copy-paste the prompt below to start the deterministic scale-hardening milestone.
 
 ```text
 You are continuing work on RepoBrain, a local-first second brain for AI
-coding agents.
+coding agents. Development runs as a self-paced milestone loop: one milestone
+per feat/ branch, merge only when the full pytest suite passes and all
+confirmed /code-review findings are fixed.
 
-Start by reading AGENT_HANDOFF.md in full, especially Known Pitfalls, then
-prd.md sections 3, 5, 6, 13.5, 23, 29, and 31, and DECISIONS.md D2, D16,
-D21, and D23-D24. Pull the latest main before creating a branch.
+Start by reading AGENT_HANDOFF.md (especially Known Pitfalls), DECISIONS.md
+D12, D21, D23, D25, D28-D29, repobrain/indexing/indexer.py,
+repobrain/indexing/scanner.py, repobrain/graph/store.py,
+repobrain/graph/queries.py, repobrain/retrieval/keyword.py, and the existing
+self-hosting/incremental/query tests.
 
-Your milestone is Git history as a deterministic extractor. Static analysis
-misses relationships such as templates changing with handlers, migrations
-changing with models, and config changing with deployment files. RepoBrain
-must mine local commit history for grounded co-change, churn, and ownership
-evidence and blend it conservatively into impact analysis.
+Your milestone is deterministic indexing and traversal scale hardening: prove
+and improve RepoBrain behavior on repositories above 1,000 files without
+trading away precision, freshness, offline operation, or test reliability.
 
 Implement:
-1. A deterministic Git history extractor driven only by local Git plumbing.
-   Traverse a configurable recent window (document a default by commit count),
-   honor renames, and capture commit id/time/author plus changed paths and
-   additions/deletions. Never require GitHub or a hosted API.
-2. Persist history evidence in the existing SQLite graph/store with stable
-   identities and provenance. Add only the minimal schema vocabulary earned
-   by queries (for example commit nodes and co-change edges); do not overload
-   static dependency edge types. Re-indexing the same history must converge,
-   and rewritten/shortened history must remove extractor-owned stale facts.
-3. Compute file-level co-change coupling with explicit support counts and a
-   normalized score that discounts broad commits. Exclude merge-only noise,
-   generated/vendor paths, RepoBrain's own state, and configurable oversized
-   commits. Preserve the commit ids supporting every relationship.
-4. Expose churn hotspots (commit count plus added/deleted lines) and ownership
-   evidence (author contribution counts and recency). Treat ownership as
-   observed history, never as an authorization or CODEOWNERS claim. Provide
-   shared queries plus CLI and MCP surfaces with stable plain/JSON output.
-5. Blend co-change into `impact_analysis` and M13 `change_context` as a
-   separately labeled historical-evidence bucket. Do not allow history alone
-   to become high-confidence static impact; retain supporting commits, score,
-   path provenance, and an explanation of the heuristic.
-6. Integrate extraction with indexing through one explicit phase or command.
-   Define how M12 freshness interacts with history changes (new commits,
-   rebases, shallow clones). Fail honestly for non-Git/shallow/incomplete
-   history and never mutate branches, refs, the index, or the working tree.
-7. Tests: idempotence, rename continuity, history rewrite cleanup, broad-commit
-   discounting, merge/generated exclusions, score/support math, churn,
-   ownership/recency, impact blending, change-context integration, CLI/MCP
-   parity, shallow/non-Git behavior, fixture Git histories, and self-hosting.
+1. Add a deterministic synthetic large-repository fixture/generator (at least
+   1,000 supported files) that is fast to create, contains known graph/query
+   answers, and never enters source control as thousands of fixture files.
+2. Instrument and profile full indexing, no-change incremental indexing, a
+   small changed-file run, FTS search, symbol/file explanation, and bounded
+   graph traversals. Report phase/query timings and relevant work counts.
+3. Establish regression tests around deterministic work invariants (files
+   parsed, rows rewritten, queries issued, traversal bounds, result identity)
+   plus generous end-to-end safety ceilings. Avoid narrow wall-clock assertions
+   that vary across machines.
+4. Use the measurements to fix confirmed hot paths only. Prefer batching,
+   indexes, bounded SQL, and eliminating repeated scans/queries over caches or
+   new abstraction layers without evidence.
+5. Prove no-change and small-change runs remain proportional to changed work,
+   including global reconcilers/history phases whose full-rebuild behavior is
+   intentional; label unavoidable repository-wide costs explicitly.
+6. Exercise SQLite query plans for the highest-volume lookups and add schema
+   indexes only when the plan and corpus demonstrate a real benefit. Preserve
+   migration compatibility with existing databases.
+7. Verify representative results on the large corpus match small-corpus
+   semantics, including inference provenance, freshness fail-closed behavior,
+   root pinning, and bounded depth/limit contracts.
+8. Document the benchmark shape, reproducible command, measured baseline and
+   post-change results, hardware-independent invariants, and remaining limits.
 
 Constraints:
-- No external hosted API requirements; everything offline and deterministic.
-- Use subprocess argument arrays and read-only Git commands; never invoke a
-  shell with repository-controlled text.
-- Preserve source-grounding and confidence semantics. Co-change is correlation,
-  not dependency or causation, and must be labeled accordingly.
-- Reuse GraphStore, impact analysis, M12 freshness, and M13 change context;
-  do not fork query logic into CLI or MCP layers.
-- Read Known Pitfalls before changing indexing transaction ordering.
+- No hosted API, model, embeddings, network, Docker, or external service.
+- Do not weaken freshness, repository-root, history-serveability, or local-only
+  contracts to make scale tests pass.
+- Do not optimize by skipping supported facts, lowering precision, disabling
+  global convergence, or silently truncating results outside existing limits.
+- Keep the ordinary suite practical and deterministic; mark deliberately slow
+  profiling commands separately if they do not belong in every test run.
+- Do not push or publish without explicit user permission.
 
-When done: run the full test suite, update AGENT_HANDOFF.md and DECISIONS.md,
-and report what changed, how to run it, what tests pass, known limitations,
-and the recommended next milestone (expected: memory verification).
+When done, run the full suite, run /code-review and fix confirmed findings,
+update AGENT_HANDOFF.md and DECISIONS.md, report the measured scale scenarios,
+before/after results, and test results, and rewrite this file for the next
+highest-priority milestone.
 ```
 
 ## Scoping notes
 
-- Analyze one repository's reachable local history; cross-repository identity
-  and remote contribution data remain non-goals.
-- Co-change must remain visibly heuristic and lower-confidence than observed
-  imports/calls/config/doc edges.
-- The next prompt should scope memory verification to anchoring entries to
-  graph nodes, validating them after reindex, and surfacing invalidated
-  assumptions in the session brief.
+- The target is actionable engineering evidence, not a vanity benchmark.
+- Preserve a readable unoptimized baseline before changing hot paths.
+- Memory/RSS profiling is useful when locally available but must degrade
+  explicitly when optional tooling is absent.
+- Distributed indexing, background daemons, hosted databases, and approximate
+  semantic/vector retrieval remain out of scope.

@@ -319,3 +319,187 @@ fallback: run the same exact path normalizer over persisted structured
 Markdown reference candidates. It never fuzzy-matches or resurrects ambiguous
 symbol references. Multi-target impact evidence deduplicates by node, edge
 kind, and edge provenance while retaining every changed-path reason.
+
+## 2026-07-10 — Milestone 14 (Git history as a deterministic extractor)
+
+### D25: History is bounded correlation evidence in its own tables and bucket
+
+The extractor mines only local Git plumbing (argument arrays, read-only
+commands, no shell, no hosted APIs) over a bounded recent window (default 500
+commits, configurable via `history_max_commits`). Merge commits are excluded
+at the log level; paths are filtered through the same ignore/include
+configuration as file scanning, so vendor/generated noise and `.repobrain/`
+never enter history facts.
+
+Raw evidence lives in dedicated `git_commits` / `git_commit_files` tables, not
+as graph nodes: commits are provenance rows to aggregate, not entities to
+traverse, and keeping them out of `nodes` protects search and traversal
+queries. The only new graph vocabulary is the `CO_CHANGED_WITH` edge between
+File nodes (extractor `git-history`, `is_inferred=1`), which queries earned.
+Because the window is bounded, every extraction fully rebuilds the tables and
+the extractor-owned edges in one transaction — re-extracting identical history
+is idempotent, and rewritten or shortened history leaves no stale rows. A
+`history_params` meta stamp (window, per-commit file cap, extractor version)
+plus the extracted HEAD decide staleness; bumping the extractor version forces
+re-extraction on upgrade.
+
+Co-change is scored with explicit support: a pair needs at least 2 shared
+commits, each commit touching k files contributes `1/(k-1)` (broad-commit
+discount), commits over `history_max_files_per_commit` (default 50) are
+recorded but excluded from pairing, and the score normalizes weighted support
+by the less frequently changed file's commit count. Rename continuity chains
+`old -> new` aliases newest-first so pre-rename commits attribute to the
+current identity. To keep graph rows bounded, each edge stores the 20 newest
+supporting commit ids plus an explicit truncation flag; the full supporting
+set remains preserved and derivable from `git_commit_files`.
+
+History never impersonates static impact: edge confidence is capped at 0.55
+(below the 0.6 medium boundary), `impact_analysis` and `change_context`
+surface it as a separately labeled historical-evidence bucket with the
+heuristic explanation and provenance stamp, and ownership output is explicitly
+observed contribution history, never an authorization or CODEOWNERS claim.
+The M12 gate re-extracts when HEAD or parameters changed (pure commits and
+rebases move HEAD without touching files); with auto-index disabled, history
+staleness fails closed for history-backed answers only, while non-Git and
+shallow repositories report `unavailable` honestly without blocking static
+queries.
+
+The repository probe is a single combined `rev-parse` process because it runs
+on every gated query. Bare repositories are distinguished from non-repositories
+and reported as unavailable. `history_params` includes extractor version,
+window limits, include/exclude patterns, and an ignore-file content digest, so
+any input that can change extraction output forces a rebuild even at the same
+HEAD. File identities are produced through `file_node_id(path)` to preserve
+the D2 qualified-name invariant across history, queries, and reconciliation.
+Extraction failures degrade the current read but are retried on the next gated
+read; persisting an error solely by HEAD and parameters would turn a transient
+Git timeout into permanent unavailability. Parameter-stamp construction is
+inside the same degradation boundary, so an unreadable ignore file cannot
+crash or block an otherwise valid static query.
+Surrogateescaped Git bytes are mapped injectively into a NUL-tagged hex string
+before SQLite storage. Git identities cannot contain NUL, so the malformed
+namespace cannot collide with valid text; already-valid Unicode stays unchanged
+to preserve exact identity with scanner-produced graph paths.
+
+## 2026-07-14 — Milestone 15 (memory verification)
+
+### D26: Memory verdicts are pure, evidence-bearing read annotations
+
+Memory writes scan structured fields for syntactic path/code references and
+bounded code-shaped lexical tokens, then call one shared resolver: normalized exact/unique
+suffix paths first, followed by exact unambiguous symbol name or qualified
+name. Resolved anchors store the expected node identity, path/span, field and
+position, and resolution provenance. Ambiguous and unresolved attempts remain
+in resolution evidence but never become guessed anchors; an entry with no
+anchors is valid and `unanchored`.
+
+Verification never edits Markdown or stored node metadata. The shared read path
+copies each entry and annotates it deterministically: stable node id with the
+same span is `verified`; a changed span or a uniquely resolved M14 rename is
+`drifted`; a missing or ambiguous replacement is `invalidated`; no anchors is
+`unanchored`. Git rename fallback joins an anchor's old path through
+`git_commit_files.original_path` to one active current path and, for symbols,
+requires the same exact type/name within that file. Missing history degrades to
+explicit unavailable evidence rather than fuzzy matching.
+
+Rename commits persist their old path in `git_commit_files.original_path` even
+when they are the oldest commit in the bounded window; this M15-required raw
+evidence changes history extraction output and therefore bumps
+`EXTRACTOR_VERSION` to 3.
+
+CLI and MCP verification run only after the M12 gate. `repobrain index` updates
+graph and history facts but does not mutate memory verdicts; the next read
+recomputes them. Briefs use the same annotations, prioritize drifted/invalidated
+entries with a count line, and exclude those sessions from current memory
+sections. This keeps append-first human memory intact and makes repeated reads
+over an unchanged graph byte-for-byte convergent.
+
+## 2026-07-14 — Distribution milestone
+
+### D27: Agent installation owns one exact MCP entry and preflights conflicts
+
+The distributable command remains `repobrain`, with MCP support in the
+`repobrain[mcp]` extra so ordinary `uvx repobrain` runs do not install the MCP
+SDK. The `--from` requirement preserves installed provenance: direct local
+wheel/editable URLs remain direct references, while registry installs pin the
+exact installed version. Persisted Claude and Git automation also launches
+through that requirement rather than retaining the disposable interpreter path;
+the exact pre-distribution interpreter command is migrated as an owned legacy
+entry. The generated repository `.mcp.json` owns only
+`mcpServers.repobrain = {command: "uvx", args: [...]}`. Its argument array
+selects `repobrain[mcp]`, invokes the existing console entry point, and passes
+the resolved repository root as a single value; spaces therefore need no
+shell quoting and the MCP process remains pinned to the intended database.
+
+Installation reads and validates `.claude/settings.json` and `.mcp.json`,
+checks for an exact RepoBrain server conflict, and validates the Git repository
+when hooks are requested before changing configuration. Malformed JSON,
+invalid container shapes, or a pre-existing different `repobrain` server fail
+closed. A different RepoBrain version/source is also a conflict: command shape
+alone cannot prove that a user-selected fork was installer-owned. Repeated
+installation from the same provenance converges. Uninstall removes
+the exact generated server only when it still matches, the exact SessionStart
+command, marker-delimited Markdown, and owned Git artifacts; user-modified or
+unrelated configuration is preserved.
+
+Wheel and sdist contents are exercised in the test suite, including the
+console entry point and MCP extra metadata. Clean local artifacts are also
+smoked through isolated `uvx`/`uv` environments. Claude SessionStart and Git
+dispatchers remain documented POSIX-shell surfaces; the MCP launch itself is
+cross-platform JSON with no shell interpolation.
+
+## 2026-07-14 — Milestone 16 (framework/runtime adapters)
+
+### D28: Persist syntax facts locally; reconcile framework meaning globally
+
+Framework support uses one narrow `RuntimeAdapter` boundary. Parsers remain
+responsible only for source-local facts: Route metadata records literal
+methods, paths, receiver/callback shape, and callback spans; Module metadata
+records exact import bindings plus SQLAlchemy model/operation candidates.
+`RuntimeAdapterReconciler` consumes those persisted facts after parser
+`finish_run` hooks and before Markdown reconciliation/orphan cleanup, inside
+the existing index transaction. Each adapter replaces only facts owned by its
+extractor. A version stamp backfills adapter facts on an otherwise fresh
+pre-M16 database and must be bumped when reconciliation output changes.
+
+Express inline callbacks receive deterministic Function identities from the
+route literal and source span. Their observed module-level CALLS are copied to
+that precise callback source; the original parser observation remains intact.
+Named Express and Flask-style callbacks resolve only to one exact local
+callable or one exact persisted import binding. Dynamic expressions and
+multi-callback registrations emit no relationship.
+
+The SQLAlchemy adapter creates Table nodes only from literal `__tablename__`
+facts. Exact local/imported model operations produce `READS_TABLE` or
+`WRITES_TABLE` at confidence 0.85 with `is_inferred=1` and
+`inference_reason="sqlalchemy-convention"`: the syntax is observed, but its
+runtime meaning is a framework convention. Zero or multiple table mappings
+are skipped. Shared data-flow and impact traversals gained these edge types;
+change context inherits them through the same impact function, with no
+framework-specific CLI or MCP branch.
+
+## 2026-07-14 — Protocol-level MCP integration hardening
+
+### D29: Test the packaged stdio boundary without moving behavior into it
+
+`RepoBrainTools` and the shared query/freshness functions remain the source of
+truth. Protocol coverage launches the real `repobrain mcp --path ROOT` process
+and uses the official MCP client for initialization, capability negotiation,
+tool discovery, and calls. A second, deliberately small JSON-lines harness is
+reserved for inputs the typed client cannot produce: malformed messages,
+cancellation notifications, EOF shutdown, and bounded read/process cleanup.
+Neither harness reimplements tool behavior.
+
+Stdio is the only supported transport. Stdout is protocol-only, stderr carries
+diagnostics, and client EOF is the clean shutdown signal. Domain outcomes stay
+JSON envelopes in MCP text content (`ok`, `not_found`, `blocked`, or `error`),
+while invalid arguments and unexpected exceptions use MCP tool-error results.
+The existing fail-closed freshness and repository-root checks are exercised
+over transport rather than weakened or duplicated.
+
+The installed JSON argument array is smoked from a clean local wheel through
+an isolated `uvx` environment with offline mode forced in the environment, so
+paths containing spaces are proven without shell parsing or network access.
+This smoke skips only when its optional SDK/build tool or offline dependency
+cache is unavailable; package-resolution and protocol-launch failures remain
+hard test failures with captured evidence.

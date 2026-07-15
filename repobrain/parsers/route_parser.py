@@ -1,106 +1,146 @@
-"""Deterministic route extraction for common Python and JS web patterns."""
+"""Source-local syntax facts for Flask-style and Express routes."""
 from __future__ import annotations
 
-import re
+import ast
+import posixpath
 
-from ..graph.schema import Edge, EdgeType, FtsRow, Node, NodeType, node_id
+from ..graph.schema import FtsRow, Node, NodeType
 from .base import ParseResult, Parser
 
-
-_PY_ROUTE = re.compile(
-    r'@(?:\w+\.)?(?:route|get|post|put|patch|delete)\(\s*["\'](?P<path>[^"\']+)["\'](?P<args>[^)]*)\)'
-    r'\s*\n\s*(?:async\s+)?def\s+(?P<handler>\w+)',
-    re.MULTILINE,
-)
-_JS_ROUTE = re.compile(
-    r'\b(?:router|app)\.(?P<method>get|post|put|patch|delete)\(\s*["\'](?P<path>[^"\']+)["\']'
-    r'\s*,(?P<body>.*?)(?=\n\s*(?:router|app)\.(?:get|post|put|patch|delete)\(|\Z)',
-    re.DOTALL | re.IGNORECASE,
-)
+_HTTP_METHODS = {"get", "post", "put", "patch", "delete"}
 
 
 class RouteParser(Parser):
-    name = "route_parser"
+    """Persist route declarations; cross-file handler resolution is separate."""
 
-    def begin_run(self, known_paths) -> None:
-        self._dirty = False
+    name = "route_parser"
 
     def can_parse(self, path: str, language: str | None) -> bool:
         return language in {"python", "javascript", "typescript"}
 
     def parse(self, path: str, content: str) -> ParseResult:
-        self._dirty = True
         result = ParseResult()
-        if path.endswith(".py"):
-            matches = self._python_matches(content)
-        else:
-            matches = self._javascript_matches(content)
-        for method, route_path, handler, line in matches:
-            name = f"{method} {route_path}"
+        try:
+            matches = (
+                self._python_matches(path, content) if path.endswith(".py")
+                else self._javascript_matches(path, content)
+            )
+        except (SyntaxError, ValueError) as exc:
+            result.warnings.append(f"{path}: route syntax extraction failed: {exc}")
+            return result
+        for fact in matches:
+            name = f"{fact['method']} {fact['route']}"
             route = Node(
                 type=NodeType.ROUTE, name=name, qualified_name=name, path=path,
-                start_line=line, end_line=line, language="http",
-                metadata={"method": method, "route": route_path, "handler": handler},
-                extractor=self.name,
+                start_line=fact["line"], end_line=fact.get("end_line", fact["line"]),
+                language="http", metadata=fact, extractor=self.name,
             )
             result.nodes.append(route)
             result.fts_rows.append(FtsRow(path, name, name, route.id))
-            # CodeParser uses the same path + symbol name identity. Orphan cleanup
-            # safely drops this edge if a heuristic handler is not a real symbol.
         return result
 
-    def finish_run(self, store) -> list[Edge]:
-        """Resolve handlers after CodeParser symbols have been persisted."""
-        if not getattr(self, "_dirty", False):
-            return []
-        store.delete_edges(EdgeType.HANDLES_ROUTE, extractor=self.name)
-        edges = []
-        routes = store.conn.execute(
-            "SELECT * FROM nodes WHERE type='Route' AND extractor=?", (self.name,)
-        ).fetchall()
-        for route in routes:
-            meta = __import__("json").loads(route["metadata_json"] or "{}")
-            handler = meta.get("handler")
-            if handler == "__module__":
-                target = store.conn.execute(
-                    "SELECT id FROM nodes WHERE type='Module' AND path=? LIMIT 1", (route["path"],)
-                ).fetchone()
-            else:
-                target = store.conn.execute(
-                    "SELECT id FROM nodes WHERE type IN ('Function','Method') AND path=? AND name=? LIMIT 2",
-                    (route["path"], handler),
-                ).fetchone()
-            if target:
-                edges.append(Edge(
-                    type=EdgeType.HANDLES_ROUTE, source_node_id=route["id"],
-                    target_node_id=target["id"], path=route["path"],
-                    start_line=route["start_line"], confidence=0.9, extractor=self.name,
-                ))
-        return edges
+    @staticmethod
+    def _literal(node):
+        return node.value if isinstance(node, ast.Constant) and isinstance(node.value, str) else None
+
+    def _python_matches(self, path: str, content: str) -> list[dict]:
+        tree = ast.parse(content)
+        facts = []
+        for fn in ast.walk(tree):
+            if not isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            for decorator in fn.decorator_list:
+                if not isinstance(decorator, ast.Call) or not isinstance(decorator.func, ast.Attribute):
+                    continue
+                if not isinstance(decorator.func.value, (ast.Name, ast.Attribute)):
+                    continue  # dynamic receiver such as get_app().route(...)
+                attr = decorator.func.attr.lower()
+                if attr not in _HTTP_METHODS | {"route"} or not decorator.args:
+                    continue
+                route = self._literal(decorator.args[0])
+                if route is None:
+                    continue
+                methods = [attr.upper()] if attr != "route" else ["GET"]
+                if attr == "route":
+                    for keyword in decorator.keywords:
+                        if keyword.arg != "methods":
+                            continue
+                        if not isinstance(keyword.value, (ast.List, ast.Tuple)):
+                            methods = []
+                            break
+                        literals = [self._literal(item) for item in keyword.value.elts]
+                        if literals and all(literals):
+                            methods = [method.upper() for method in literals]
+                        else:
+                            methods = []
+                        break
+                for method in methods:
+                    facts.append({
+                        "framework": "flask", "language": "python",
+                        "method": method, "route": route, "handler": fn.name,
+                        "handler_kind": "decorated-function", "line": decorator.lineno,
+                        "handler_start_line": fn.lineno,
+                        "end_line": getattr(fn, "end_lineno", fn.lineno),
+                    })
+        return facts
 
     @staticmethod
-    def _python_matches(content: str):
-        for match in _PY_ROUTE.finditer(content):
-            args = match.group("args")
-            method_match = re.search(r'methods\s*=\s*\[\s*["\'](\w+)', args)
-            method = method_match.group(1).upper() if method_match else "GET"
-            yield method, match.group("path"), match.group("handler"), content.count("\n", 0, match.start()) + 1
+    def _ts_text(node) -> str:
+        return node.text.decode("utf-8", "replace")
 
-    @staticmethod
-    def _javascript_matches(content: str):
-        for match in _JS_ROUTE.finditer(content):
-            body = match.group("body")
-            callback = re.search(r'(?:async\s*)?\([^)]*\)\s*=>\s*\{', body)
-            # Module-level callbacks are represented by the Module node; this
-            # preserves observed CALLS edges attributed there by CodeParser.
-            handler = path_module_name = ""
-            if callback:
-                path_module_name = "__module__"
+    def _javascript_matches(self, path: str, content: str) -> list[dict]:
+        from tree_sitter import Query, QueryCursor
+        from tree_sitter_language_pack import get_language, get_parser
+
+        grammar = (
+            "tsx" if path.endswith(".tsx")
+            else "typescript" if path.endswith(".ts")
+            else "javascript"
+        )
+        tree = get_parser(grammar).parse(content.encode("utf-8"))
+        query = Query(get_language(grammar), "(call_expression) @call")
+        calls = QueryCursor(query).captures(tree.root_node).get("call", [])
+        facts = []
+        module = posixpath.splitext(path)[0]
+        for call in sorted(calls, key=lambda node: node.start_byte):
+            fn = call.child_by_field_name("function")
+            if fn is None or fn.type != "member_expression":
+                continue
+            receiver = fn.child_by_field_name("object")
+            prop = fn.child_by_field_name("property")
+            if receiver is None or prop is None or receiver.type != "identifier":
+                continue
+            receiver_name = self._ts_text(receiver)
+            method = self._ts_text(prop).lower()
+            if receiver_name not in {"app", "router"} or method not in _HTTP_METHODS:
+                continue
+            args = call.child_by_field_name("arguments")
+            values = list(args.named_children) if args is not None else []
+            if len(values) < 2 or values[0].type != "string":
+                continue
+            route = self._ts_text(values[0]).strip("'\"`")
+            handlers = values[1:]
+            fact = {
+                "framework": "express", "language": grammar,
+                "method": method.upper(), "route": route,
+                "line": call.start_point[0] + 1, "end_line": call.end_point[0] + 1,
+            }
+            if len(handlers) != 1:
+                fact.update({"ambiguous": True, "handler_kind": "multiple-callbacks"})
+            elif handlers[0].type == "identifier":
+                fact.update({
+                    "handler": self._ts_text(handlers[0]),
+                    "handler_kind": "named-callback",
+                })
+            elif handlers[0].type in {"arrow_function", "function_expression", "function"}:
+                start = handlers[0].start_point[0] + 1
+                end = handlers[0].end_point[0] + 1
+                fact.update({
+                    "handler_kind": "inline",
+                    "handler_qname": f"{module}#route:{method.upper()} {route}@{start}",
+                    "callback_start_line": start, "callback_end_line": end,
+                })
             else:
-                named = re.search(r'\b([A-Za-z_$][\w$]*)\s*[,)]', body)
-                handler = named.group(1) if named else ""
-            line = content.count("\n", 0, match.start()) + 1
-            if path_module_name:
-                # Signal module resolution to parse() with the qualified module name.
-                handler = path_module_name
-            yield match.group("method").upper(), match.group("path"), handler, line
+                fact.update({"ambiguous": True, "handler_kind": "dynamic-callback"})
+            facts.append(fact)
+        return facts

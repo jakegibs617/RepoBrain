@@ -84,6 +84,22 @@ def test_changed_lines_map_to_symbol_impact_tests_and_stale_docs(small_app):
     assert result["freshness"]["status"] == "reindexed"
 
 
+def test_sqlalchemy_table_change_uses_shared_change_context_impact(small_app):
+    _init_repo(small_app)
+    with _indexed(small_app) as store:
+        model = small_app / "app" / "models" / "user.py"
+        model.write_text(model.read_text().replace('"users"', '"accounts"'))
+        result = change_context(small_app, store)
+
+    change = next(item for item in result["changes"]
+                  if item["new_path"] == "app/models/user.py")
+    assert any(item["type"] == "Table" and item["name"] == "accounts"
+               for item in change["symbols"])
+    impacted = [item for bucket in result["impact"].values() for item in bucket]
+    assert {item["node"]["name"] for item in impacted} >= {"load_by_id", "persist"}
+    assert {item["via"] for item in impacted} >= {"READS_TABLE", "WRITES_TABLE"}
+
+
 def test_changed_document_is_not_flagged_as_stale(small_app):
     _init_repo(small_app)
     with _indexed(small_app) as store:

@@ -92,6 +92,53 @@ def test_memory_provenance_uses_the_matching_newest_session(small_app):
     assert assumption["source"] == f".repobrain/agent_memory.md:{occurrences[-1]}"
 
 
+def test_brief_surfaces_invalid_memory_first_without_presenting_it_as_current(small_app):
+    with _indexed(small_app) as store:
+        write_agent_memory(
+            small_app, "User creation assumption.",
+            assumptions=["`create_user` remains the creation entrypoint."],
+        )
+        target = small_app / "app" / "services" / "user_service.py"
+        target.write_text(target.read_text().replace("def create_user", "def create_account"))
+        Indexer(store).index(small_app)
+        result = project_brief(small_app, store, budget=300)
+
+    assert result["token_estimate"] <= 300
+    assert result["memory_verification"] == {"invalidated": 1, "drifted": 0}
+    assert "Memory verification: 1 invalidated, 0 drifted" in result["text"]
+    assert result["sections"][0]["title"] == "Memory requiring attention"
+    assert "[MemoryInvalidated]" in result["text"]
+    active = next((section for section in result["sections"]
+                   if section["title"] == "Active assumptions"), {"facts": []})
+    assert not any("create_user" in fact["text"] for fact in active["facts"])
+
+
+def test_brief_counts_invalidated_memory_older_than_recent_display_window(small_app):
+    with _indexed(small_app) as store:
+        write_agent_memory(small_app, "Old anchored memory uses `create_user`.")
+        for number in range(6):
+            write_agent_memory(small_app, f"Unanchored planning note {number}.")
+        target = small_app / "app" / "services" / "user_service.py"
+        target.write_text(target.read_text().replace("def create_user", "def create_account"))
+        Indexer(store).index(small_app)
+        result = project_brief(small_app, store, budget=500)
+    assert result["memory_verification"]["invalidated"] == 1
+    assert "Old anchored memory" in result["text"]
+
+
+def test_brief_alerts_do_not_consume_current_memory_display_limit(small_app):
+    with _indexed(small_app) as store:
+        write_agent_memory(small_app, "Verified older memory uses `get_user`.")
+        for number in range(5):
+            write_agent_memory(small_app, f"Invalidated note {number} uses `create_user`.")
+        target = small_app / "app" / "services" / "user_service.py"
+        target.write_text(target.read_text().replace("def create_user", "def create_account"))
+        Indexer(store).index(small_app)
+        result = project_brief(small_app, store, budget=1200)
+    assert result["memory_verification"]["invalidated"] == 5
+    assert "Verified older memory uses `get_user`." in result["text"]
+
+
 def test_brief_cli_plain_and_json(small_app):
     with _indexed(small_app):
         pass
@@ -121,7 +168,8 @@ def test_install_agent_preserves_content_and_is_idempotent(tmp_path):
     commands = [hook["command"] for group in data["hooks"]["SessionStart"]
                 for hook in group["hooks"]]
     assert commands == [HOOK_COMMAND]
-    assert commands[0].startswith(str(Path(__import__("sys").executable)))
+    assert commands[0].startswith("uvx --from ")
+    assert " repobrain brief " in commands[0]
 
 
 def test_install_agent_repairs_owned_section_without_touching_later_content(tmp_path):

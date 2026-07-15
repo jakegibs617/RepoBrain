@@ -15,6 +15,12 @@ The database connection is configured in `app/db/config.py`, which reads the
 `DATABASE_URL` environment variable. Changing `DATABASE_URL` affects every
 database-backed route.
 
+`app/models/user.py` and
+`app/repositories/sqlalchemy_user_repository.py` provide deterministic
+SQLAlchemy-style syntax coverage: a literal `User.__tablename__` plus exact
+`session.get(User, ...)` and `session.add(User(...))` model operations. They
+are indexing fixtures and require no SQLAlchemy runtime.
+
 ## Testing
 
 Run the tests in `tests/test_users.py` with pytest.

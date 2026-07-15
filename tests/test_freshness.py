@@ -162,6 +162,7 @@ def test_mcp_small_diff_is_repaired_before_query(small_app):
     ("docs_for_code", ("app/services/user_service.py",)),
     ("code_for_docs", ("README.md",)),
     ("read_agent_memory", ()),
+    ("verify_agent_memory", ()),
 ])
 def test_every_read_only_mcp_tool_refuses_stale_opt_out(small_app, method, args):
     tools = RepoBrainTools(small_app)
@@ -187,6 +188,7 @@ def test_every_read_only_mcp_tool_refuses_stale_opt_out(small_app, method, args)
     ["impact", "app/services/user_service.py"],
     ["report"],
     ["memory", "read"],
+    ["memory", "verify"],
 ])
 def test_every_read_only_cli_surface_exposes_freshness_opt_out(small_app, args):
     with _store(small_app):

@@ -12,6 +12,7 @@ from .store import GraphStore
 
 #: node types find_symbol searches, in ranking-priority order
 SYMBOL_TYPES = ("Function", "Method", "Class", "Variable", "Module", "TestCase")
+_CODE_TARGET_TYPES = SYMBOL_TYPES + ("Table", "Route", "Endpoint")
 
 _CALLABLE_TYPES = ("Function", "Method", "TestCase")
 
@@ -171,6 +172,58 @@ def resolve_file_path(store: GraphStore, filepath: str) -> str | None:
     if len(rows) == 1:
         return rows[0]["path"]
     return None
+
+
+def resolve_graph_reference(store: GraphStore, value: str) -> dict:
+    """Resolve one exact file path or unambiguous symbol reference.
+
+    This is the shared deterministic boundary for memory anchoring. It never
+    fuzzy-matches: paths use ``resolve_file_path`` and symbols use the same
+    exact name/qualified-name uniqueness rule as Markdown reconciliation.
+    """
+    raw = value.strip()
+    if not raw:
+        return {"status": "unresolved", "reference": value,
+                "provenance": "empty-reference"}
+    path = resolve_file_path(store, raw)
+    if path is not None:
+        row = store.conn.execute(
+            "SELECT id,type,name,qualified_name,path,start_line,end_line "
+            "FROM nodes WHERE type='File' AND path=? LIMIT 1", (path,),
+        ).fetchone()
+        if row is not None:
+            normalized = raw.replace("\\", "/").removeprefix("./")
+            return {
+                "status": "resolved", "reference": value,
+                "provenance": "exact-path" if normalized == path else "unique-path-suffix",
+                "node": dict(row),
+            }
+    marks = ",".join("?" for _ in SYMBOL_TYPES)
+    rows = store.conn.execute(
+        f"SELECT id,type,name,qualified_name,path,start_line,end_line FROM nodes "
+        f"WHERE type IN ({marks}) AND (name=? OR qualified_name=?) "
+        "ORDER BY path,start_line,id LIMIT 3",
+        (*SYMBOL_TYPES, raw, raw),
+    ).fetchall()
+    unique = {row["id"]: row for row in rows}
+    if len(unique) == 1:
+        row = next(iter(unique.values()))
+        return {
+            "status": "resolved", "reference": value,
+            "provenance": (
+                "exact-qualified-symbol" if raw == row["qualified_name"]
+                and raw != row["name"] else "unique-symbol-name"
+            ),
+            "node": dict(row),
+        }
+    if len(unique) > 1:
+        return {
+            "status": "ambiguous", "reference": value,
+            "provenance": "ambiguous-exact-symbol",
+            "candidates": [dict(row) for row in unique.values()],
+        }
+    return {"status": "unresolved", "reference": value,
+            "provenance": "no-exact-match"}
 
 
 def _module_for_path(store: GraphStore, path: str):
@@ -365,7 +418,7 @@ def _resolve_code_target(store: GraphStore, target: str):
     target = target.strip()
     if not target:
         return None
-    placeholders = ",".join("?" for _ in SYMBOL_TYPES)
+    placeholders = ",".join("?" for _ in _CODE_TARGET_TYPES)
     rows = store.conn.execute(
         f"""
         SELECT id, name, qualified_name, type, path
@@ -374,7 +427,7 @@ def _resolve_code_target(store: GraphStore, target: str):
           AND (name = ? OR qualified_name = ?)
         ORDER BY path, start_line
         """,
-        (*SYMBOL_TYPES, target, target),
+        (*_CODE_TARGET_TYPES, target, target),
     ).fetchall()
     unique = {row["id"]: row for row in rows}
     if len(unique) != 1:
@@ -594,9 +647,84 @@ def trace_data_flow(store: GraphStore, start: str, depth: int = 4,
     return {"start": _node_payload(row), "nodes": list(nodes.values()), "edges": edges}
 
 
+_CO_CHANGE_NODE_COLUMNS = ("id", "type", "name", "qualified_name", "path",
+                           "start_line", "end_line")
+
+
+def historical_co_change(store: GraphStore, paths: list[str], limit: int = 20,
+                         only_external: bool = False) -> dict:
+    """Separately labeled historical-evidence bucket for impact answers.
+
+    Co-change edges are correlation mined from recent Git history; they carry
+    their supporting commit ids and stay below static-impact confidence, so
+    callers must present them apart from observed dependency evidence.
+    With ``only_external`` the limit applies after excluding pairs entirely
+    inside ``paths``: intra-diff pairs rank highest (they co-change the most)
+    and would otherwise starve the unchanged partners callers actually want.
+    """
+    from ..history import CO_CHANGE_EXPLANATION, history_provenance
+
+    items = []
+    if paths:
+        marks = ",".join("?" for _ in paths)
+        select = ", ".join(
+            f"{alias}.{column} AS {alias}_{column}"
+            for alias in ("s", "t") for column in _CO_CHANGE_NODE_COLUMNS
+        )
+        external = (
+            f"AND ((s.path IN ({marks})) + (t.path IN ({marks}))) = 1"
+            if only_external else ""
+        )
+        args = [*paths, *paths] + ([*paths, *paths] if only_external else [])
+        rows = store.conn.execute(
+            f"""
+            SELECT {select}, e.confidence, e.metadata_json
+            FROM edges e
+            JOIN nodes s ON s.id = e.source_node_id
+            JOIN nodes t ON t.id = e.target_node_id
+            WHERE e.type = 'CO_CHANGED_WITH'
+              AND (s.path IN ({marks}) OR t.path IN ({marks}))
+              {external}
+            ORDER BY e.confidence DESC, s.path, t.path
+            LIMIT ?
+            """,
+            (*args, limit),
+        ).fetchall()
+        changed = set(paths)
+        for row in rows:
+            queried_side = "s" if row["s_path"] in changed else "t"
+            partner_side = "t" if queried_side == "s" else "s"
+            partner = {column: row[f"{partner_side}_{column}"]
+                       for column in _CO_CHANGE_NODE_COLUMNS}
+            meta = _meta(row)
+            items.append({
+                "node": _node_payload(partner), "via": "CO_CHANGED_WITH",
+                "co_changed_with": row[f"{queried_side}_path"],
+                "partner_changed": partner["path"] in changed,
+                "support": meta.get("support"), "score": meta.get("score"),
+                "confidence": row["confidence"],
+                "supporting_commits": meta.get("supporting_commits", []),
+                "supporting_commits_truncated":
+                    bool(meta.get("supporting_commits_truncated", False)),
+                "evidence": "git-history",
+            })
+    return {
+        "items": items,
+        "explanation": CO_CHANGE_EXPLANATION,
+        "provenance": history_provenance(store),
+    }
+
+
 def impact_analysis(store: GraphStore, target: str, change_type: str = "modify",
-                    depth: int = 3) -> dict | None:
-    """Estimate change blast radius with confidence buckets and evidence."""
+                    depth: int = 3, include_history: bool = True,
+                    history: dict | None = None) -> dict | None:
+    """Estimate change blast radius with confidence buckets and evidence.
+
+    ``history`` is the freshness gate's refresh_history envelope: when the
+    caller passes one that is not serveable (stale/unavailable/error), the
+    historical bucket is withheld with the reason instead of quietly serving
+    evidence extracted at a different HEAD.
+    """
     resolved = _resolve_code_target(store, target)
     if resolved is None:
         return None
@@ -617,7 +745,8 @@ def impact_analysis(store: GraphStore, target: str, change_type: str = "modify",
             "SELECT e.source_node_id AS source_id, e.type AS edge_type, e.path AS edge_path, e.start_line AS edge_line, "
             "e.confidence AS edge_confidence, n.* FROM edges e JOIN nodes n ON n.id=e.source_node_id "
             "WHERE e.target_node_id=? AND e.type IN "
-            "('IMPORTS','CALLS','MENTIONS','TESTS','COVERS','READS_ENV','USES_CONFIG','DEPENDS_ON')",
+            "('IMPORTS','CALLS','MENTIONS','TESTS','COVERS','READS_ENV','USES_CONFIG',"
+            "'DEPENDS_ON','HANDLES_ROUTE','READS_TABLE','WRITES_TABLE')",
             (nid,),
         ).fetchall()
         for r in rows:
@@ -637,10 +766,23 @@ def impact_analysis(store: GraphStore, target: str, change_type: str = "modify",
     low = [x for x in items if x["confidence"] < 0.6]
     tests = [x for x in items if x["node"]["type"] in {"TestFile", "TestCase"} or "/test" in x["node"]["path"]]
     docs = [x for x in items if x["node"]["type"] in {"MarkdownDocument", "MarkdownSection", "ADR"}]
+    from ..history import history_serveable, history_status_message
+
+    start_paths = sorted({r["path"] for r in start_rows if r["path"]})
+    if not include_history:
+        historical = {"items": [], "explanation": "History excluded by caller.",
+                      "provenance": None}
+    elif history is not None and not history_serveable(history):
+        historical = {"items": [], "status": history.get("status"),
+                      "explanation": history_status_message(history),
+                      "provenance": None}
+    else:
+        historical = historical_co_change(store, start_paths)
     return {
         "target": target, "change_type": change_type,
         "high_confidence": high, "medium_confidence": medium,
         "low_confidence": low, "recommended_tests": tests,
         "docs_likely_needing_updates": docs,
-        "unknowns": ["Dynamic calls and runtime-only wiring are not statically observable."],
+        "historical_evidence": historical,
+        "unknowns": ["Unsupported dynamic calls and runtime-only wiring are not statically observable."],
     }

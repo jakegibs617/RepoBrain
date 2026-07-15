@@ -5,40 +5,229 @@ import json
 import re
 import shlex
 import subprocess
-import sys
+from importlib.metadata import PackageNotFoundError, distribution
 from pathlib import Path
 
 MARKER_START = "<!-- repobrain:brief:start -->"
 MARKER_END = "<!-- repobrain:brief:end -->"
+PACKAGE_NAME = "repobrain"
+MCP_SERVER_NAME = "repobrain"
+MCP_COMMAND = "uvx"
+
+
+def _installed_requirement(*, mcp: bool = False) -> str:
+    project = f"{PACKAGE_NAME}[mcp]" if mcp else PACKAGE_NAME
+    try:
+        installed = distribution(PACKAGE_NAME)
+    except PackageNotFoundError:
+        return project
+    direct_url = installed.read_text("direct_url.json")
+    if direct_url:
+        try:
+            url = json.loads(direct_url).get("url")
+        except (AttributeError, json.JSONDecodeError):
+            url = None
+        if url:
+            return f"{project} @ {url}"
+    return f"{project}=={installed.version}"
+
+
+PACKAGE_REQUIREMENT = _installed_requirement()
+MCP_PACKAGE = _installed_requirement(mcp=True)
 HOOK_COMMAND = (
-    f"{shlex.quote(sys.executable)} -m repobrain.cli brief "
+    f"uvx --from {shlex.quote(PACKAGE_REQUIREMENT)} repobrain brief "
     '--path "$CLAUDE_PROJECT_DIR" --budget 2000'
 )
+LEGACY_HOOK_SUFFIX = (
+    ' -m repobrain.cli brief --path "$CLAUDE_PROJECT_DIR" --budget 2000'
+)
+MCP_CONFIG = ".mcp.json"
 GIT_MARKER_START = "# repobrain:index:start"
 GIT_MARKER_END = "# repobrain:index:end"
 GIT_RUNNER = "repobrain-index"
 
 
+def mcp_server_entry(root: str | Path) -> dict:
+    """Return the exact, cross-platform MCP entry owned by RepoBrain."""
+    root = Path(root).resolve()
+    return {
+        "command": MCP_COMMAND,
+        "args": ["--from", MCP_PACKAGE, "repobrain", "mcp", "--path", str(root)],
+    }
+
+
+def _is_owned_mcp_entry(entry: object, root: Path) -> bool:
+    return entry == mcp_server_entry(root)
+
+
+def _is_repobrain_uvx_hook_command(command: object) -> bool:
+    if not isinstance(command, str):
+        return False
+    try:
+        tokens = shlex.split(command)
+    except ValueError:
+        return False
+    return (
+        len(tokens) == 9
+        and tokens[:2] == ["uvx", "--from"]
+        and (tokens[2] == PACKAGE_NAME
+             or tokens[2].startswith(f"{PACKAGE_NAME}==")
+             or tokens[2].startswith(f"{PACKAGE_NAME} @ "))
+        and tokens[3:] == [
+            "repobrain", "brief", "--path", "$CLAUDE_PROJECT_DIR", "--budget", "2000",
+        ]
+    )
+
+
+def _read_json_object(path: Path) -> tuple[dict, bool]:
+    if not path.exists():
+        return {}, False
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"Refusing to modify invalid JSON in {path}") from exc
+    if not isinstance(value, dict):
+        raise ValueError(f"Refusing to modify {path}: top-level JSON must be an object")
+    return value, True
+
+
+def _is_owned_hook_command(command: object) -> bool:
+    """Recognize the current hook and the exact pre-distribution command form."""
+    if not isinstance(command, str):
+        return False
+    if command == HOOK_COMMAND:
+        return True
+    if not command.endswith(LEGACY_HOOK_SUFFIX):
+        return False
+    prefix = command.removesuffix(LEGACY_HOOK_SUFFIX)
+    try:
+        tokens = shlex.split(prefix)
+    except ValueError:
+        return False
+    if len(tokens) != 1:
+        return False
+    executable = Path(tokens[0])
+    return executable.is_absolute() and re.fullmatch(
+        r"python(?:\d+(?:\.\d+)*)?(?:\.exe)?",
+        executable.name, flags=re.IGNORECASE,
+    ) is not None
+
+
+def _is_owned_hook(hook: object) -> bool:
+    return isinstance(hook, dict) and hook == {
+        "type": "command", "command": hook.get("command"),
+    } and _is_owned_hook_command(hook.get("command"))
+
+
+def _prepare_settings(path: Path) -> tuple[dict, bool, bool]:
+    settings, existed = _read_json_object(path)
+    settings = dict(settings)
+    hooks_present = "hooks" in settings
+    raw_hooks = settings.get("hooks")
+    if not hooks_present:
+        hooks = {}
+    elif isinstance(raw_hooks, dict):
+        hooks = dict(raw_hooks)
+    else:
+        raise ValueError(f"Refusing to modify {path}: hooks must be an object")
+    sessions_present = "SessionStart" in hooks
+    raw_sessions = hooks.get("SessionStart")
+    if not sessions_present:
+        sessions = []
+    elif isinstance(raw_sessions, list):
+        sessions = list(raw_sessions)
+    else:
+        raise ValueError(f"Refusing to modify {path}: hooks.SessionStart must be an array")
+
+    owned = {"type": "command", "command": HOOK_COMMAND}
+    installed = False
+    changed = False
+    normalized_sessions = []
+    for group in sessions:
+        if not isinstance(group, dict):
+            normalized_sessions.append(group)
+            continue
+        group = dict(group)
+        group_hooks = group.get("hooks", [])
+        if not isinstance(group_hooks, list):
+            raise ValueError(
+                f"Refusing to modify {path}: each SessionStart hooks value must be an array"
+            )
+        normalized_hooks = []
+        for hook in group_hooks:
+            command = hook.get("command") if isinstance(hook, dict) else None
+            if _is_repobrain_uvx_hook_command(command) and command != HOOK_COMMAND:
+                raise ValueError(
+                    f"Refusing to modify {path}: conflicting RepoBrain SessionStart hook"
+                )
+            if (isinstance(hook, dict)
+                    and _is_owned_hook_command(command)
+                    and hook != {"type": "command", "command": command}):
+                raise ValueError(
+                    f"Refusing to modify {path}: conflicting RepoBrain SessionStart hook"
+                )
+            if _is_owned_hook(hook):
+                if not installed:
+                    normalized_hooks.append(owned)
+                    installed = True
+                    changed = changed or hook != owned
+                else:
+                    changed = True
+                continue
+            normalized_hooks.append(hook)
+        if normalized_hooks:
+            group["hooks"] = normalized_hooks
+            normalized_sessions.append(group)
+        elif not group_hooks:
+            normalized_sessions.append(group)
+    if not installed:
+        normalized_sessions.append({"matcher": "", "hooks": [owned]})
+        changed = True
+    if changed:
+        hooks["SessionStart"] = normalized_sessions
+        settings["hooks"] = hooks
+    return settings, existed, changed
+
+
+def _prepare_mcp(path: Path, root: Path) -> tuple[dict, bool, bool]:
+    config, existed = _read_json_object(path)
+    config = dict(config)
+    servers_present = "mcpServers" in config
+    raw_servers = config.get("mcpServers")
+    if not servers_present:
+        servers = {}
+    elif isinstance(raw_servers, dict):
+        servers = dict(raw_servers)
+    else:
+        raise ValueError(f"Refusing to modify {path}: mcpServers must be an object")
+    expected = mcp_server_entry(root)
+    present = MCP_SERVER_NAME in servers
+    current = servers.get(MCP_SERVER_NAME)
+    if present and current != expected:
+        raise ValueError(
+            f"Refusing to overwrite conflicting mcpServers.{MCP_SERVER_NAME} in {path}"
+        )
+    changed = not present
+    if changed:
+        servers[MCP_SERVER_NAME] = expected
+        config["mcpServers"] = servers
+    return config, existed, changed
+
+
+def _write_json(path: Path, value: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(value, indent=2) + "\n", encoding="utf-8")
+
+
 def install_agent(root: str | Path, *, git_hooks: bool = False) -> dict:
     root = Path(root).resolve()
     settings_path = root / ".claude" / "settings.json"
-    settings_path.parent.mkdir(parents=True, exist_ok=True)
-    if settings_path.exists():
-        try:
-            settings = json.loads(settings_path.read_text(encoding="utf-8"))
-        except json.JSONDecodeError as exc:
-            raise ValueError(f"Refusing to modify invalid JSON in {settings_path}") from exc
-    else:
-        settings = {}
-    hooks = settings.setdefault("hooks", {}).setdefault("SessionStart", [])
-    installed = any(
-        hook.get("command") == HOOK_COMMAND
-        for group in hooks if isinstance(group, dict)
-        for hook in group.get("hooks", []) if isinstance(hook, dict)
-    )
-    if not installed:
-        hooks.append({"matcher": "", "hooks": [{"type": "command", "command": HOOK_COMMAND}]})
-        settings_path.write_text(json.dumps(settings, indent=2) + "\n", encoding="utf-8")
+    mcp_path = root / MCP_CONFIG
+    settings, _, settings_changed = _prepare_settings(settings_path)
+    mcp_config, _, mcp_changed = _prepare_mcp(mcp_path, root)
+    # Validate optional Git integration before any configuration is changed.
+    if git_hooks:
+        _git_hooks_dir(root)
 
     claude_path = root / "CLAUDE.md"
     existing = claude_path.read_text(encoding="utf-8") if claude_path.exists() else ""
@@ -65,16 +254,25 @@ def install_agent(root: str | Path, *, git_hooks: bool = False) -> dict:
             end = start + heading.start() if heading else start + len(MARKER_START)
         replacement = existing[:start] + snippet.rstrip("\n") + existing[end:]
         if replacement != existing:
-            claude_path.write_text(replacement.rstrip("\n") + "\n", encoding="utf-8")
             claude_changed = True
     else:
         separator = "" if not existing else ("\n" if existing.endswith("\n") else "\n\n")
-        claude_path.write_text(existing + separator + snippet, encoding="utf-8")
         claude_changed = True
+    if settings_changed:
+        _write_json(settings_path, settings)
+    if mcp_changed:
+        _write_json(mcp_path, mcp_config)
+    if claude_changed:
+        if MARKER_START in existing:
+            claude_path.write_text(replacement.rstrip("\n") + "\n", encoding="utf-8")
+        else:
+            claude_path.write_text(existing + separator + snippet, encoding="utf-8")
     git_result = _install_git_hooks(root) if git_hooks else {"installed": False, "changed": False}
     return {"status": "ok", "settings": str(settings_path.relative_to(root)),
             "claude_md": str(claude_path.relative_to(root)),
-            "git_hooks": git_result, "changed": not installed or claude_changed or git_result["changed"]}
+            "mcp_config": str(mcp_path.relative_to(root)),
+            "git_hooks": git_result,
+            "changed": settings_changed or mcp_changed or claude_changed or git_result["changed"]}
 
 
 def uninstall_agent(root: str | Path) -> dict:
@@ -82,12 +280,28 @@ def uninstall_agent(root: str | Path) -> dict:
     root = Path(root).resolve()
     changed = False
     settings_path = root / ".claude" / "settings.json"
-    if settings_path.exists():
-        try:
-            settings = json.loads(settings_path.read_text(encoding="utf-8"))
-        except json.JSONDecodeError as exc:
-            raise ValueError(f"Refusing to modify invalid JSON in {settings_path}") from exc
-        sessions = settings.get("hooks", {}).get("SessionStart", [])
+    mcp_path = root / MCP_CONFIG
+    settings, settings_exists = _read_json_object(settings_path)
+    mcp_config, mcp_exists = _read_json_object(mcp_path)
+    hooks_present = settings_exists and "hooks" in settings
+    raw_hooks = settings.get("hooks") if hooks_present else None
+    if hooks_present and not isinstance(raw_hooks, dict):
+        raise ValueError(f"Refusing to modify {settings_path}: hooks must be an object")
+    sessions_present = isinstance(raw_hooks, dict) and "SessionStart" in raw_hooks
+    raw_sessions = raw_hooks.get("SessionStart") if sessions_present else None
+    if sessions_present and not isinstance(raw_sessions, list):
+        raise ValueError(
+            f"Refusing to modify {settings_path}: hooks.SessionStart must be an array"
+        )
+    servers_present = mcp_exists and "mcpServers" in mcp_config
+    raw_servers = mcp_config.get("mcpServers") if servers_present else None
+    if servers_present and not isinstance(raw_servers, dict):
+        raise ValueError(f"Refusing to modify {mcp_path}: mcpServers must be an object")
+
+    settings_changed = False
+    if settings_exists:
+        settings = dict(settings)
+        sessions = raw_sessions or []
         filtered = []
         for group in sessions:
             if not isinstance(group, dict):
@@ -95,12 +309,18 @@ def uninstall_agent(root: str | Path) -> dict:
                 continue
             group = dict(group)
             before = group.get("hooks", [])
-            after = [hook for hook in before
-                     if not (isinstance(hook, dict) and hook.get("command") == HOOK_COMMAND)]
+            if not isinstance(before, list):
+                raise ValueError(
+                    f"Refusing to modify {settings_path}: each SessionStart hooks value "
+                    "must be an array"
+                )
+            after = [hook for hook in before if not _is_owned_hook(hook)]
             if after:
                 group["hooks"] = after
                 filtered.append(group)
-            changed = changed or after != before
+            elif not before:
+                filtered.append(group)
+            settings_changed = settings_changed or after != before
         if "hooks" in settings and "SessionStart" in settings["hooks"]:
             if filtered:
                 settings["hooks"]["SessionStart"] = filtered
@@ -108,7 +328,22 @@ def uninstall_agent(root: str | Path) -> dict:
                 settings["hooks"].pop("SessionStart", None)
             if not settings["hooks"]:
                 settings.pop("hooks", None)
-        settings_path.write_text(json.dumps(settings, indent=2) + "\n", encoding="utf-8")
+        if settings_changed:
+            _write_json(settings_path, settings)
+
+    mcp_changed = False
+    if mcp_exists:
+        servers = dict(raw_servers or {})
+        if _is_owned_mcp_entry(servers.get(MCP_SERVER_NAME), root):
+            servers.pop(MCP_SERVER_NAME)
+            mcp_config = dict(mcp_config)
+            if servers:
+                mcp_config["mcpServers"] = servers
+            else:
+                mcp_config.pop("mcpServers", None)
+            _write_json(mcp_path, mcp_config)
+            mcp_changed = True
+    changed = settings_changed
 
     claude_path = root / "CLAUDE.md"
     if claude_path.exists():
@@ -124,8 +359,9 @@ def uninstall_agent(root: str | Path) -> dict:
 
     git_result = _uninstall_git_hooks(root)
     return {"status": "ok", "settings": str(settings_path.relative_to(root)),
-            "claude_md": str(claude_path.relative_to(root)), "git_hooks": git_result,
-            "changed": changed or git_result["changed"]}
+            "claude_md": str(claude_path.relative_to(root)),
+            "mcp_config": str(mcp_path.relative_to(root)), "git_hooks": git_result,
+            "changed": changed or mcp_changed or git_result["changed"]}
 
 
 def _git_hooks_dir(root: Path) -> Path:
@@ -146,7 +382,7 @@ def _install_git_hooks(root: Path) -> dict:
     runner_content = (
         "#!/bin/sh\n"
         "root=$(git rev-parse --show-toplevel) || exit 0\n"
-        f"{shlex.quote(sys.executable)} -m repobrain.cli index \"$root\"\n"
+        f"uvx --from {shlex.quote(PACKAGE_REQUIREMENT)} repobrain index \"$root\"\n"
     )
     changed = not runner.exists() or runner.read_text(encoding="utf-8") != runner_content
     if changed:

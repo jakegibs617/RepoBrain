@@ -6,6 +6,7 @@ from pathlib import Path
 
 from .config import RepoBrainConfig
 from .graph.store import GraphStore
+from .history import refresh_history
 from .indexing.indexer import Indexer
 from .indexing.scanner import scan
 
@@ -27,10 +28,11 @@ class FreshnessPolicy:
     max_changed_bytes: int = DEFAULT_MAX_CHANGED_BYTES
 
 
-def check_freshness(root: str | Path, store: GraphStore) -> dict:
+def check_freshness(root: str | Path, store: GraphStore,
+                    config: RepoBrainConfig | None = None) -> dict:
     """Return a cheap size+mtime staleness summary without reading file content."""
     root = Path(root).resolve()
-    config = RepoBrainConfig.load(root)
+    config = config or RepoBrainConfig.load(root)
     scanned = scan(
         root,
         extra_excludes=config.exclude_patterns,
@@ -74,15 +76,23 @@ def ensure_fresh(
     """
     root = Path(root).resolve()
     policy = policy or FreshnessPolicy()
-    before = check_freshness(root, store)
+    # one config load per gate pass: staleness check, repair, and history
+    # refresh must all see the same include/exclude/window settings
+    config = RepoBrainConfig.load(root)
+    before = check_freshness(root, store, config=config)
     thresholds = {
         "max_changed_files": policy.max_changed_files,
         "max_changed_bytes": policy.max_changed_bytes,
     }
     base = {"before": before, "thresholds": thresholds}
     if not before["is_stale"]:
+        # Pure commits (or rebases) move HEAD without touching the working
+        # tree, so history freshness is checked even when files are current.
         return {"status": "current", "can_query": True, "auto_indexed": False,
-                "message": "Index is current.", **base}
+                "message": "Index is current.",
+                "history": refresh_history(root, store, auto_index=auto_index,
+                                           config=config),
+                **base}
 
     if not auto_index:
         return {"status": "blocked", "can_query": False, "auto_indexed": False,
@@ -98,13 +108,13 @@ def ensure_fresh(
                 **base}
 
     try:
-        stats = Indexer(store, config=RepoBrainConfig.load(root)).index(root, incremental=True)
+        stats = Indexer(store, config=config).index(root, incremental=True)
     except Exception as exc:
         return {"status": "error", "can_query": False, "auto_indexed": False,
                 "reason": "auto_index_failed", "error": str(exc),
                 "message": f"Automatic reindex failed; stale facts were not served: {exc}", **base}
 
-    after = check_freshness(root, store)
+    after = check_freshness(root, store, config=config)
     if after["is_stale"]:
         return {"status": "error", "can_query": False, "auto_indexed": True,
                 "reason": "still_stale", "after": after,
@@ -113,6 +123,8 @@ def ensure_fresh(
     return {
         "status": "reindexed", "can_query": True, "auto_indexed": True,
         "message": f"Automatically reindexed {before['out_of_date_count']} changed file(s).",
+        "history": refresh_history(root, store, auto_index=auto_index,
+                                   config=config),
         "after": after,
         "index_stats": {
             "files_scanned": stats.files_scanned,
