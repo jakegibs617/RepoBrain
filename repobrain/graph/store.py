@@ -236,6 +236,16 @@ class GraphStore:
                 (str(type_), extractor),
             )
 
+    def delete_facts_by_extractor(self, extractor: str) -> None:
+        """Delete every derived node/edge owned by one reconciler.
+
+        Cross-file reconcilers rebuild their complete, bounded fact family in
+        one transaction.  Keeping ownership-based deletion here prevents
+        adapters from reaching through the persistence boundary with raw SQL.
+        """
+        self.conn.execute("DELETE FROM edges WHERE extractor = ?", (extractor,))
+        self.conn.execute("DELETE FROM nodes WHERE extractor = ?", (extractor,))
+
     def touch_paths(self, paths: Iterable[str]) -> None:
         """Refresh last_seen_at for nodes/edges of unchanged files."""
         now = _now()

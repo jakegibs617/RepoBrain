@@ -447,3 +447,59 @@ console entry point and MCP extra metadata. Clean local artifacts are also
 smoked through isolated `uvx`/`uv` environments. Claude SessionStart and Git
 dispatchers remain documented POSIX-shell surfaces; the MCP launch itself is
 cross-platform JSON with no shell interpolation.
+
+## 2026-07-14 — Milestone 16 (framework/runtime adapters)
+
+### D28: Persist syntax facts locally; reconcile framework meaning globally
+
+Framework support uses one narrow `RuntimeAdapter` boundary. Parsers remain
+responsible only for source-local facts: Route metadata records literal
+methods, paths, receiver/callback shape, and callback spans; Module metadata
+records exact import bindings plus SQLAlchemy model/operation candidates.
+`RuntimeAdapterReconciler` consumes those persisted facts after parser
+`finish_run` hooks and before Markdown reconciliation/orphan cleanup, inside
+the existing index transaction. Each adapter replaces only facts owned by its
+extractor. A version stamp backfills adapter facts on an otherwise fresh
+pre-M16 database and must be bumped when reconciliation output changes.
+
+Express inline callbacks receive deterministic Function identities from the
+route literal and source span. Their observed module-level CALLS are copied to
+that precise callback source; the original parser observation remains intact.
+Named Express and Flask-style callbacks resolve only to one exact local
+callable or one exact persisted import binding. Dynamic expressions and
+multi-callback registrations emit no relationship.
+
+The SQLAlchemy adapter creates Table nodes only from literal `__tablename__`
+facts. Exact local/imported model operations produce `READS_TABLE` or
+`WRITES_TABLE` at confidence 0.85 with `is_inferred=1` and
+`inference_reason="sqlalchemy-convention"`: the syntax is observed, but its
+runtime meaning is a framework convention. Zero or multiple table mappings
+are skipped. Shared data-flow and impact traversals gained these edge types;
+change context inherits them through the same impact function, with no
+framework-specific CLI or MCP branch.
+
+## 2026-07-14 — Protocol-level MCP integration hardening
+
+### D29: Test the packaged stdio boundary without moving behavior into it
+
+`RepoBrainTools` and the shared query/freshness functions remain the source of
+truth. Protocol coverage launches the real `repobrain mcp --path ROOT` process
+and uses the official MCP client for initialization, capability negotiation,
+tool discovery, and calls. A second, deliberately small JSON-lines harness is
+reserved for inputs the typed client cannot produce: malformed messages,
+cancellation notifications, EOF shutdown, and bounded read/process cleanup.
+Neither harness reimplements tool behavior.
+
+Stdio is the only supported transport. Stdout is protocol-only, stderr carries
+diagnostics, and client EOF is the clean shutdown signal. Domain outcomes stay
+JSON envelopes in MCP text content (`ok`, `not_found`, `blocked`, or `error`),
+while invalid arguments and unexpected exceptions use MCP tool-error results.
+The existing fail-closed freshness and repository-root checks are exercised
+over transport rather than weakened or duplicated.
+
+The installed JSON argument array is smoked from a clean local wheel through
+an isolated `uvx` environment with offline mode forced in the environment, so
+paths containing spaces are proven without shell parsing or network access.
+This smoke skips only when its optional SDK/build tool or offline dependency
+cache is unavailable; package-resolution and protocol-launch failures remain
+hard test failures with captured evidence.

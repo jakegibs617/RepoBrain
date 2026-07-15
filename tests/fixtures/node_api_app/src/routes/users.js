@@ -8,12 +8,14 @@ router.post('/api/users', (req, res) => {
   res.status(201).json(user);
 });
 
-router.get('/api/users/:id', (req, res) => {
+function getUserRoute(req, res) {
   const user = getUser(Number(req.params.id));
   if (!user) {
     return res.status(404).json({ error: 'not found' });
   }
   res.json(user);
-});
+}
+
+router.get('/api/users/:id', getUserRoute);
 
 module.exports = router;

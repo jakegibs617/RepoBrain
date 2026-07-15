@@ -12,6 +12,7 @@ from .store import GraphStore
 
 #: node types find_symbol searches, in ranking-priority order
 SYMBOL_TYPES = ("Function", "Method", "Class", "Variable", "Module", "TestCase")
+_CODE_TARGET_TYPES = SYMBOL_TYPES + ("Table", "Route", "Endpoint")
 
 _CALLABLE_TYPES = ("Function", "Method", "TestCase")
 
@@ -417,7 +418,7 @@ def _resolve_code_target(store: GraphStore, target: str):
     target = target.strip()
     if not target:
         return None
-    placeholders = ",".join("?" for _ in SYMBOL_TYPES)
+    placeholders = ",".join("?" for _ in _CODE_TARGET_TYPES)
     rows = store.conn.execute(
         f"""
         SELECT id, name, qualified_name, type, path
@@ -426,7 +427,7 @@ def _resolve_code_target(store: GraphStore, target: str):
           AND (name = ? OR qualified_name = ?)
         ORDER BY path, start_line
         """,
-        (*SYMBOL_TYPES, target, target),
+        (*_CODE_TARGET_TYPES, target, target),
     ).fetchall()
     unique = {row["id"]: row for row in rows}
     if len(unique) != 1:
@@ -744,7 +745,8 @@ def impact_analysis(store: GraphStore, target: str, change_type: str = "modify",
             "SELECT e.source_node_id AS source_id, e.type AS edge_type, e.path AS edge_path, e.start_line AS edge_line, "
             "e.confidence AS edge_confidence, n.* FROM edges e JOIN nodes n ON n.id=e.source_node_id "
             "WHERE e.target_node_id=? AND e.type IN "
-            "('IMPORTS','CALLS','MENTIONS','TESTS','COVERS','READS_ENV','USES_CONFIG','DEPENDS_ON')",
+            "('IMPORTS','CALLS','MENTIONS','TESTS','COVERS','READS_ENV','USES_CONFIG',"
+            "'DEPENDS_ON','HANDLES_ROUTE','READS_TABLE','WRITES_TABLE')",
             (nid,),
         ).fetchall()
         for r in rows:
@@ -782,5 +784,5 @@ def impact_analysis(store: GraphStore, target: str, change_type: str = "modify",
         "low_confidence": low, "recommended_tests": tests,
         "docs_likely_needing_updates": docs,
         "historical_evidence": historical,
-        "unknowns": ["Dynamic calls and runtime-only wiring are not statically observable."],
+        "unknowns": ["Unsupported dynamic calls and runtime-only wiring are not statically observable."],
     }

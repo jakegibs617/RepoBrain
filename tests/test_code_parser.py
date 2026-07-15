@@ -254,10 +254,11 @@ def test_js_extraction_on_node_api_app(indexer, store, node_app):
     ).fetchone()
     assert "express" in json.loads(module["metadata_json"])["external_imports"]
 
-    # module-level route callbacks produce Module -> Function CALLS edges
+    # Inline callbacks retain the parser's module-level observation, while a
+    # named callback is attributed to its precise Function identity.
     calls = {(e["source_qname"], e["target_name"]) for e in _edges(store, "CALLS")}
     assert ("src/routes/users", "createUser") in calls
-    assert ("src/routes/users", "getUser") in calls
+    assert ("src/routes/users.getUserRoute", "getUser") in calls
 
 
 def test_js_process_env_reads(indexer, store, node_app):

@@ -11,6 +11,7 @@ from ..graph.store import GraphStore
 from ..parsers.base import ParseResult, ParserRegistry, default_registry
 from .incremental import compute_diff
 from .doc_references import MarkdownMentionReconciler
+from .runtime_adapters import RUNTIME_ADAPTER_VERSION, RuntimeAdapterReconciler
 from .scanner import ScannedFile, scan
 
 
@@ -53,11 +54,13 @@ class Indexer:
         config: RepoBrainConfig | None = None,
         registry: ParserRegistry | None = None,
         mention_reconciler: MarkdownMentionReconciler | None = None,
+        runtime_reconciler: RuntimeAdapterReconciler | None = None,
     ):
         self.store = store
         self.config = config or RepoBrainConfig()
         self.registry = registry or default_registry()
         self.mention_reconciler = mention_reconciler or MarkdownMentionReconciler()
+        self.runtime_reconciler = runtime_reconciler or RuntimeAdapterReconciler()
 
     def index(self, root: str | Path, incremental: bool = True) -> IndexStats:
         """Index `root`. Incremental runs only re-parse changed/added files."""
@@ -123,7 +126,21 @@ class Indexer:
                 edge.commit_hash = commit
             self.store.upsert_edges(extra_edges)
             combined.edges.extend(extra_edges)
-            if diff.to_parse or diff.deleted:
+            runtime_stale = (
+                self.store.get_meta("runtime_adapter_version")
+                != RUNTIME_ADAPTER_VERSION
+            )
+            if diff.to_parse or diff.deleted or runtime_stale:
+                runtime = self.runtime_reconciler.reconcile(self.store)
+                for node in runtime.nodes:
+                    node.commit_hash = commit
+                for edge in runtime.edges:
+                    edge.commit_hash = commit
+                self.store.upsert_nodes(runtime.nodes)
+                self.store.upsert_edges(runtime.edges)
+                self.store.set_meta("runtime_adapter_version", RUNTIME_ADAPTER_VERSION)
+                combined.nodes.extend(runtime.nodes)
+                combined.edges.extend(runtime.edges)
                 mention_edges = self.mention_reconciler.reconcile(self.store)
                 for edge in mention_edges:
                     edge.commit_hash = commit

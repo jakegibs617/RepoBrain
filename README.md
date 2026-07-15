@@ -8,7 +8,7 @@ things live, and what connects to what.
 
 Everything runs offline. No API keys, no network calls.
 
-## Current status (Milestones 1–15 plus distribution complete)
+## Current status (Milestones 1–16 plus distribution complete)
 
 Implemented:
 
@@ -38,9 +38,11 @@ Implemented:
   the "Referencing docs" section of `explain file`
 - YAML and dotenv parsing with GitHub Actions, Docker Compose, and Kubernetes
   adapters; config definitions connect to code-level environment reads
-- HTTP route extraction, grounded route-to-handler edges, data-flow tracing,
-  and confidence-bucketed impact analysis
-- A local FastMCP server exposing all 13 core tools
+- Deterministic Flask-style and Express route adapters with precise named and
+  inline callback identities, plus conservative SQLAlchemy table flow
+- Grounded data-flow tracing and confidence-bucketed impact analysis shared by
+  CLI, MCP, and change-context surfaces
+- A local FastMCP server exposing 19 repository-scoped tools
 - Append-only structured agent memory mirrored into Markdown handoff files,
   with deterministic graph-anchor verification and drift evidence
 - Grounded project overviews and Markdown/HTML graph reports
@@ -68,6 +70,20 @@ runtime wiring remain intentionally conservative; see Limitations.
 
 Unresolvable or third-party imports are stored as `external_imports` metadata
 on the module node — never as dangling graph nodes.
+
+### Supported framework/runtime patterns
+
+| Adapter | Exact supported syntax | Emitted evidence |
+|---------|------------------------|------------------|
+| Flask-style Python | `@app.route("/x", methods=["POST"])`, literal method lists, and `@app.get/post/put/patch/delete("/x")` on static receivers | Route → exact decorated Function at confidence 0.9; ordinary import-qualified CALLS continue through the handler |
+| Express JS/TS | `app`/`router` literal-method registrations with one inline function or one exact local/imported identifier callback | Route → precise Function at confidence 0.9; inline callback CALLS are re-attributed from Module to a deterministic callback identity |
+| SQLAlchemy convention | literal `Model.__tablename__`, `Model.query.*`, `select(Model)`, `session.get(Model, ...)`, and `session.add/merge(Model(...))` with an exact local or imported model binding | Table nodes; model `DEPENDS_ON` table at 1.0; inferred `READS_TABLE`/`WRITES_TABLE` at 0.85 with `sqlalchemy-convention` evidence |
+
+Parsers store source-local route, import-binding, model, and operation facts.
+The runtime reconciler resolves them against the complete persisted graph
+inside the index transaction, before orphan cleanup. Adapter facts are fully
+replaced after relevant changes, so unchanged callers converge when an exact
+target is added, renamed, deleted, or becomes ambiguous.
 
 ## Try it with uvx
 
@@ -99,6 +115,26 @@ wheel and editable installs retain their direct artifact/source URL. The JSON
 stores every token as a separate argument, so repository paths containing
 spaces do not depend on shell quoting. The `mcp` extra is optional for normal
 CLI use and installed automatically by that MCP launch command.
+
+### MCP client and transport contract
+
+RepoBrain supports one local MCP server per repository over stdio. Clients must
+perform the normal `initialize` / `notifications/initialized` handshake before
+tool discovery or calls, keep stdout reserved for JSON-RPC protocol messages,
+and treat stderr as diagnostics. Closing the server's stdin is the supported
+clean-shutdown signal; clients should still apply bounded request and process
+cleanup timeouts.
+
+Tool results are JSON envelopes in MCP text content. Domain outcomes use a
+top-level `status` such as `ok`, `not_found`, `blocked`, or `error`; invalid
+arguments and unexpected tool exceptions use MCP's tool-error result. Every
+read tool applies the shared freshness gate before returning facts. Cancellation
+notifications are accepted, but the current synchronous local query/indexing
+functions may finish before cancellation can preempt their work.
+
+HTTP/SSE transports, remote deployment, authentication, multi-repository
+servers, and server-initiated resources/prompts are not supported. Repository
+root confinement applies even if a client supplies an absolute path to a tool.
 
 For development from a source checkout:
 
@@ -311,6 +347,12 @@ open setup/graph.html
 - Call-graph extraction prefers precision over recall: method calls on
   dynamic receivers (anything other than `self`/`this`) are skipped, and
   cross-file name-only matches require the name to be globally unique.
+- Framework adapters intentionally skip computed route paths or methods,
+  dynamic callback expressions, Express registrations with middleware or
+  multiple callbacks, non-`app`/`router` Express receivers, dynamic Flask
+  receivers, model aliases not grounded by an exact import, and ORM operations
+  whose model maps to zero or multiple table literals. FastAPI and ORM
+  relationship/join semantics are not supported yet.
 - Incremental runs only re-parse changed files, so a new function in file A
   will not gain inferred CALLS edges from an unchanged caller in file B until
   B changes (or a `--no-incremental` run).

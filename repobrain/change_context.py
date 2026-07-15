@@ -20,7 +20,8 @@ from .parsers.base import default_registry
 _HUNK = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@", re.MULTILINE)
 _SYMBOL_TYPES = {
     "Function", "Method", "Class", "Variable", "TestCase", "Route", "Endpoint",
-    "CLICommand", "ConfigKey", "EnvVar", "GitHubJob", "GitHubStep", "DockerService",
+    "CLICommand", "Table", "ConfigKey", "EnvVar", "GitHubJob", "GitHubStep",
+    "DockerService",
 }
 
 

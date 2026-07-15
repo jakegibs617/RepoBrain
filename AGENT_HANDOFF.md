@@ -3,12 +3,50 @@
 ## Project Summary
 
 RepoBrain: a local-first second brain for AI coding agents (see `prd.md`).
-All ten PRD milestones and post-MVP Milestones 11–15 are now implemented. Milestones 1–4 delivered storage,
+All ten PRD milestones, post-MVP Milestones 11–16, and protocol-level MCP
+hardening are now implemented. Milestones 1–4 delivered storage,
 incremental indexing, code/docs parsing, search, and documentation mapping.
 Milestones 5–10 add config adapters and tracing, route/data-flow analysis,
 impact analysis, MCP tools, durable agent memory, and Markdown/HTML reports.
 
 ## Delivery Status
+
+- Protocol-level MCP hardening is implemented. A bounded integration harness
+  launches the real CLI server over stdio and uses the official MCP client for
+  initialize/capability negotiation, discovery, representative reads, and
+  success/not-found/error/tool-error envelopes. A narrow raw harness covers
+  malformed JSON, cancellation notification handling, EOF, invalid-path exit,
+  timeouts, and robust terminate/kill cleanup without duplicating tool logic.
+- Transport tests prove small-diff repair, opted-out and oversized fail-closed
+  behavior with no stale result payload, absolute-path confinement, and
+  protocol-only stdout. An offline isolated `uvx` smoke builds a clean wheel
+  and launches the exact installer-generated argument array against a
+  repository path containing spaces; it skips only with explicit evidence
+  when optional tools or cached offline dependencies are unavailable.
+- The README now documents the stdio lifecycle, result/error contract,
+  cancellation limitation, and out-of-scope transports. Protocol verification:
+  61 focused MCP/freshness/distribution tests and 214 full pytest tests passed;
+  compilation and whitespace checks were clean. Review fixed an overly broad
+  isolated-smoke skip that could have hidden real packaging failures.
+
+- M16 framework/runtime adapters are implemented on
+  `feat/framework-runtime-adapters`. A transaction-local reconciler consumes
+  persisted syntax facts and emits precise Flask-style/Express route-handler
+  relationships plus conservative SQLAlchemy Table/READS_TABLE/WRITES_TABLE
+  evidence without importing target frameworks.
+- Express inline callbacks now have deterministic Function identities and
+  callback-attributed CALLS; named callbacks resolve through exact local or
+  persisted import bindings. Dynamic/multiple callbacks and receivers are
+  skipped. SQLAlchemy operations require one exact model binding and one
+  literal `__tablename__`, and are labeled inferred at confidence 0.85.
+- Adapter facts globally converge on additions, renames, deletions, ambiguity,
+  stale-edge cleanup, unchanged callers, no-change runs, and versioned legacy
+  graph backfill. Shared data-flow, impact, and change-context queries consume
+  the new evidence without CLI/MCP forks.
+- M16 verification: 208 pytest tests passed; Python compilation and whitespace
+  checks were clean. The final structured diff review found no remaining
+  actionable regressions after fixing versioned backfill, exact Flask span
+  disambiguation, and empty adapter-set injection.
 
 - Distribution is implemented on `feat/distribution-agent-install`.
   `repobrain install-agent` now installs one exact repository-scoped
@@ -122,6 +160,12 @@ impact analysis, MCP tools, durable agent memory, and Markdown/HTML reports.
   resolves structured Markdown references against the complete persisted graph.
   It globally rebuilds its own `MENTIONS` edges after relevant changes so
   incremental runs converge when either side of a relationship changes.
+- `repobrain/indexing/runtime_adapters.py` — `RuntimeAdapter` protocol,
+  `RuntimeAdapterReconciler`, precise Flask/Express handler reconciliation,
+  and exact-model SQLAlchemy table flow. Adapter-owned facts are globally
+  rebuilt inside the index transaction and guarded by a version stamp.
+- `repobrain/parsers/route_parser.py` — source-local Flask-style/Express Route
+  facts only; handler resolution is deliberately outside the parser.
 - `repobrain/parsers/code_treesitter.py` — **new**: `CodeParser` +
   per-language `_Extractor` subclasses (Python, JS/TS shared, PHP, Bash, Go,
   Java, Ruby). One compiled tree-sitter Query per grammar (lru_cache); the
@@ -185,8 +229,9 @@ impact analysis, MCP tools, durable agent memory, and Markdown/HTML reports.
 
 ## Decisions
 
-See `DECISIONS.md` D24 for the M13 session and D25 for the M14 Git history
-extractor, and D26 for M15 memory anchoring and non-mutating validation.
+See `DECISIONS.md` D24 for M13 change context, D25 for M14 Git history,
+D26 for M15 memory verification, D27 for distribution, D28 for runtime
+adapters, and D29 for the protocol-level MCP boundary.
 
 ## Assumptions
 
@@ -199,8 +244,6 @@ extractor, and D26 for M15 memory anchoring and non-mutating validation.
 
 ## Open Questions
 
-- Should module-level JS route callbacks become Route/Endpoint nodes in M6 so
-  CALLS sources are more precise than the Module node?
 - Should INSTANTIATES edges be emitted for `ClassName()` calls (currently
   skipped for precision)?
 - Should orphaned EnvVar nodes (no remaining READS_ENV edges) be swept, or
@@ -218,6 +261,12 @@ extractor, and D26 for M15 memory anchoring and non-mutating validation.
   changes or a `--no-incremental` run happens.
 - `finish_run` must run inside the index transaction and **before**
   `delete_orphan_edges` (dangling import-qualified targets rely on the sweep).
+- Runtime adapters must run after `finish_run` and before Markdown/orphan
+  cleanup. Bump `RUNTIME_ADAPTER_VERSION` whenever adapter output shape or
+  reconciliation semantics change, or fresh legacy databases will not backfill.
+- Express registrations with middleware/multiple callbacks and dynamic
+  callback expressions are deliberately unresolved. SQLAlchemy operations are
+  skipped unless one exact model binding maps to one literal `__tablename__`.
 - pytest `norecursedirs = ["fixtures"]` keeps fixture apps' own tests out of
   collection — don't remove.
 - Never leave `.repobrain/` dirs inside `tests/fixtures/*` after manual CLI
@@ -278,8 +327,8 @@ extractor, and D26 for M15 memory anchoring and non-mutating validation.
 
 ## Suggested Next Steps
 
-A ready-to-use prompt for the next session (scoped to deterministic
-framework/runtime adapters) is
+A ready-to-use prompt for the next session (scoped to deterministic indexing
+and traversal scale hardening above 1,000 files) is
 in `docs/NEXT_SESSION_PROMPT.md`.
 
 ### Product direction (post-MVP review, 2026-07-10)
@@ -322,9 +371,10 @@ deterministic-first stance (D-series) until the delivery loop above proves out.
 
 ### Engineering follow-ups (carried over)
 
-1. Add framework adapters for dynamic receiver calls and richer ORM/table flow.
-2. Profile indexing and traversal on repositories above 1,000 files.
-3. Add protocol-level MCP integration tests in addition to direct tool tests.
+1. **Framework/runtime adapters. Delivered (M16).** Precise Flask-style and
+   Express handlers plus conservative exact-model SQLAlchemy table flow.
+2. Add protocol-level MCP integration tests in addition to direct tool tests.
+3. Profile indexing and traversal on repositories above 1,000 files.
 
 ## Source-Grounded Notes
 
@@ -335,4 +385,4 @@ deterministic-first stance (D-series) until the delivery loop above proves out.
   confidence, DATABASE_URL env read, `tests/test_users.py` via imports).
   Same for `node_api_app` with `createUser` / `src/config.js` (PORT,
   DATABASE_URL, LOG_LEVEL env reads; TestCases calling the service).
-- 63/63 pytest tests pass (`.venv/bin/pytest -q`).
+- 208/208 pytest tests pass (`.venv/bin/pytest -q`).
