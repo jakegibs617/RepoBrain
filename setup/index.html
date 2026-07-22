@@ -30,11 +30,11 @@
       <section class="hero">
         <div class="eyebrow"><span>01</span> Quick start</div>
         <h1>Give your agents a<br /><em>memory.</em></h1>
-        <p>Turn any codebase into a durable, searchable knowledge graph—locally, privately, and in about two minutes.</p>
+        <p>Turn any codebase into a durable, searchable knowledge graph—and give your coding agent MCP tools to query it—locally, privately, and in about two minutes.</p>
         <div class="hero-meta">
           <span><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 6v6l4 2M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0Z" /></svg> ~2 minutes</span>
           <span><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3 5 6v5c0 4.6 2.9 8.8 7 10 4.1-1.2 7-5.4 7-10V6l-7-3Z" /></svg> No account or API key</span>
-          <span><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m8 9-4 3 4 3m8-6 4 3-4 3m-2-9-4 12" /></svg> Python 3.11+</span>
+          <span><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m8 9-4 3 4 3m8-6 4 3-4 3m-2-9-4 12" /></svg> Python 3.11+ and uv</span>
         </div>
       </section>
 
@@ -42,16 +42,16 @@
         <aside class="step-nav">
           <div class="progress-track"><span id="progress-line"></span></div>
           <button class="step-link active" data-step="1"><span>1</span><b>Check prerequisites</b><small>Python and uv</small></button>
-          <button class="step-link" data-step="2"><span>2</span><b>Install RepoBrain</b><small>Create your environment</small></button>
-          <button class="step-link" data-step="3"><span>3</span><b>Initialize</b><small>Prepare the project</small></button>
-          <button class="step-link" data-step="4"><span>4</span><b>Build the graph</b><small>Index your codebase</small></button>
+          <button class="step-link" data-step="2"><span>2</span><b>Build the graph</b><small>One uvx command, no install</small></button>
+          <button class="step-link" data-step="3"><span>3</span><b>Connect your agent</b><small>Add the MCP server</small></button>
+          <button class="step-link" data-step="4"><span>4</span><b>Get oriented</b><small>Generate a session brief</small></button>
           <button class="step-link" data-step="5"><span>5</span><b>Ask a question</b><small>Search your new memory</small></button>
         </aside>
 
         <div class="steps">
           <article class="step-card" id="step-1" data-step="1">
             <div class="step-heading"><span>01</span><div><p>Prerequisites</p><h2>Make sure you’re ready</h2></div></div>
-            <p class="step-copy">RepoBrain needs Python 3.11 or newer and <a href="https://docs.astral.sh/uv/" target="_blank" rel="noreferrer">uv</a>, a fast Python package manager.</p>
+            <p class="step-copy">RepoBrain needs Python 3.11 or newer and <a href="https://docs.astral.sh/uv/" target="_blank" rel="noreferrer">uv</a>, a fast Python package manager. There is nothing else to install — <code>uvx</code> runs RepoBrain in an isolated, throwaway environment on demand.</p>
             <div class="platform-tabs" role="tablist" aria-label="Operating system">
               <button class="platform-tab active" data-platform="unix" role="tab" aria-selected="true">macOS / Linux</button>
               <button class="platform-tab" data-platform="windows" role="tab" aria-selected="false">Windows</button>
@@ -61,55 +61,55 @@
               <pre><code><span class="prompt">$</span> <span class="command-text">python3 --version
 uv --version</span></code></pre>
             </div>
-            <div class="note"><span>i</span><p>Don’t have uv yet? <a href="https://docs.astral.sh/uv/getting-started/installation/" target="_blank" rel="noreferrer">Install uv</a>, then return here. Python can be downloaded from <a href="https://python.org/downloads/" target="_blank" rel="noreferrer">python.org</a>.</p></div>
+            <div class="note"><span>i</span><p>Don’t have uv yet? <a href="https://docs.astral.sh/uv/getting-started/installation/" target="_blank" rel="noreferrer">Install uv</a>, then return here. Python can be downloaded from <a href="https://python.org/downloads/" target="_blank" rel="noreferrer">python.org</a>. Prefer a source checkout with an explicit virtualenv? See <a href="../README.md#mcp-client-and-transport-contract">the README</a> for the <code>uv venv</code> / editable-install path.</p></div>
             <button class="complete-btn"><span>✓</span> Mark complete</button>
           </article>
 
           <article class="step-card" id="step-2" data-step="2">
-            <div class="step-heading"><span>02</span><div><p>Install</p><h2>Create a clean environment</h2></div></div>
-            <p class="step-copy">From the project folder, create a virtual environment and install RepoBrain with its development tools.</p>
-            <div class="command" data-command-unix="uv venv .venv&#10;uv pip install -p .venv/bin/python -e &quot;.[dev]&quot;" data-command-windows="uv venv .venv&#10;uv pip install -p .venv/Scripts/python.exe -e &quot;.[dev]&quot;">
-              <div class="command-top"><span>Terminal · project root</span><button class="copy-btn" aria-label="Copy install commands">Copy</button></div>
-              <pre><code><span class="prompt">$</span> <span class="command-text">uv venv .venv
-uv pip install -p .venv/bin/python -e ".[dev]"</span></code></pre>
+            <div class="step-heading"><span>02</span><div><p>Index</p><h2>Build your knowledge graph</h2></div></div>
+            <p class="step-copy">From the project you want RepoBrain to understand, run one command. <code>uvx</code> fetches RepoBrain on the fly — no <code>pip install</code>, no virtualenv to manage — then scans the project and connects its files, symbols, imports, calls, tests, docs, and environment variables.</p>
+            <div class="command" data-command-unix="uvx repobrain index ." data-command-windows="uvx repobrain index .">
+              <div class="command-top"><span>Terminal · project root</span><button class="copy-btn" aria-label="Copy index command">Copy</button></div>
+              <pre><code><span class="prompt">$</span> <span class="command-text">uvx repobrain index .</span></code></pre>
             </div>
+            <p class="microcopy">Your graph lives in <code>.repobrain/repobrain.sqlite</code> inside the project. Nothing leaves your machine, and re-running this command later only re-parses what changed.</p>
             <button class="complete-btn"><span>✓</span> Mark complete</button>
           </article>
 
           <article class="step-card" id="step-3" data-step="3">
-            <div class="step-heading"><span>03</span><div><p>Initialize</p><h2>Prepare your project</h2></div></div>
-            <p class="step-copy">Create RepoBrain’s local configuration in the repository you want to understand. The dot means “this folder.”</p>
-            <div class="command" data-command-unix=".venv/bin/repobrain init ." data-command-windows=".venv/Scripts/repobrain.exe init .">
-              <div class="command-top"><span>Terminal</span><button class="copy-btn" aria-label="Copy initialize command">Copy</button></div>
-              <pre><code><span class="prompt">$</span> <span class="command-text">.venv/bin/repobrain init .</span></code></pre>
+            <div class="step-heading"><span>03</span><div><p>Connect</p><h2>Give your agent MCP tools</h2></div></div>
+            <p class="step-copy">This is the actual point of RepoBrain: your AI coding agent gets first-class access to the graph you just built. One command writes a repository-scoped <code>.mcp.json</code> entry, a marker-owned <code>CLAUDE.md</code> section, and (for Claude Code) an idempotent SessionStart hook.</p>
+            <div class="command" data-command-unix="uvx repobrain install-agent ." data-command-windows="uvx repobrain install-agent .">
+              <div class="command-top"><span>Terminal · project root</span><button class="copy-btn" aria-label="Copy install-agent command">Copy</button></div>
+              <pre><code><span class="prompt">$</span> <span class="command-text">uvx repobrain install-agent .</span></code></pre>
             </div>
-            <div class="success-preview"><span>✓</span><p><b>Ready.</b> RepoBrain created <code>.repobrain/config.json</code> in your project.</p></div>
+            <div class="note"><span>i</span><p>Add <code>--git-hooks</code> to also keep the index fresh after every commit and merge. Restart your agent client afterward, then confirm the tools are registered with <code>cat .mcp.json</code>. Run <code>uvx repobrain uninstall-agent .</code> any time to remove only RepoBrain-owned entries.</p></div>
             <button class="complete-btn"><span>✓</span> Mark complete</button>
           </article>
 
           <article class="step-card" id="step-4" data-step="4">
-            <div class="step-heading"><span>04</span><div><p>Index</p><h2>Build your knowledge graph</h2></div></div>
-            <p class="step-copy">Scan the project and connect its files, symbols, imports, calls, tests, docs, and environment variables.</p>
-            <div class="command" data-command-unix=".venv/bin/repobrain index ." data-command-windows=".venv/Scripts/repobrain.exe index .">
-              <div class="command-top"><span>Terminal</span><button class="copy-btn" aria-label="Copy index command">Copy</button></div>
-              <pre><code><span class="prompt">$</span> <span class="command-text">.venv/bin/repobrain index .</span></code></pre>
+            <div class="step-heading"><span>04</span><div><p>Orient</p><h2>Generate a session brief</h2></div></div>
+            <p class="step-copy">A stale or silent knowledge base doesn’t help anyone. <code>brief</code> produces a token-budgeted orientation pack — purpose, subsystems, entrypoints, open assumptions, and recent memory — grounded entirely in what was just indexed, not a guess.</p>
+            <div class="command" data-command-unix="uvx repobrain brief --budget 2000" data-command-windows="uvx repobrain brief --budget 2000">
+              <div class="command-top"><span>Terminal</span><button class="copy-btn" aria-label="Copy brief command">Copy</button></div>
+              <pre><code><span class="prompt">$</span> <span class="command-text">uvx repobrain brief --budget 2000</span></code></pre>
             </div>
-            <p class="microcopy">Your graph stays in <code>.repobrain/repobrain.sqlite</code>. Nothing leaves your machine.</p>
+            <p class="microcopy">Once <code>install-agent</code> has run, a compatible agent client gets this automatically at session start — you shouldn’t need to run it by hand day to day.</p>
             <button class="complete-btn"><span>✓</span> Mark complete</button>
           </article>
 
           <article class="step-card final-card" id="step-5" data-step="5">
             <div class="step-heading"><span>05</span><div><p>Explore</p><h2>Ask your first question</h2></div></div>
-            <p class="step-copy">Search the indexed project, look up a symbol, or ask RepoBrain to explain a file.</p>
-            <div class="command" data-command-unix=".venv/bin/repobrain search &quot;database&quot;&#10;.venv/bin/repobrain find-symbol create_user&#10;.venv/bin/repobrain explain file repobrain/cli.py" data-command-windows=".venv/Scripts/repobrain.exe search &quot;database&quot;&#10;.venv/Scripts/repobrain.exe find-symbol create_user&#10;.venv/Scripts/repobrain.exe explain file repobrain/cli.py">
+            <p class="step-copy">Search the indexed project, look up a symbol, or ask RepoBrain to explain a file — the same graph facts your agent's MCP tools now use.</p>
+            <div class="command" data-command-unix="uvx repobrain search &quot;database&quot;&#10;uvx repobrain find-symbol create_user&#10;uvx repobrain explain file repobrain/cli.py" data-command-windows="uvx repobrain search &quot;database&quot;&#10;uvx repobrain find-symbol create_user&#10;uvx repobrain explain file repobrain/cli.py">
               <div class="command-top"><span>Try one—or all three</span><button class="copy-btn" aria-label="Copy example commands">Copy</button></div>
-              <pre><code><span class="prompt">$</span> <span class="command-text">.venv/bin/repobrain search "database"
-.venv/bin/repobrain find-symbol create_user
-.venv/bin/repobrain explain file repobrain/cli.py</span></code></pre>
+              <pre><code><span class="prompt">$</span> <span class="command-text">uvx repobrain search "database"
+uvx repobrain find-symbol create_user
+uvx repobrain explain file repobrain/cli.py</span></code></pre>
             </div>
             <div class="finish-banner">
               <div class="finish-icon">✦</div>
-              <div><p>You’re all set</p><h3>Your repo has a memory now.</h3></div>
+              <div><p>You’re all set</p><h3>Your repo — and your agent — have a memory now.</h3></div>
               <button id="reset-progress">Reset guide</button>
             </div>
             <button class="complete-btn"><span>✓</span> Finish setup</button>

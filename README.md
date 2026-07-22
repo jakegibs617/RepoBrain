@@ -66,7 +66,7 @@ runtime wiring remain intentionally conservative; see Limitations.
 | PHP        | yes     | `require`/`include` with literal relative paths | same-file, `$this->method` | `getenv('X')` |
 | Bash       | functions + top-level variables | no | same-file function invocations | no |
 | Go         | yes (structs/types as Class) | yes, if `go.mod` is at the indexed root (import path → every non-test `.go` file in that package directory) | same-file | no |
-| Java       | yes (interfaces/enums as Class) | yes, if a single unambiguous `src/main/java`/`src/test/java` root exists (fully-qualified/wildcard/static imports → file(s) under that root) | within-class | no |
+| Java       | yes (interfaces/enums as Class) | yes, if a single unambiguous `src/main/java`/`src/test/java` root exists (fully-qualified/wildcard/static imports → file(s) under that root) | within-class, same-file/import-qualified `ClassName.staticMethod()` | no |
 | Ruby       | yes (modules as Class) | `require_relative` | same-file, within-class, name-match | no |
 
 Unresolvable or third-party imports are stored as `external_imports` metadata
@@ -101,6 +101,16 @@ not resolved; there is no package-declaration-content-based fallback, since
 that would require reading file content before any file is parsed, which
 this codebase's import resolvers don't do.
 
+**Java call resolution** additionally resolves `ClassName.staticMethod()`
+calls, same-file and import-qualified, even though tree-sitter's Java
+grammar gives that call the identical shape as a variable-qualified call
+(`someVar.method()`) — both are a bare `identifier` in the `object` field.
+Resolution goes through the same name registries every other language's
+CALLS ladder already uses (`classes_by_name`/import bindings), not a
+capitalization guess. A call whose object identifier isn't a known class
+name (i.e. every ordinary instance method call) stays unresolved for good —
+that's the type-inference boundary this codebase doesn't cross.
+
 ### Supported framework/runtime patterns
 
 | Adapter | Exact supported syntax | Emitted evidence |
@@ -125,6 +135,10 @@ Requires Python 3.11+ and [uv](https://docs.astral.sh/uv/).
 # one-off commands run in an isolated environment
 uvx repobrain --help
 uvx repobrain index .
+
+# a token-budgeted orientation pack: what this project is, entrypoints,
+# open assumptions, recent memory — grounded in the graph you just built
+uvx repobrain brief --budget 2000
 
 # install the MCP server entry and Claude session context in this repository
 # add --git-hooks to also keep the index fresh after commits and merges

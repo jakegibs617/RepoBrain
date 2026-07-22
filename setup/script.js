@@ -24,7 +24,7 @@ function renderPlatform() {
 
 function renderProgress() {
   navLinks.forEach((link) => link.classList.toggle("done", state.completed.has(Number(link.dataset.step))));
-  const progress = Math.max(0, Math.min(100, (state.completed.size / 5) * 100));
+  const progress = Math.max(0, Math.min(100, (state.completed.size / navLinks.length) * 100));
   document.querySelector("#progress-line").style.height = `${progress}%`;
   document.querySelectorAll(".complete-btn").forEach((button) => {
     const done = state.completed.has(Number(button.closest(".step-card").dataset.step));
