@@ -627,3 +627,107 @@ incremental limitation as D16's CALLS), but a deleted/renamed *target* whose
 importer isn't reparsed still converges correctly, because the existing
 orphan-edge sweep (which already ran before this milestone) removes any edge
 whose target node no longer exists — no Go/Java-specific cleanup was needed.
+
+## 2026-07-22 — INSTANTIATES edges + orphaned EnvVar sweep
+
+### D32: INSTANTIATES mirrors CALLS' confidence ladder exactly; import-qualified resolution is deferred to a batched existence check; EnvVar orphan sweep runs after every edge mutation, every index
+
+This activates the previously-defined-but-unused `EdgeType.INSTANTIATES`
+(closing the first of the two smallest carried-over gaps from Milestone 3,
+see AGENT_HANDOFF.md "Open Questions") and closes D17's documented EnvVar
+lingering-node gap. Both reuse existing, already-proven machinery — no new
+mechanism — and are independently testable (`tests/test_code_parser.py`'s
+new INSTANTIATES section; `tests/test_graph_store.py`'s and
+`test_code_parser.py`'s new EnvVar-sweep tests).
+
+**INSTANTIATES tiers, exactly mirroring D16's CALLS ladder:**
+
+- Same-file `ClassName()` (resolved via `classes_by_name`) → confidence 0.9,
+  `is_inferred=0`. `_resolve_plain_call` checks `func_by_name` before
+  `classes_by_name` at this tier (unchanged order from before this
+  milestone), so a module that unusually defines both a function and a class
+  of the same name deterministically resolves to `CALLS` — never both.
+- Cross-file globally-unique name-match → confidence 0.7, `is_inferred=1`,
+  `inference_reason="name-match"`, computed in `finish_run`'s existing
+  batched pass. The batched query now selects `Function`, `Method`, and
+  `Class` candidates together; the same per-path arithmetic decides
+  uniqueness for each pool independently, and the `Function`/`Method` pool
+  is always tried first — a pending call that resolves as `CALLS` never also
+  gets checked against the `Class` pool, so a name globally unique as a
+  function elsewhere never also emits an inferred `INSTANTIATES`. Ambiguous
+  names (either pool, or both) create nothing, matching CALLS' precision
+  stance.
+- Import-qualified (`symbol_aliases`/`module_aliases`, e.g. `from mod import
+  Foo; Foo()` or `alias.Foo()`) also gets confidence 0.9, `is_inferred=0` —
+  but with a deliberate refinement over D16's original CALLS approach. D16
+  computes the target id and lets it dangle (cleaned up by the existing
+  orphan-edge sweep) if wrong, which is safe when there's only one candidate
+  type. With a second candidate type (Class) in play, that approach breaks:
+  if the imported module legitimately defines both a function and a class of
+  the same name, *both* speculative target ids would resolve to real nodes,
+  and neither edge would dangle for the orphan sweep to remove — violating
+  "never double-emit" for no good reason. Instead, `_resolve_plain_call`'s
+  `symbol_aliases` branch and `_resolve_module_attr_call` now queue a
+  `_PendingImportCall` (caller, both candidate target ids) and
+  `CodeParser.finish_run` resolves the whole run's queue with one batched
+  `id IN (...)` existence check (same chunking pattern as the name-match
+  pass, just keyed by id instead of name) — `CALLS` wins deterministically
+  whenever the Function/Method target exists, `INSTANTIATES` only when it
+  doesn't and the Class target does. This was caught by review (an earlier
+  version speculatively emitted both edges unconditionally, matching D16's
+  old CALLS-only precedent too literally); a regression test
+  (`test_import_qualified_call_wins_over_same_named_class_in_target_module`)
+  covers the exact scenario. Same-file `self.method()`/`this.method()`
+  resolution (`_resolve_self_call`) is untouched — it has no class-shaped
+  counterpart to disambiguate against.
+
+**Language scope.** INSTANTIATES fires wherever `_resolve_plain_call`/
+`_resolve_module_attr_call`/`finish_run`'s shared machinery already runs —
+Python, JavaScript, TypeScript, PHP, and Ruby — with no per-language code.
+In practice Python's `ClassName()` idiom is the primary beneficiary: it's
+syntactically identical to a function call, so it was already flowing
+through this exact pipeline. JS/TS, PHP, and Java's idiomatic constructor
+syntax is `new ClassName(...)` (a distinct `new_expression` /
+`object_creation_expression` tree-sitter node, not currently captured by any
+query), and Ruby's is `ClassName.new` (a receiver call, already skipped by
+Ruby's pre-existing dynamic-receiver guard) — so those languages' *real*
+constructor calls get nothing from this milestone, not a guess; only a bare
+call-shaped invocation of a name that happens to match a known Class would
+fire, which is both rare and not a new risk (identical precision stance to
+existing name-match CALLS). Extending capture patterns to cover `new`/
+`object_creation_expression` per language is future work, out of scope here.
+Go is the one language with a real, verified false-positive risk and is
+explicitly excluded via `_GoExtractor.SUPPORTS_INSTANTIATES = False`: Go's
+type-conversion syntax `T(x)` (T a named type) parses as an ordinary
+`call_expression`, identical in tree-sitter shape to a real call (confirmed
+by inspecting the parse tree, not assumed) — without the exclusion, a type
+conversion whose type name happens to be a known Class would be misread as
+an instantiation. Java is unaffected because its extractor never routes
+bare/qualified calls through `_resolve_plain_call`/`_resolve_module_attr_call`
+at all (only `self`/`this`-qualified calls resolve there), a pre-existing
+scope limit this milestone didn't touch.
+
+**Query surfacing.** `impact_analysis` and `trace_data_flow`
+(`repobrain/graph/queries.py`) both added `INSTANTIATES` to their traversed
+edge-type lists: "who constructs this class" is exactly the kind of
+"safer changes" evidence `impact_analysis` exists for, and it's the same
+backward-edge traversal CALLS already gets. `explain_file` gained
+`instantiates`/`instantiated_by` sections mirroring `calls_out`/`called_by`
+(same query shape, new `_instantiates_out`/`_instantiated_by` helpers), and
+the CLI's `explain file` text output gained matching sections.
+
+**EnvVar orphan sweep.** `GraphStore.delete_orphan_envvars()` is one bounded
+`DELETE FROM nodes WHERE type='EnvVar' AND id NOT IN (SELECT
+target_node_id FROM edges WHERE type='READS_ENV')` — not a per-row loop, per
+D30. It runs in `Indexer.index()` immediately after `delete_orphan_edges()`,
+unconditionally on every index (not gated on whether env-reading files
+changed): by that point in the transaction every edge mutation for the run
+— `delete_paths`, node/edge upserts, `finish_run`, the runtime-adapter and
+Markdown reconcilers, and `delete_orphan_edges` itself — has already
+happened, so the READS_ENV edge set it queries against is this run's true
+final state. Running unconditionally rather than gating on "did an
+env-reading file change" keeps the mechanism simple and matches D30's
+precedent for the Markdown/runtime-adapter reconcilers: a small, fixed
+number of statements regardless of corpus size, even though the row-scan
+work isn't zero on a no-change run. `tests/test_scale.py`'s statement-count
+ceilings still pass with the extra statement.

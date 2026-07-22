@@ -27,8 +27,9 @@ Implemented:
   TODO/FIXME list items as Task nodes
 - Keyword search: FTS5 bm25 ranking combined with exact-name and path boosts
 - Tree-sitter code parser: Module/Function/Class/Method/Variable nodes with
-  qualified names and line spans, DEFINES/CONTAINS/IMPORTS/CALLS/READS_ENV
-  edges, TestFile/TestCase detection, and symbol names in full-text search
+  qualified names and line spans, DEFINES/CONTAINS/IMPORTS/CALLS/
+  INSTANTIATES/READS_ENV edges, TestFile/TestCase detection, and symbol
+  names in full-text search
 - `find-symbol` and `explain file` CLI commands backed by reusable graph
   queries (`repobrain/graph/queries.py`)
 - Markdown-to-code purpose mapping: local links and backticked file/symbol
@@ -376,6 +377,18 @@ open setup/graph.html
 - Call-graph extraction prefers precision over recall: method calls on
   dynamic receivers (anything other than `self`/`this`) are skipped, and
   cross-file name-only matches require the name to be globally unique.
+- Constructor calls (`ClassName()`) become `INSTANTIATES` edges under the
+  exact same confidence ladder as `CALLS` (0.9 observed same-file/
+  import-qualified, 0.7 inferred cross-file-unique-name). Only languages
+  whose grammar routes a bare call-shaped node through the same resolution
+  path get this: in practice, Python's `ClassName()` idiom is the primary
+  beneficiary, since JS/TS/PHP/Java's `new ClassName()` and Ruby's
+  `ClassName.new` use different tree-sitter grammar productions not
+  currently captured by any query. Go is explicitly excluded: its `T(x)`
+  type-conversion syntax parses as an ordinary call expression, and would
+  otherwise be misread as instantiating a same-named type. A name that
+  resolves to both a Function/Method and a Class always produces `CALLS`,
+  never both.
 - Framework adapters intentionally skip computed route paths or methods,
   dynamic callback expressions, Express registrations with middleware or
   multiple callbacks, non-`app`/`router` Express receivers, dynamic Flask
@@ -385,6 +398,10 @@ open setup/graph.html
 - Incremental runs only re-parse changed files, so a new function in file A
   will not gain inferred CALLS edges from an unchanged caller in file B until
   B changes (or a `--no-incremental` run).
+- `EnvVar` nodes are repo-global (every reader of the same variable name
+  converges on one node); a bounded sweep removes an `EnvVar` node once its
+  last `READS_ENV` edge disappears (the reader was deleted or edited to stop
+  reading it), so it doesn't linger forever as an edgeless node.
 - Markdown mention matching is intentionally strict: exact local paths and
   exact unique symbol names are linked; fuzzy text, ambiguous symbols,
   external URLs, and route literals without a Route node are skipped.

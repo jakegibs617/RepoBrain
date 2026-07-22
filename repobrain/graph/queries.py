@@ -346,6 +346,42 @@ def _called_by(store: GraphStore, path: str, limit: int) -> list[dict]:
     return [dict(r) for r in rows]
 
 
+def _instantiates_out(store: GraphStore, path: str, limit: int) -> list[dict]:
+    """Classes this file's callables construct (D32 INSTANTIATES)."""
+    rows = store.conn.execute(
+        """
+        SELECT s.qualified_name AS caller, t.qualified_name AS class_,
+               t.path AS class_path, e.start_line, e.confidence, e.is_inferred
+        FROM edges e
+        JOIN nodes s ON s.id = e.source_node_id
+        JOIN nodes t ON t.id = e.target_node_id
+        WHERE e.type = 'INSTANTIATES' AND e.path = ?
+        ORDER BY e.start_line
+        LIMIT ?
+        """,
+        (path, limit),
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def _instantiated_by(store: GraphStore, path: str, limit: int) -> list[dict]:
+    """Callables elsewhere that construct a Class defined in this file."""
+    rows = store.conn.execute(
+        """
+        SELECT s.qualified_name AS caller, s.path AS caller_path,
+               t.qualified_name AS class_, e.start_line, e.confidence, e.is_inferred
+        FROM edges e
+        JOIN nodes s ON s.id = e.source_node_id
+        JOIN nodes t ON t.id = e.target_node_id
+        WHERE e.type = 'INSTANTIATES' AND t.path = ? AND e.path != ?
+        ORDER BY s.path, e.start_line
+        LIMIT ?
+        """,
+        (path, path, limit),
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
 def _env_reads(store: GraphStore, path: str) -> list[dict]:
     rows = store.conn.execute(
         """
@@ -561,6 +597,8 @@ def explain_file(store: GraphStore, filepath: str, call_limit: int = 15) -> dict
         "imported_by": _imported_by(store, module_id) if module_id else [],
         "calls_out": _calls_out(store, path, call_limit),
         "called_by": _called_by(store, path, call_limit),
+        "instantiates": _instantiates_out(store, path, call_limit),
+        "instantiated_by": _instantiated_by(store, path, call_limit),
         "env_vars": _env_reads(store, path),
         "tests": _related_tests(store, path, module_id),
         "docs": _doc_mentions(store, path),
@@ -597,8 +635,8 @@ def trace_data_flow(store: GraphStore, start: str, depth: int = 4,
         return None
 
     edge_types = (
-        "HANDLES_ROUTE", "EXPOSES_ENDPOINT", "CALLS", "IMPORTS", "READS",
-        "WRITES", "READS_ENV", "USES_CONFIG", "PUBLISHES_EVENT",
+        "HANDLES_ROUTE", "EXPOSES_ENDPOINT", "CALLS", "INSTANTIATES", "IMPORTS",
+        "READS", "WRITES", "READS_ENV", "USES_CONFIG", "PUBLISHES_EVENT",
         "CONSUMES_EVENT", "READS_TABLE", "WRITES_TABLE", "DEPENDS_ON",
         "DEFINES", "CONTAINS",
     )
@@ -745,8 +783,8 @@ def impact_analysis(store: GraphStore, target: str, change_type: str = "modify",
             "SELECT e.source_node_id AS source_id, e.type AS edge_type, e.path AS edge_path, e.start_line AS edge_line, "
             "e.confidence AS edge_confidence, n.* FROM edges e JOIN nodes n ON n.id=e.source_node_id "
             "WHERE e.target_node_id=? AND e.type IN "
-            "('IMPORTS','CALLS','MENTIONS','TESTS','COVERS','READS_ENV','USES_CONFIG',"
-            "'DEPENDS_ON','HANDLES_ROUTE','READS_TABLE','WRITES_TABLE')",
+            "('IMPORTS','CALLS','INSTANTIATES','MENTIONS','TESTS','COVERS','READS_ENV',"
+            "'USES_CONFIG','DEPENDS_ON','HANDLES_ROUTE','READS_TABLE','WRITES_TABLE')",
             (nid,),
         ).fetchall()
         for r in rows:

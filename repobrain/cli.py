@@ -539,6 +539,29 @@ def explain_file(filepath: str, path: str, as_json: bool, no_auto_index: bool) -
     else:
         click.echo("  none")
 
+    click.echo("\nInstantiates")
+    if info["instantiates"]:
+        for c in info["instantiates"]:
+            flag = "  (inferred)" if c["is_inferred"] else ""
+            click.echo(
+                f"  {c['caller']} -> {c['class_']}  "
+                f"({c['class_path']}, line {c['start_line']}, "
+                f"conf {c['confidence']:.1f}){flag}"
+            )
+    else:
+        click.echo("  none")
+
+    click.echo("\nInstantiated by")
+    if info["instantiated_by"]:
+        for c in info["instantiated_by"]:
+            flag = "  (inferred)" if c["is_inferred"] else ""
+            click.echo(
+                f"  {c['caller']} -> {c['class_']}  "
+                f"({c['caller_path']}:{c['start_line']}, conf {c['confidence']:.1f}){flag}"
+            )
+    else:
+        click.echo("  none")
+
     click.echo("\nEnvironment variables read")
     if info["env_vars"]:
         for e in info["env_vars"]:

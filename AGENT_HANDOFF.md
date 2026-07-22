@@ -12,6 +12,38 @@ impact analysis, MCP tools, durable agent memory, and Markdown/HTML reports.
 
 ## Delivery Status
 
+- INSTANTIATES edges + orphaned EnvVar sweep are implemented on
+  `feat/instantiates-envvar-sweep` (merged to `main`), closing both items
+  named in "Open Questions" below. `EdgeType.INSTANTIATES` (previously
+  defined but never emitted) now mirrors CALLS' confidence ladder exactly
+  for constructor calls: same-file/import-qualified at 0.9 `is_inferred=0`,
+  cross-file globally-unique-name-match at 0.7 `is_inferred=1` via the
+  existing batched `finish_run` pass. CALLS always wins a same-name
+  ambiguity deterministically — never double-emitted. Python is the primary
+  beneficiary (`ClassName()` is syntactically identical to a function call,
+  so it already flowed through the shared CALLS-resolution pipeline);
+  JS/TS/PHP/Ruby share the mechanism but their idiomatic `new X()`/`X.new`
+  constructor syntax isn't captured by any query yet. Go is explicitly
+  excluded (`_GoExtractor.SUPPORTS_INSTANTIATES = False`) because its `T(x)`
+  type-conversion syntax parses as an identical `call_expression` shape to a
+  real call — verified against the actual tree-sitter-go parse tree, not
+  assumed. See D32 for the full ladder, the import-qualified batched
+  existence-check refinement over D16's blind-speculative-id approach (a
+  review-caught double-emit fix), and the `impact_analysis`/`explain file`
+  surfacing decision. Separately, `GraphStore.delete_orphan_envvars()`
+  closes D17's documented gap: an `EnvVar` node with zero incoming
+  `READS_ENV` edges is now swept in one bounded statement every index run,
+  positioned right after `delete_orphan_edges()`.
+- INSTANTIATES/EnvVar-sweep verification: 252 pytest tests passed (236
+  baseline + 16 new: 9 INSTANTIATES resolution/scope tests including a Go
+  type-conversion regression test and an import-qualified double-emit
+  regression test, 3 `GraphStore.delete_orphan_envvars` unit tests, and 4
+  indexer-level EnvVar sweep integration tests). An independent review pass
+  found one real correctness bug — the import-qualified path speculatively
+  emitting both a CALLS and an INSTANTIATES edge when the imported module
+  legitimately defines both a function and a class of the same name — fixed
+  by deferring that resolution to a batched existence check in `finish_run`
+  (see D32) before merge.
 - Go/Java internal import resolution is implemented on
   `feat/go-java-import-resolution` (merged to `main`), closing the last open
   question carried since Milestone 3. Go imports resolve against a `go.mod`
@@ -207,9 +239,12 @@ impact analysis, MCP tools, durable agent memory, and Markdown/HTML reports.
   store. Two optional parser hooks (duck-typed via `getattr`):
   `begin_run(known_paths)` before parsing (import resolution needs the full
   scanned file set) and `finish_run(store) -> list[Edge]` inside the
-  transaction after upserts (cross-file name-match CALLS), before the orphan
-  edge sweep — which also removes any deterministically-computed edge targets
-  that turned out not to exist.
+  transaction after upserts (cross-file name-match CALLS/INSTANTIATES, and
+  the batched import-qualified CALLS/INSTANTIATES existence check, D32),
+  before the orphan edge sweep — which also removes any
+  deterministically-computed edge targets that turned out not to exist. Right
+  after the orphan-edge sweep, `GraphStore.delete_orphan_envvars()` (D32)
+  removes any `EnvVar` node that lost its last `READS_ENV` edge this run.
 - `repobrain/indexing/doc_references.py` — **new**: `MarkdownMentionReconciler`
   resolves structured Markdown references against the complete persisted graph.
   It globally rebuilds its own `MENTIONS` edges after relevant changes so
@@ -295,9 +330,12 @@ See `DECISIONS.md` D24 for M13 change context, D25 for M14 Git history,
 D26 for M15 memory verification, D27 for distribution, D28 for runtime
 adapters, D29 for the protocol-level MCP boundary, D30 for scale
 hardening (touch_paths/finish_run batching, and which repository-wide costs
-are deliberately left unbatched), and D31 for Go/Java internal import
+are deliberately left unbatched), D31 for Go/Java internal import
 resolution (go.mod-based Go package resolution, Java conventional-source-root
-resolution, and their precisely documented unresolved cases).
+resolution, and their precisely documented unresolved cases), and D32 for
+INSTANTIATES edges (confidence ladder, language scope, the batched
+import-qualified existence-check refinement over D16) and the orphaned
+EnvVar sweep.
 
 ## Assumptions
 
@@ -316,10 +354,10 @@ resolution, and their precisely documented unresolved cases).
 
 ## Open Questions
 
-- Should INSTANTIATES edges be emitted for `ClassName()` calls (currently
-  skipped for precision)?
-- Should orphaned EnvVar nodes (no remaining READS_ENV edges) be swept, or
-  left for M5 config parsing to reclaim?
+No open items remain from the original post-MVP/engineering-follow-up list
+or its two smallest carried-over gaps (INSTANTIATES edges, orphaned EnvVar
+sweep — both delivered, see D32). See "Suggested Next Steps" for the
+recommended next milestone or planning checkpoint.
 
 ## Known Pitfalls
 
@@ -435,6 +473,20 @@ resolution, and their precisely documented unresolved cases).
   import statement would regress at scale even though no test currently
   measures it by statement/scan count the way `tests/test_scale.py` does for
   `touch_paths`/`finish_run`.
+- Import-qualified CALLS resolution (`symbol_aliases`/`module_aliases`) no
+  longer emits its edge synchronously during `parse()`. Since D32 added a
+  same-name Class candidate to disambiguate against, it's queued
+  (`_PendingImportCall`) and resolved by one batched `id IN (...)` existence
+  check in `finish_run`, same as the name-match pass. The end state is
+  equivalent to before (D16's old "compute the id, let the orphan sweep
+  clean up a wrong guess" trick produced the same final rows, just via an
+  extra write-then-delete inside the same transaction) — but don't
+  special-case only the Class-candidate branch back to the old synchronous
+  emit-and-let-orphan-sweep-clean-up pattern; that's exactly what
+  reintroduces the double-emit bug D32 fixed (both a CALLS and an
+  INSTANTIATES edge surviving when the imported module legitimately defines
+  a function and a class of the same name, since neither target id would
+  dangle for the orphan sweep to remove).
 - `.venv` in the primary repo checkout is an **editable** install pointing at
   the primary repo's own path (`_editable_impl_repobrain.pth`), not whichever
   worktree you're running from. Running `.venv/bin/pytest` from inside a
@@ -503,28 +555,33 @@ deterministic-first stance (D-series) until the delivery loop above proves out.
    Go package resolution and conventional-source-root Java resolution, with
    documented ambiguous/non-conventional-layout limits.
 
-No open items remain from the original post-MVP/engineering-follow-up list.
-The two smallest carried-over precision/graph-hygiene gaps — both explicitly
-named in "Open Questions" above and both natural extensions of an existing,
-already-battle-tested pattern rather than new mechanisms — are the
-recommended next milestone:
+5. **INSTANTIATES edges + orphaned EnvVar sweep. Delivered.** See D32:
+   `Class INSTANTIATES` edges mirror CALLS' confidence ladder exactly
+   (Python is the primary beneficiary; Go explicitly excluded for a verified
+   false-positive risk), and `GraphStore.delete_orphan_envvars()` sweeps
+   EnvVar nodes that lost their last reader.
 
-5. **INSTANTIATES edges + orphaned EnvVar sweep (next, see
-   `docs/NEXT_SESSION_PROMPT.md`).** `ClassName()` constructor calls are
-   currently skipped entirely (D16); mirroring the existing CALLS confidence
-   ladder (same-file/import-qualified observed at 0.9, cross-file
-   globally-unique name-match inferred at 0.7) for `Class INSTANTIATES`
-   edges directly serves "safer changes" (impact analysis currently can't
-   see who constructs a class you're about to change) with a well-understood,
-   low-risk pattern. Bundled with it: EnvVar nodes whose last `READS_ENV`
-   edge disappears currently linger forever (D17's documented trade-off) —
-   a bounded sweep (no incoming `READS_ENV` edge → delete) closes that,
-   analogous to the existing Directory-liveness and orphan-edge sweeps.
-   Revisiting the deliberate embeddings/multi-repo non-goals (there is now
-   substantial delivery evidence across 16+ milestones) is a larger,
-   architecture-level decision better suited to a dedicated planning pass
-   than folding into this loop's next cadence — flagged here for the human
-   to weigh in on, not scheduled as the next milestone by default.
+No open items remain from the original post-MVP/engineering-follow-up list.
+D32 itself named a small, natural follow-on while scoping INSTANTIATES: the
+recommended next milestone is that one, not the deliberately-flagged
+embeddings/multi-repo non-goals (still better suited to a dedicated human
+planning pass, not this loop's automatic next step — see below).
+
+6. **Constructor-call capture for `new X()` (JS/TS/PHP) and `X.new` (Ruby)
+   (next, see `docs/NEXT_SESSION_PROMPT.md`).** D32 activated INSTANTIATES
+   using only the call-shaped tree-sitter captures that already existed, so
+   in practice only Python's `ClassName()` idiom benefits — JS/TS/PHP's
+   `new ClassName(...)` and Ruby's `ClassName.new` are each a different
+   grammar shape (`new_expression`/`object_creation_expression`, or a
+   receiver call Ruby's extractor currently skips outright) that D32
+   explicitly left uncaptured. Extending capture patterns and routing the
+   extracted class name through the exact same resolution ladder and
+   `finish_run`/`_resolve_pending_import_calls` machinery D32 already built
+   would make INSTANTIATES actually fire for those languages' real
+   constructor syntax, not just the rare bare-call coincidence — directly
+   useful for "safer changes" on any non-Python-heavy repo. Bounded,
+   single-feature, reuses proven machinery: the same shape as this
+   milestone and the one before it.
 
 ## Source-Grounded Notes
 
@@ -535,6 +592,6 @@ recommended next milestone:
   confidence, DATABASE_URL env read, `tests/test_users.py` via imports).
   Same for `node_api_app` with `createUser` / `src/config.js` (PORT,
   DATABASE_URL, LOG_LEVEL env reads; TestCases calling the service).
-- 236/236 pytest tests pass (`.venv/bin/pytest -q`; run with `PYTHONPATH`
+- 252/252 pytest tests pass (`.venv/bin/pytest -q`; run with `PYTHONPATH`
   pointed at the checkout under test — see Known Pitfalls above about the
   primary repo's `.venv` being an editable install pinned to its own path).
