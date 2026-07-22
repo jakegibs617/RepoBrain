@@ -152,6 +152,12 @@ class Indexer:
                 combined.edges.extend(mention_edges)
             self._cleanup_directories(diff)
             self.store.delete_orphan_edges()
+            # After orphan edges are gone, this run's final READS_ENV edge
+            # set is settled; sweep any EnvVar node (D17, repo-global,
+            # excluded from path-based cleanup) that lost its last reader
+            # this run, e.g. that reader was deleted or edited to stop
+            # reading it.
+            self.store.delete_orphan_envvars()
             stats.nodes_created = len({n.id for n in combined.nodes})
             stats.edges_created = len({e.id for e in combined.edges})
             self.store.record_index_run(

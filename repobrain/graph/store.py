@@ -232,6 +232,29 @@ class GraphStore:
             """
         )
 
+    def delete_orphan_envvars(self) -> None:
+        """Remove EnvVar nodes with no remaining incoming READS_ENV edge.
+
+        EnvVar nodes are repo-global (id keyed on ``("EnvVar", name, "")``,
+        path="") and deliberately excluded from `delete_paths`' path-based
+        cleanup so one reader's deletion never destroys a node shared by
+        other readers (D17). That means an EnvVar whose *last* reader is
+        deleted, or edited to stop reading it, would otherwise linger as an
+        edgeless node forever. This closes that gap with one bounded
+        DELETE/subquery pair -- not a per-row loop -- so it stays consistent
+        with D30's batching invariant regardless of how many EnvVar nodes
+        exist. Call after `delete_orphan_edges` in the same transaction, so
+        this run's final READS_ENV edge set (post orphan-edge cleanup) is
+        what "no remaining reader" is judged against.
+        """
+        self.conn.execute(
+            """
+            DELETE FROM nodes WHERE type = 'EnvVar' AND id NOT IN (
+                SELECT target_node_id FROM edges WHERE type = 'READS_ENV'
+            )
+            """
+        )
+
     def delete_edges(self, type_: str, extractor: str | None = None) -> None:
         """Delete a family of edges, optionally scoped to its owner.
 

@@ -21,6 +21,23 @@ Conventions (see DECISIONS.md D14–D18):
   resolutions get confidence 0.9 (observed); cross-file name-only matches are
   added in a post-index pass with is_inferred=1, confidence 0.7,
   inference_reason="name-match", and only when the name is globally unique.
+- INSTANTIATES (D32) mirrors CALLS' confidence ladder exactly for a bare
+  call-shaped node whose callee resolves to a Class instead of a
+  Function/Method: same tiers, same is_inferred/confidence/inference_reason
+  values, same finish_run batching. CALLS always wins a same-name tie
+  deterministically (checked first at every tier), so a name never produces
+  both edge types. Import-qualified resolution (`symbol_aliases`/
+  `module_aliases`) is a deliberate refinement over D16's old "compute the
+  id, let the orphan sweep clean up a wrong guess" approach: with a second
+  candidate type in play, a target that's genuinely both a Function and a
+  Class of the same name in the imported module would leave *both*
+  speculative edges existing, violating "never double-emit". Those calls are
+  queued (`_PendingImportCall`) and resolved by one batched existence check
+  in `finish_run` instead, so CALLS/INSTANTIATES for the import-qualified
+  case are chosen deterministically rather than blindly emitted. Go is
+  excluded (`_GoExtractor.SUPPORTS_INSTANTIATES = False`): its
+  type-conversion syntax `T(x)` parses as the same `call_expression` shape
+  as a real call, which would otherwise be misread as a constructor call.
 - EnvVar nodes are repo-global: id keyed on ("EnvVar", name, "") so reads of
   the same variable from many files converge on one node; each observation is
   its own READS_ENV edge carrying file/line provenance.
@@ -297,6 +314,43 @@ class _PendingCall:
     callee_name: str
     path: str
     line: int
+    #: whether this callee name may also resolve to a Class (INSTANTIATES,
+    #: D32). False for languages whose call-shaped grammar node can carry a
+    #: non-instantiation meaning that would otherwise be misread as one (Go's
+    #: `T(x)` type conversion parses as the same `call_expression` shape as
+    #: a real call) -- see `_Extractor.SUPPORTS_INSTANTIATES`.
+    allow_instantiate: bool = True
+
+
+@dataclass
+class _PendingImportCall:
+    """An import-qualified call/constructor whose resolution needs a batched
+    existence check (D32), rather than the blind speculative id construction
+    D16 uses for the CALLS-only case.
+
+    D16's import-qualified CALLS deliberately never checks existence: the
+    target id is computed and, if wrong, the existing orphan-edge sweep
+    removes the dangling edge in the same transaction. That trick stops
+    being safe once a *second* candidate type (Class) enters the picture,
+    because both a Function-shaped and a Class-shaped target id could each
+    correspond to a real node (e.g. the imported module legitimately defines
+    both a function and a class of the same name) -- blindly emitting both
+    would violate the "never double-emit" rule, since neither one would
+    dangle for the orphan sweep to clean up. Deferring to one batched
+    ``id IN (...)`` lookup in `finish_run` (same batching pattern as the
+    name-match pass) resolves this deterministically: CALLS wins whenever
+    the Function/Method target exists, matching the same-file precedence
+    rule exactly, and it costs one extra batched lookup for the run's
+    import-qualified calls -- not a new per-call query.
+    """
+
+    caller_id: str
+    callee_name: str
+    path: str
+    line: int
+    func_target_id: str
+    #: None when the caller's language doesn't support INSTANTIATES (D32).
+    class_target_id: str | None
 
 
 class CodeParser(Parser):
@@ -307,6 +361,7 @@ class CodeParser(Parser):
     def __init__(self) -> None:
         self._known_files: frozenset[str] = frozenset()
         self._pending_calls: list[_PendingCall] = []
+        self._pending_import_calls: list[_PendingImportCall] = []
         self._go_module_prefix: str | None = None
         self._java_source_roots: dict[str, str | None] = {"main": None, "test": None}
         self._go_dir_index: dict[str, list[str]] = {}
@@ -324,6 +379,7 @@ class CodeParser(Parser):
         imports stay external metadata, as before this milestone)."""
         self._known_files = frozenset(known_files)
         self._pending_calls = []
+        self._pending_import_calls = []
         self._go_module_prefix = _read_go_module_prefix(root)
         self._java_source_roots = _detect_java_source_roots(self._known_files)
         # Precomputed once per run so per-import resolution (D19) is a dict
@@ -334,10 +390,18 @@ class CodeParser(Parser):
         self._java_dir_index = _index_files_by_dir(self._known_files, ".java")
 
     def finish_run(self, store) -> list[Edge]:
-        """Cross-file name-only CALLS resolution (after nodes are upserted).
+        """Cross-file name-only CALLS/INSTANTIATES resolution (after nodes
+        are upserted).
 
-        A pending call becomes an edge only when exactly one Function/Method
+        A pending call becomes a CALLS edge when exactly one Function/Method
         node in the whole graph carries that name (precision over recall).
+        Failing that, it becomes an INSTANTIATES edge (D32) under the exact
+        same uniqueness rule but over Class nodes instead -- and only when
+        the pending call's own language allows constructor resolution
+        (`allow_instantiate`; see `_Extractor.SUPPORTS_INSTANTIATES`). CALLS
+        is always tried first and wins deterministically: a name that
+        happens to match both a Function/Method and a Class only ever
+        produces the CALLS edge, never both (spec: don't double-emit).
 
         Candidate lookup is batched into chunked ``name IN (...)`` queries
         instead of one query per distinct callee name: a large run can queue
@@ -349,48 +413,76 @@ class CodeParser(Parser):
         by_name: dict[str, list[_PendingCall]] = {}
         for pc in self._pending_calls:
             by_name.setdefault(pc.callee_name, []).append(pc)
-        if not by_name:
-            self._pending_calls = []
-            return edges
         names = list(by_name)
-        matches_by_name: dict[str, list] = {name: [] for name in names}
+        func_matches: dict[str, list] = {name: [] for name in names}
+        class_matches: dict[str, list] = {name: [] for name in names}
         for chunk in (names[i : i + 400] for i in range(0, len(names), 400)):
             placeholders = ",".join("?" for _ in chunk)
             rows = store.conn.execute(
-                "SELECT id, path, name FROM nodes WHERE type IN ('Function', 'Method') "
+                "SELECT id, path, name, type FROM nodes "
+                "WHERE type IN ('Function', 'Method', 'Class') "
                 f"AND name IN ({placeholders})",
                 chunk,
             ).fetchall()
             for row in rows:
-                matches_by_name[row["name"]].append(row)
-        for name, pcs in by_name.items():
-            rows = matches_by_name[name]
-            if not rows:
-                continue
-            # A node's id embeds its path (D2), and a pending call's caller
-            # always lives in `pc.path`, so `r["id"] == pc.caller_id` can
-            # only ever hold when `r["path"] == pc.path` already does --
-            # excluding by path alone is equivalent to the old combined
-            # filter. Precomputing per-path counts turns "is there exactly
-            # one candidate outside my own file" into an O(1) arithmetic
-            # check per pending call. This matters for a name that is
-            # common across a large repo (`run`, `__init__`, ...): without
-            # it, every pending call sharing that name would re-scan every
-            # match for that name, an O(matches * calls) blowup for exactly
-            # the popular names most likely to appear at scale.
-            total = len(rows)
-            path_counts: dict[str, int] = {}
+                bucket = class_matches if row["type"] == "Class" else func_matches
+                bucket[row["name"]].append(row)
+
+        def _path_counts(rows: list) -> dict[str, int]:
+            counts: dict[str, int] = {}
             for r in rows:
-                path_counts[r["path"]] = path_counts.get(r["path"], 0) + 1
+                counts[r["path"]] = counts.get(r["path"], 0) + 1
+            return counts
+
+        # A node's id embeds its path (D2), and a pending call's caller
+        # always lives in `pc.path`, so `r["id"] == pc.caller_id` can only
+        # ever hold when `r["path"] == pc.path` already does -- excluding by
+        # path alone is equivalent to the old combined filter. Precomputing
+        # per-path counts turns "is there exactly one candidate outside my
+        # own file" into an O(1) arithmetic check per pending call. This
+        # matters for a name that is common across a large repo (`run`,
+        # `__init__`, ...): without it, every pending call sharing that name
+        # would re-scan every match for that name, an O(matches * calls)
+        # blowup for exactly the popular names most likely to appear at
+        # scale.
+        for name, pcs in by_name.items():
+            func_rows = func_matches[name]
+            class_rows = class_matches[name]
+            func_total = len(func_rows)
+            func_path_counts = _path_counts(func_rows)
+            class_total = len(class_rows)
+            class_path_counts = _path_counts(class_rows)
             for pc in pcs:
-                if total - path_counts.get(pc.path, 0) != 1:
+                if func_total and func_total - func_path_counts.get(pc.path, 0) == 1:
+                    candidates = [r for r in func_rows if r["path"] != pc.path]
+                    if len(candidates) != 1:
+                        continue  # defensive; unreachable given the count above
+                    edges.append(
+                        Edge(
+                            type=EdgeType.CALLS,
+                            source_node_id=pc.caller_id,
+                            target_node_id=candidates[0]["id"],
+                            path=pc.path,
+                            start_line=pc.line,
+                            end_line=pc.line,
+                            confidence=INFERRED_CALL_CONFIDENCE,
+                            extractor=EXTRACTOR_NAME,
+                            is_inferred=True,
+                            inference_reason="name-match",
+                            metadata={"callee": name, "resolution": "name-match"},
+                        )
+                    )
+                    continue  # CALLS wins: never also emit INSTANTIATES (D32)
+                if not pc.allow_instantiate or not class_total:
                     continue
-                candidates = [r for r in rows if r["path"] != pc.path]
+                if class_total - class_path_counts.get(pc.path, 0) != 1:
+                    continue
+                candidates = [r for r in class_rows if r["path"] != pc.path]
                 if len(candidates) != 1:
                     continue  # defensive; unreachable given the count above
                 edges.append(
                     Edge(
-                        type=EdgeType.CALLS,
+                        type=EdgeType.INSTANTIATES,
                         source_node_id=pc.caller_id,
                         target_node_id=candidates[0]["id"],
                         path=pc.path,
@@ -404,6 +496,70 @@ class CodeParser(Parser):
                     )
                 )
         self._pending_calls = []
+        edges.extend(self._resolve_pending_import_calls(store))
+        self._pending_import_calls = []
+        return edges
+
+    def _resolve_pending_import_calls(self, store) -> list[Edge]:
+        """Batched existence check for import-qualified CALLS/INSTANTIATES
+        candidates (D32; see `_PendingImportCall`).
+
+        One or two chunked ``id IN (...)`` lookups regardless of how many
+        import-qualified calls this run queued -- the same batching pattern
+        `finish_run`'s name-match pass already uses, just keyed by id
+        instead of name. CALLS wins deterministically whenever the
+        Function/Method target exists, so a name ambiguous between a
+        same-named Function and Class in the target module never produces
+        both edges.
+        """
+        pics = self._pending_import_calls
+        if not pics:
+            return []
+        all_ids: set[str] = set()
+        for pic in pics:
+            all_ids.add(pic.func_target_id)
+            if pic.class_target_id is not None:
+                all_ids.add(pic.class_target_id)
+        id_list = list(all_ids)
+        existing_types: dict[str, str] = {}
+        for chunk in (id_list[i : i + 400] for i in range(0, len(id_list), 400)):
+            placeholders = ",".join("?" for _ in chunk)
+            rows = store.conn.execute(
+                f"SELECT id, type FROM nodes WHERE id IN ({placeholders})", chunk,
+            ).fetchall()
+            for row in rows:
+                existing_types[row["id"]] = row["type"]
+        edges: list[Edge] = []
+        for pic in pics:
+            if existing_types.get(pic.func_target_id) in ("Function", "Method"):
+                edges.append(
+                    Edge(
+                        type=EdgeType.CALLS,
+                        source_node_id=pic.caller_id,
+                        target_node_id=pic.func_target_id,
+                        path=pic.path,
+                        start_line=pic.line,
+                        end_line=pic.line,
+                        confidence=SAME_FILE_CALL_CONFIDENCE,
+                        extractor=EXTRACTOR_NAME,
+                        metadata={"callee": pic.callee_name, "resolution": "import"},
+                    )
+                )
+                continue  # CALLS wins: never also emit INSTANTIATES (D32)
+            if pic.class_target_id is not None and existing_types.get(pic.class_target_id) == "Class":
+                edges.append(
+                    Edge(
+                        type=EdgeType.INSTANTIATES,
+                        source_node_id=pic.caller_id,
+                        target_node_id=pic.class_target_id,
+                        path=pic.path,
+                        start_line=pic.line,
+                        end_line=pic.line,
+                        confidence=SAME_FILE_CALL_CONFIDENCE,
+                        extractor=EXTRACTOR_NAME,
+                        metadata={"callee": pic.callee_name, "resolution": "import"},
+                    )
+                )
         return edges
 
     # -- Parser interface ----------------------------------------------------
@@ -449,6 +605,15 @@ class _Extractor:
     FUNC_SCOPES: frozenset[str] = frozenset()
     #: anonymous callable containers that break the scope walk but carry no name
     ANON_SCOPES: frozenset[str] = frozenset()
+    #: whether a bare call-shaped node whose callee name matches a Class may
+    #: become an INSTANTIATES edge (D32). True by default: for every
+    #: language wired to `_resolve_plain_call`/`_resolve_module_attr_call`,
+    #: a call-shaped tree-sitter node whose callee resolves to a Class is
+    #: unambiguously a constructor invocation. Go is the one exception (see
+    #: `_GoExtractor`): its grammar parses a type conversion like `T(x)` as
+    #: the identical `call_expression` shape, so a same-named Class match
+    #: there would misread a conversion as an instantiation.
+    SUPPORTS_INSTANTIATES: bool = True
 
     def __init__(
         self, parser: CodeParser, path: str, language: str, content: str,
@@ -795,10 +960,11 @@ class _Extractor:
     def _add_call_edge(
         self, source: Node, target_id: str, line: int, resolution: str,
         callee: str, confidence: float = SAME_FILE_CALL_CONFIDENCE,
+        edge_type: str = EdgeType.CALLS,
     ) -> None:
         self.result.edges.append(
             Edge(
-                type=EdgeType.CALLS,
+                type=edge_type,
                 source_node_id=source.id,
                 target_node_id=target_id,
                 path=self.path,
@@ -811,7 +977,14 @@ class _Extractor:
         )
 
     def _resolve_plain_call(self, name: str, ts) -> None:
-        """Shared bare-name call resolution ladder."""
+        """Shared bare-name call/constructor resolution ladder (D16/D32).
+
+        Mirrors CALLS' confidence ladder for INSTANTIATES: a name is always
+        checked against callables (``func_by_name``) before classes
+        (``classes_by_name``), so a same-file function deterministically
+        wins over a same-named class -- there is never a double-emit for a
+        name that is locally ambiguous between the two.
+        """
         source = self._call_source(ts)
         line = ts.start_point[0] + 1
         if name in self.func_by_name:
@@ -819,11 +992,27 @@ class _Extractor:
             self._add_call_edge(source, target.id, line, "same-file", name)
             return
         if name in self.classes_by_name:
-            return  # instantiation, not a function call (out of M3 scope)
+            if self.SUPPORTS_INSTANTIATES:
+                target = self.classes_by_name[name]
+                self._add_call_edge(
+                    source, target.id, line, "same-file", name,
+                    edge_type=EdgeType.INSTANTIATES,
+                )
+            return
         if name in self.symbol_aliases:
             mod_qname, mod_path, symbol = self.symbol_aliases[name]
-            target_id = node_id(NodeType.FUNCTION, f"{mod_qname}.{symbol}", mod_path)
-            self._add_call_edge(source, target_id, line, "import", name)
+            func_target_id = node_id(NodeType.FUNCTION, f"{mod_qname}.{symbol}", mod_path)
+            class_target_id = (
+                node_id(NodeType.CLASS, f"{mod_qname}.{symbol}", mod_path)
+                if self.SUPPORTS_INSTANTIATES else None
+            )
+            self.parser._pending_import_calls.append(
+                _PendingImportCall(
+                    caller_id=source.id, callee_name=name, path=self.path,
+                    line=line, func_target_id=func_target_id,
+                    class_target_id=class_target_id,
+                )
+            )
             return
         self.parser._pending_calls.append(
             _PendingCall(
@@ -832,6 +1021,7 @@ class _Extractor:
                 callee_name=name,
                 path=self.path,
                 line=line,
+                allow_instantiate=self.SUPPORTS_INSTANTIATES,
             )
         )
 
@@ -849,13 +1039,26 @@ class _Extractor:
         )
 
     def _resolve_module_attr_call(self, prefix: str, name: str, ts) -> None:
-        """alias.func() where alias is an imported internal module."""
+        """alias.func() / alias.ClassName() where alias is an imported
+        internal module (D32: resolved via the same batched existence check
+        as the `symbol_aliases` case -- see `_PendingImportCall`)."""
         if prefix not in self.module_aliases:
             return
         mod_qname, mod_path = self.module_aliases[prefix]
         source = self._call_source(ts)
-        target_id = node_id(NodeType.FUNCTION, f"{mod_qname}.{name}", mod_path)
-        self._add_call_edge(source, target_id, ts.start_point[0] + 1, "import", name)
+        line = ts.start_point[0] + 1
+        func_target_id = node_id(NodeType.FUNCTION, f"{mod_qname}.{name}", mod_path)
+        class_target_id = (
+            node_id(NodeType.CLASS, f"{mod_qname}.{name}", mod_path)
+            if self.SUPPORTS_INSTANTIATES else None
+        )
+        self.parser._pending_import_calls.append(
+            _PendingImportCall(
+                caller_id=source.id, callee_name=name, path=self.path,
+                line=line, func_target_id=func_target_id,
+                class_target_id=class_target_id,
+            )
+        )
 
     # -- env -----------------------------------------------------------------
 
@@ -1557,6 +1760,15 @@ class _GoExtractor(_Extractor):
     CLASS_SCOPES = frozenset()  # go methods carry their receiver, not nesting
     FUNC_SCOPES = frozenset({"function_declaration", "method_declaration"})
     ANON_SCOPES = frozenset({"func_literal"})
+    # Go has no `new ClassName()` call-expression constructor syntax --
+    # struct literals (`Foo{}` / `&Foo{}`) are a different tree-sitter shape
+    # entirely and are never captured as `@call`. Meanwhile Go's type
+    # conversion syntax `T(x)` (T a named type) *does* parse as an ordinary
+    # `call_expression`, identical in shape to a real call. Without this
+    # flag, a type conversion whose type name happens to be a known Class
+    # would be misread as an INSTANTIATES edge -- a real false positive,
+    # not a hypothetical one, so Go stays out of scope for INSTANTIATES.
+    SUPPORTS_INSTANTIATES = False
 
     def _register_one_def(self, ts, kind: str) -> None:
         if ts.type == "method_declaration":

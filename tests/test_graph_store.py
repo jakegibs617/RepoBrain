@@ -94,6 +94,62 @@ def test_provenance_fields_present(store):
     assert erow["commit_hash"] == "abc123"
 
 
+def _envvar_node(name: str) -> Node:
+    return Node(
+        type=NodeType.ENV_VAR, name=name, qualified_name=name, path="",
+        extractor="code_treesitter",
+    )
+
+
+def test_delete_orphan_envvars_removes_edgeless_envvar(store):
+    """D17 (deferred sweep): an EnvVar node with zero incoming READS_ENV
+    edges is swept in one bounded DELETE."""
+    env = _envvar_node("ORPHANED_VAR")
+    store.upsert_nodes([env])
+    store.commit()
+    assert store.conn.execute(
+        "SELECT COUNT(*) FROM nodes WHERE type='EnvVar'"
+    ).fetchone()[0] == 1
+
+    store.delete_orphan_envvars()
+    store.commit()
+    assert store.conn.execute(
+        "SELECT COUNT(*) FROM nodes WHERE type='EnvVar'"
+    ).fetchone()[0] == 0
+
+
+def test_delete_orphan_envvars_keeps_envvar_with_a_reader(store):
+    env = _envvar_node("KEPT_VAR")
+    reader = _sample_node()
+    store.upsert_nodes([env, reader])
+    edge = Edge(
+        type=EdgeType.READS_ENV, source_node_id=reader.id, target_node_id=env.id,
+        path=reader.path, start_line=1, extractor="code_treesitter",
+    )
+    store.upsert_edges([edge])
+    store.commit()
+
+    store.delete_orphan_envvars()
+    store.commit()
+    assert store.conn.execute(
+        "SELECT COUNT(*) FROM nodes WHERE type='EnvVar'"
+    ).fetchone()[0] == 1
+
+
+def test_delete_orphan_envvars_survives_a_fresh_envvar_with_no_readers(store):
+    """Not reachable via current extraction (an EnvVar node is only ever
+    created alongside its own READS_ENV edge), but the sweep must not crash
+    on it -- it should simply be removed like any other edgeless node."""
+    env = _envvar_node("NEVER_READ")
+    store.upsert_nodes([env])
+    store.commit()
+    store.delete_orphan_envvars()  # must not raise
+    store.commit()
+    assert store.conn.execute(
+        "SELECT COUNT(*) FROM nodes WHERE type='EnvVar'"
+    ).fetchone()[0] == 0
+
+
 def test_delete_paths_removes_everything(store):
     node = _sample_node()
     store.upsert_nodes([node])

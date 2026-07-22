@@ -224,6 +224,184 @@ def test_name_only_call_excludes_same_named_definition_in_callers_own_file(
     assert edge["inference_reason"] == "name-match"
 
 
+# -- INSTANTIATES (D32) -----------------------------------------------------
+
+
+def test_same_file_instantiate_edge(indexer, store, tmp_path: Path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "mod.py").write_text(
+        "class Widget:\n    pass\n\n\ndef build():\n    return Widget()\n"
+    )
+    indexer.index(repo)
+    assert _edges(store, "CALLS") == []
+    edges = _edges(store, "INSTANTIATES")
+    assert len(edges) == 1
+    edge = edges[0]
+    assert edge["source_qname"] == "mod.build"
+    assert edge["target_qname"] == "mod.Widget"
+    assert edge["confidence"] == 0.9
+    assert edge["is_inferred"] == 0
+
+
+def test_same_file_function_wins_over_same_named_class(indexer, store, tmp_path: Path):
+    """A bare call is checked against func_by_name before classes_by_name at
+    every tier (D16 precedent): a module that (unusually) defines both a
+    function and a class of the same name must deterministically resolve to
+    the function -- never double-emit CALLS and INSTANTIATES for one call
+    site."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "mod.py").write_text(
+        "def Widget():\n    return 'factory'\n\n\n"
+        "class Widget:\n    pass\n\n\n"
+        "def build():\n    return Widget()\n"
+    )
+    indexer.index(repo)
+    calls = _edges(store, "CALLS")
+    assert len(calls) == 1
+    assert calls[0]["target_qname"] == "mod.Widget"
+    assert _edges(store, "INSTANTIATES") == []
+
+
+def test_import_resolved_cross_file_instantiate(indexer, store, tmp_path: Path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "models.py").write_text("class User:\n    pass\n")
+    (repo / "app.py").write_text(
+        "from models import User\n\n\ndef create():\n    return User()\n"
+    )
+    indexer.index(repo)
+    assert _edges(store, "CALLS") == []
+    edges = _edges(store, "INSTANTIATES")
+    assert len(edges) == 1
+    edge = edges[0]
+    assert edge["source_qname"] == "app.create"
+    assert edge["target_qname"] == "models.User"
+    assert edge["confidence"] == 0.9
+    assert edge["is_inferred"] == 0
+
+
+def test_import_qualified_call_wins_over_same_named_class_in_target_module(
+    indexer, store, tmp_path: Path,
+):
+    """The imported module legitimately defines both a function and a class
+    named `Widget` -- a real (if unusual) case D16's old blind speculative-id
+    approach couldn't disambiguate, since both target ids would exist and
+    neither edge would dangle for the orphan sweep to clean up. The batched
+    existence check in finish_run must pick CALLS deterministically and
+    never emit both."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "shapes.py").write_text(
+        "def Widget():\n    return 'factory'\n\n\nclass Widget:\n    pass\n"
+    )
+    (repo / "app.py").write_text(
+        "from shapes import Widget\n\n\ndef build():\n    return Widget()\n"
+    )
+    indexer.index(repo)
+    calls = _edges(store, "CALLS")
+    assert len(calls) == 1
+    assert calls[0]["source_qname"] == "app.build"
+    assert calls[0]["target_qname"] == "shapes.Widget"
+    assert calls[0]["confidence"] == 0.9
+    assert calls[0]["is_inferred"] == 0
+    assert _edges(store, "INSTANTIATES") == []
+
+
+def test_module_qualified_instantiate(indexer, store, tmp_path: Path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "models.py").write_text("class User:\n    pass\n")
+    (repo / "app.py").write_text(
+        "import models\n\n\ndef create():\n    return models.User()\n"
+    )
+    indexer.index(repo)
+    edges = _edges(store, "INSTANTIATES")
+    assert len(edges) == 1
+    assert edges[0]["source_qname"] == "app.create"
+    assert edges[0]["target_qname"] == "models.User"
+
+
+def test_cross_file_name_only_instantiate_is_inferred(indexer, store, tmp_path: Path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "a.py").write_text("class UniqueWidget:\n    pass\n")
+    # no import: resolvable only by name
+    (repo / "b.py").write_text("def build():\n    return UniqueWidget()\n")
+    indexer.index(repo)
+    assert _edges(store, "CALLS") == []
+    edges = _edges(store, "INSTANTIATES")
+    assert len(edges) == 1
+    edge = edges[0]
+    assert edge["source_qname"] == "b.build"
+    assert edge["target_qname"] == "a.UniqueWidget"
+    assert edge["confidence"] == 0.7
+    assert edge["is_inferred"] == 1
+    assert edge["inference_reason"] == "name-match"
+
+
+def test_cross_file_function_wins_over_class_name_match(indexer, store, tmp_path: Path):
+    """finish_run tries the Function/Method candidate pool before the Class
+    pool; a name globally unique as a Function/Method must resolve to CALLS
+    even if a same-named Class also exists elsewhere -- never both."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "a.py").write_text("def Shared(x):\n    return x\n")
+    (repo / "b.py").write_text("class Shared:\n    pass\n")
+    (repo / "c.py").write_text("def build():\n    return Shared(1)\n")
+    indexer.index(repo)
+    calls = _edges(store, "CALLS")
+    assert len(calls) == 1
+    assert calls[0]["target_qname"] == "a.Shared"
+    assert _edges(store, "INSTANTIATES") == []
+
+
+def test_ambiguous_name_only_instantiate_is_skipped(indexer, store, tmp_path: Path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "a.py").write_text("class Dup:\n    pass\n")
+    (repo / "b.py").write_text("class Dup:\n    pass\n")
+    (repo / "c.py").write_text("def build():\n    return Dup()\n")
+    indexer.index(repo)
+    assert _edges(store, "INSTANTIATES") == []
+    assert _edges(store, "CALLS") == []
+
+
+def test_go_type_conversion_does_not_become_instantiate(indexer, store, tmp_path: Path):
+    """Go's `T(x)` type conversion parses as an ordinary call_expression --
+    the same shape as a real call. A named Go type must never be misread as
+    an INSTANTIATES target (D32 explicitly excludes Go)."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "go.mod").write_text("module example.com/widget\n")
+    (repo / "main.go").write_text(
+        "package main\n\n"
+        "type Meters float64\n\n"
+        "func convert(x float64) Meters {\n"
+        "\treturn Meters(x)\n"
+        "}\n"
+    )
+    indexer.index(repo)
+    assert _edges(store, "INSTANTIATES") == []
+
+
+def test_instantiate_convergence_when_class_renamed(indexer, store, tmp_path: Path):
+    """A class rename orphans the old INSTANTIATES target; the existing
+    orphan-edge sweep removes it without any INSTANTIATES-specific cleanup,
+    exactly like CALLS/IMPORTS already converge (D16/D15)."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "a.py").write_text("class UniqueWidget:\n    pass\n")
+    (repo / "b.py").write_text("def build():\n    return UniqueWidget()\n")
+    indexer.index(repo)
+    assert len(_edges(store, "INSTANTIATES")) == 1
+
+    (repo / "a.py").write_text("class RenamedWidget:\n    pass\n")
+    indexer.index(repo)
+    assert _edges(store, "INSTANTIATES") == []
+
+
 def test_self_method_call_resolves_within_class(indexer, store, tmp_path: Path):
     repo = tmp_path / "repo"
     repo.mkdir()
@@ -261,6 +439,57 @@ def test_reads_env_converges_across_files(indexer, store, tmp_path: Path):
     reads = _edges(store, "READS_ENV")
     assert {e["path"] for e in reads} == {"a.py", "b.py"}
     assert {e["source_qname"] for e in reads} == {"a", "b.read"}
+
+
+def _envvar_count(store, name: str) -> int:
+    return store.conn.execute(
+        "SELECT COUNT(*) FROM nodes WHERE type = 'EnvVar' AND name = ?", (name,)
+    ).fetchone()[0]
+
+
+def test_orphaned_envvar_swept_when_only_reader_deleted(indexer, store, tmp_path: Path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "a.py").write_text("import os\nURL = os.getenv('SOLO_VAR')\n")
+    indexer.index(repo)
+    assert _envvar_count(store, "SOLO_VAR") == 1
+
+    (repo / "a.py").unlink()
+    indexer.index(repo)
+    assert _envvar_count(store, "SOLO_VAR") == 0
+
+
+def test_orphaned_envvar_swept_when_only_reader_stops_reading_it(
+    indexer, store, tmp_path: Path,
+):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "a.py").write_text("import os\nURL = os.getenv('EDITED_VAR')\n")
+    indexer.index(repo)
+    assert _envvar_count(store, "EDITED_VAR") == 1
+
+    (repo / "a.py").write_text("import os\nURL = 'no longer reading env'\n")
+    indexer.index(repo)
+    assert _envvar_count(store, "EDITED_VAR") == 0
+
+
+def test_envvar_with_multiple_readers_survives_losing_one(
+    indexer, store, tmp_path: Path,
+):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "a.py").write_text("import os\nURL = os.getenv('SHARED_VAR')\n")
+    (repo / "b.py").write_text(
+        "import os\n\ndef read():\n    return os.environ['SHARED_VAR']\n"
+    )
+    indexer.index(repo)
+    assert _envvar_count(store, "SHARED_VAR") == 1
+
+    (repo / "a.py").unlink()
+    indexer.index(repo)
+    assert _envvar_count(store, "SHARED_VAR") == 1
+    reads = [e for e in _edges(store, "READS_ENV") if e["target_name"] == "SHARED_VAR"]
+    assert {e["path"] for e in reads} == {"b.py"}
 
 
 def test_reads_env_python_fixture(indexer, store, small_app):
