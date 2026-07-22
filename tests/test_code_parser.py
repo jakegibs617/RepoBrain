@@ -178,6 +178,52 @@ def test_ambiguous_name_only_call_is_skipped(indexer, store, tmp_path: Path):
     assert _edges(store, "CALLS") == []
 
 
+def test_ambiguous_name_only_call_with_many_duplicates_is_skipped(indexer, store, tmp_path: Path):
+    """finish_run batches candidate lookup by name (name IN (...)); this
+    exercises the batched path with more than a couple of same-named
+    definitions, not just the minimal 2-duplicate ambiguity case above."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    for i in range(5):
+        (repo / f"dup_{i}.py").write_text("def widely_used(x):\n    return x\n")
+    (repo / "caller.py").write_text("def caller():\n    return widely_used(1)\n")
+    indexer.index(repo)
+    assert _edges(store, "CALLS") == []
+
+
+def test_name_only_call_excludes_same_named_definition_in_callers_own_file(
+    indexer, store, tmp_path: Path,
+):
+    """The caller's own file also happens to define an unrelated *method*
+    with the same name as the real (different-file, module-level) target --
+    a Method decoy, since a same-named module-level function in the
+    caller's own file would resolve via same-file `func_by_name` before
+    ever reaching finish_run. finish_run's exclusion of same-path
+    candidates must still leave exactly one true match: this exercises the
+    arithmetic (total match count minus per-path count) the batched
+    candidate lookup relies on instead of the old per-candidate id filter.
+    """
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "impl.py").write_text("def helper(x):\n    return x\n")
+    (repo / "caller.py").write_text(
+        "class Decoy:\n"
+        "    def helper(self):\n"
+        "        return 'decoy, never called'\n"
+        "\n"
+        "def entry():\n"
+        "    return helper(1)\n"
+    )
+    indexer.index(repo)
+    calls = {
+        (e["source_qname"], e["target_qname"]): e for e in _edges(store, "CALLS")
+    }
+    edge = calls[("caller.entry", "impl.helper")]
+    assert edge["confidence"] == 0.7
+    assert edge["is_inferred"] == 1
+    assert edge["inference_reason"] == "name-match"
+
+
 def test_self_method_call_resolves_within_class(indexer, store, tmp_path: Path):
     repo = tmp_path / "repo"
     repo.mkdir()

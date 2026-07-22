@@ -109,6 +109,16 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+#: well under SQLite's default SQLITE_MAX_VARIABLE_NUMBER (999 on older
+#: builds); batched IN(...) statements use one slot per chunked path.
+_TOUCH_CHUNK_SIZE = 500
+
+
+def _chunked(items: list[str], size: int):
+    for i in range(0, len(items), size):
+        yield items[i : i + size]
+
+
 class GraphStore:
     """Thin wrapper around a SQLite database holding the project graph."""
 
@@ -247,13 +257,27 @@ class GraphStore:
         self.conn.execute("DELETE FROM nodes WHERE extractor = ?", (extractor,))
 
     def touch_paths(self, paths: Iterable[str]) -> None:
-        """Refresh last_seen_at for nodes/edges of unchanged files."""
-        now = _now()
-        rows = [(now, p) for p in paths]
-        if not rows:
+        """Refresh last_seen_at for nodes/edges of unchanged files.
+
+        Every path gets the same timestamp, so this batches into bounded
+        ``WHERE path IN (...)`` statements (chunked to stay well under
+        SQLite's default host-parameter limit) instead of one UPDATE per
+        path. On a large unchanged corpus this is the difference between an
+        O(files) list of single-row statements and a small, bounded number
+        of statements each run — the SQL work stays proportional to changed
+        work, not total repository size.
+        """
+        path_list = list(paths)
+        if not path_list:
             return
-        self.conn.executemany("UPDATE nodes SET last_seen_at = ? WHERE path = ?", rows)
-        self.conn.executemany("UPDATE edges SET last_seen_at = ? WHERE path = ?", rows)
+        now = _now()
+        for table in ("nodes", "edges"):
+            for chunk in _chunked(path_list, _TOUCH_CHUNK_SIZE):
+                placeholders = ",".join("?" for _ in chunk)
+                self.conn.execute(
+                    f"UPDATE {table} SET last_seen_at = ? WHERE path IN ({placeholders})",
+                    (now, *chunk),
+                )
 
     # -- FTS ---------------------------------------------------------------
 

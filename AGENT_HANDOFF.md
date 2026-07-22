@@ -11,6 +11,36 @@ impact analysis, MCP tools, durable agent memory, and Markdown/HTML reports.
 
 ## Delivery Status
 
+- Scale hardening is implemented on `feat/scale-hardening`: a deterministic
+  synthetic large-repo generator (`repobrain/testing/synthetic_repo.py`, 1,050+
+  real parseable files with known graph answers, never committed) plus
+  SQL-statement-counting instrumentation (`repobrain/testing/perf.py`) drove a
+  measured baseline and two confirmed fixes. `GraphStore.touch_paths` batched
+  from one `UPDATE` per unchanged file into chunked `WHERE path IN (...)`
+  statements (a no-op reindex of 1,200/6,000 files dropped from
+  2,431/12,031 SQL statements to 13/33). `CodeParser.finish_run`'s cross-file
+  name-match `CALLS` resolution batched from one query per distinct callee
+  name into chunked `name IN (...)` queries, then had a code-review-caught
+  quadratic candidate-rescan fixed with a precomputed per-path match-count
+  arithmetic check.
+- `tests/test_scale.py` (6 tests) asserts deterministic work invariants (known
+  node/edge/CALLS/EnvVar/MENTIONS counts, bounded SQL-statement ceilings for
+  no-change/small-change/deletion runs, representative query parity, freshness
+  gate and root-pinning behavior) over a 1,050-file corpus, plus generous
+  wall-clock safety ceilings (not the primary assertion). `scripts/
+  benchmark_scale.py` is the reproducible manual benchmark; `docs/
+  SCALE_BENCHMARKS.md` records the measured before/after numbers at 1,200 and
+  6,000 files and which repository-wide costs (freshness `scan()`, the
+  Markdown/runtime-adapter global reconcilers, Git history extraction) are
+  intentionally left as documented, bounded-statement-count-but-not-bounded-
+  row-processing costs rather than "fixed".
+- Scale-hardening verification: 222 pytest tests passed (214 baseline + 6 new
+  scale tests + 2 new `finish_run` regression tests covering many-duplicate
+  ambiguity and same-file-decoy exclusion arithmetic); compilation and
+  whitespace checks were clean. Two independent review passes ran; the first
+  caught the `finish_run` quadratic-rescan regression (fixed before merge),
+  the second found nothing further.
+
 - Protocol-level MCP hardening is implemented. A bounded integration harness
   launches the real CLI server over stdio and uses the official MCP client for
   initialize/capability negotiation, discovery, representative reads, and
@@ -202,6 +232,11 @@ impact analysis, MCP tools, durable agent memory, and Markdown/HTML reports.
 - `repobrain/memory.py` — M15 append-first memory, deterministic anchor
   extraction, pure verification annotations, Git rename fallback, and stable
   plain/JSON report assembly. CLI/MCP/brief layers reuse this shared path.
+- `repobrain/testing/` — **new**: scale-hardening-only tooling, not shipped
+  runtime code. `synthetic_repo.py` generates a deterministic large corpus
+  with known graph answers; `perf.py` counts SQL statements via
+  `sqlite3.Connection.set_trace_callback` for hardware-independent work
+  assertions. Used by `tests/test_scale.py` and `scripts/benchmark_scale.py`.
 
 ## Important Files
 
@@ -231,7 +266,9 @@ impact analysis, MCP tools, durable agent memory, and Markdown/HTML reports.
 
 See `DECISIONS.md` D24 for M13 change context, D25 for M14 Git history,
 D26 for M15 memory verification, D27 for distribution, D28 for runtime
-adapters, and D29 for the protocol-level MCP boundary.
+adapters, D29 for the protocol-level MCP boundary, and D30 for scale
+hardening (touch_paths/finish_run batching, and which repository-wide costs
+are deliberately left unbatched).
 
 ## Assumptions
 
@@ -324,12 +361,31 @@ adapters, and D29 for the protocol-level MCP boundary.
   interpreter lives in a disposable cache. Use the stable `uvx` invocation and
   retain recognition of the exact legacy interpreter command during migration
   and uninstall.
+- `GraphStore.touch_paths` batches by identical timestamp into chunked
+  `WHERE path IN (...)` statements; it relies on every path in one call
+  getting the same `now()` value. Don't split it back into a per-row loop
+  without re-checking the no-change-run statement-count regression test in
+  `tests/test_scale.py`.
+- `CodeParser.finish_run`'s per-name candidate exclusion is path-only (not
+  path-or-id) on purpose: a node's id embeds its path (D2), and a pending
+  call's caller always lives in that same path, so excluding by path alone
+  is equivalent to the old combined filter — don't "restore" an id check,
+  it's redundant and was only ever removed for clarity, not correctness.
+  Its per-path match-count arithmetic assumes `total - path_counts[path]`
+  correctly represents "candidates outside this path"; if a future change
+  needs the actual excluded rows (not just the count) for some new reason,
+  recompute from `rows`, don't try to reverse-engineer them from the count.
+- `repobrain/testing/` is test/benchmark-only tooling, not part of the
+  shipped package surface — don't import it from `repobrain/` runtime code,
+  and don't let its synthetic fixtures' guaranteed-unique naming scheme
+  stand in for a fixture that exercises name collisions (see
+  `tests/test_code_parser.py`'s dedicated ambiguity tests for that).
 
 ## Suggested Next Steps
 
-A ready-to-use prompt for the next session (scoped to deterministic indexing
-and traversal scale hardening above 1,000 files) is
-in `docs/NEXT_SESSION_PROMPT.md`.
+A ready-to-use prompt for the next session (scoped to protocol-level MCP
+integration tests, the last remaining engineering follow-up below) is in
+`docs/NEXT_SESSION_PROMPT.md`.
 
 ### Product direction (post-MVP review, 2026-07-10)
 
@@ -373,8 +429,16 @@ deterministic-first stance (D-series) until the delivery loop above proves out.
 
 1. **Framework/runtime adapters. Delivered (M16).** Precise Flask-style and
    Express handlers plus conservative exact-model SQLAlchemy table flow.
-2. Add protocol-level MCP integration tests in addition to direct tool tests.
-3. Profile indexing and traversal on repositories above 1,000 files.
+2. **Protocol-level MCP integration tests. Delivered.** `tests/test_mcp_
+   transport.py` already launches the real stdio server with the official
+   MCP client (initialize/discovery/reads/error envelopes) alongside direct
+   tool tests; confirmed present while reviewing this list, not net-new.
+3. **Profile indexing and traversal on repositories above 1,000 files.
+   Delivered (scale hardening).** See D30 and `docs/SCALE_BENCHMARKS.md`.
+
+All three prior engineering follow-ups are now delivered. Next up, per the
+still-open M3 question below: Go/Java internal import resolution. See
+`docs/NEXT_SESSION_PROMPT.md`.
 
 ## Source-Grounded Notes
 

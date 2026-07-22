@@ -220,23 +220,56 @@ class CodeParser(Parser):
 
         A pending call becomes an edge only when exactly one Function/Method
         node in the whole graph carries that name (precision over recall).
+
+        Candidate lookup is batched into chunked ``name IN (...)`` queries
+        instead of one query per distinct callee name: a large run can queue
+        thousands of distinct bare-call names, and one round trip per name is
+        an avoidable N+1 pattern the SQL index doesn't fix. Chunking keeps
+        each statement's parameter count bounded regardless of corpus size.
         """
         edges: list[Edge] = []
         by_name: dict[str, list[_PendingCall]] = {}
         for pc in self._pending_calls:
             by_name.setdefault(pc.callee_name, []).append(pc)
-        for name, pcs in by_name.items():
+        if not by_name:
+            self._pending_calls = []
+            return edges
+        names = list(by_name)
+        matches_by_name: dict[str, list] = {name: [] for name in names}
+        for chunk in (names[i : i + 400] for i in range(0, len(names), 400)):
+            placeholders = ",".join("?" for _ in chunk)
             rows = store.conn.execute(
-                "SELECT id, path FROM nodes WHERE type IN ('Function', 'Method') "
-                "AND name = ? LIMIT 3",
-                (name,),
+                "SELECT id, path, name FROM nodes WHERE type IN ('Function', 'Method') "
+                f"AND name IN ({placeholders})",
+                chunk,
             ).fetchall()
+            for row in rows:
+                matches_by_name[row["name"]].append(row)
+        for name, pcs in by_name.items():
+            rows = matches_by_name[name]
+            if not rows:
+                continue
+            # A node's id embeds its path (D2), and a pending call's caller
+            # always lives in `pc.path`, so `r["id"] == pc.caller_id` can
+            # only ever hold when `r["path"] == pc.path` already does --
+            # excluding by path alone is equivalent to the old combined
+            # filter. Precomputing per-path counts turns "is there exactly
+            # one candidate outside my own file" into an O(1) arithmetic
+            # check per pending call. This matters for a name that is
+            # common across a large repo (`run`, `__init__`, ...): without
+            # it, every pending call sharing that name would re-scan every
+            # match for that name, an O(matches * calls) blowup for exactly
+            # the popular names most likely to appear at scale.
+            total = len(rows)
+            path_counts: dict[str, int] = {}
+            for r in rows:
+                path_counts[r["path"]] = path_counts.get(r["path"], 0) + 1
             for pc in pcs:
-                candidates = [
-                    r for r in rows if r["path"] != pc.path and r["id"] != pc.caller_id
-                ]
-                if len(candidates) != 1:
+                if total - path_counts.get(pc.path, 0) != 1:
                     continue
+                candidates = [r for r in rows if r["path"] != pc.path]
+                if len(candidates) != 1:
+                    continue  # defensive; unreachable given the count above
                 edges.append(
                     Edge(
                         type=EdgeType.CALLS,

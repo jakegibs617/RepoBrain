@@ -503,3 +503,63 @@ paths containing spaces are proven without shell parsing or network access.
 This smoke skips only when its optional SDK/build tool or offline dependency
 cache is unavailable; package-resolution and protocol-launch failures remain
 hard test failures with captured evidence.
+
+## 2026-07-22 — Scale hardening (deterministic indexing/traversal above 1,000 files)
+
+### D30: Fix confirmed hot paths by statement count, not wall clock; leave global reconcilers global
+
+`repobrain/testing/synthetic_repo.py` generates a deterministic, real
+(parseable) Python + Markdown corpus with known graph answers — exact
+counts for CALLS (same-file observed vs. cross-file inferred), a
+repo-global EnvVar convergence, and MENTIONS — so scale tests assert facts,
+not just "it didn't crash". It is never committed as generated files;
+`scripts/benchmark_scale.py` and `tests/test_scale.py` both regenerate it on
+demand. `repobrain/testing/perf.py` counts SQL statements via
+`sqlite3.Connection.set_trace_callback`, which is the hardware-independent
+proxy this milestone measures proportionality with — wall-clock numbers are
+reported for humans but the regression tests assert statement-count
+ceilings, per the milestone's own instruction to avoid narrow wall-clock
+assertions.
+
+Profiling a 1,200-file synthetic corpus found the sharpest violation of "a
+no-change run should stay proportional to changed work": `GraphStore.
+touch_paths` refreshed `last_seen_at` with one `UPDATE ... WHERE path = ?`
+per unchanged file (2,431 statements for a genuinely no-op reindex of 1,200
+files; 12,031 at 6,000 files). Since every touched row gets the identical
+timestamp in a single call, this batches losslessly into chunked `WHERE
+path IN (...)` statements (500 paths/statement) — 13 and 33 statements
+respectively for the same no-op runs. `CodeParser.finish_run` (D16's
+cross-file name-match CALLS pass) issued one `SELECT ... WHERE name = ?`
+per distinct queued callee name; batched into chunked `name IN (...)`
+queries the same way. Full details, before/after numbers at two corpus
+sizes, and `EXPLAIN QUERY PLAN` findings are in `docs/SCALE_BENCHMARKS.md`.
+
+Code review on the `finish_run` batching caught a second-order regression:
+fetching every candidate for a name (instead of the old `LIMIT 3`) meant a
+name common across a real repo (`run`, `__init__`) would re-scan its full
+candidate list once per pending call sharing that name — quadratic for
+exactly the popular names most likely to appear at scale, even though the
+synthetic fixture's guaranteed-unique names never exercised it. Fixed by
+precomputing a per-path match count per name once, so "is there exactly one
+candidate outside my own file" is an O(1) arithmetic check per pending
+call (a node's id embeds its path per D2, and every pending call's caller
+lives in that same path, so path-only exclusion is equivalent to the old
+combined path+id filter) — the O(matches) scan to find *which* row it is
+only runs in the rare case the arithmetic says a unique match remains.
+
+Deliberately left global and undisturbed: the freshness gate's `scan()`
+walks and stats every tracked file on every gated read (the only way to
+know nothing changed, per D12) — this dominates a no-change run's
+wall-clock cost at scale even after the SQL-statement fix, which is the
+correct outcome, not a missed optimization. `RuntimeAdapterReconciler` and
+`MarkdownMentionReconciler` (D28/D20) still fully rebuild their owned fact
+families on any change, because an unchanged Route/Markdown file can gain
+or lose a relationship when a *different* file changes; both already cost
+a small, bounded number of SQL statements (a handful of `SELECT` queries
+returning many rows, not one query per row), so their statement count does
+not grow with corpus size even though their row-processing cost does.
+`EXPLAIN QUERY PLAN` was checked for the highest-volume lookups; every one
+used an existing index except the substring branch of keyword search's
+name LIKE (an inherent full scan for a leading wildcard, sub-millisecond at
+tested corpus sizes) — no schema index was added without corpus evidence it
+would help, per the milestone's constraint against speculative indexes.
