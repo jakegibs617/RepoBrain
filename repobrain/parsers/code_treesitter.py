@@ -1086,18 +1086,28 @@ class _Extractor:
         """
         self._resolve_plain_call(name, ts, class_only=True)
 
-    def _resolve_self_call(self, name: str, ts) -> None:
-        """self.method() / this.method(): resolve within the enclosing class."""
-        class_qname = self._enclosing_class_qname(ts)
-        if class_qname is None:
-            return
+    def _resolve_method_in_class(
+        self, class_qname: str, name: str, ts, resolution: str,
+    ) -> None:
+        """Shared lookup for `self.methods[(class_qname, name)]`, used by
+        both `_resolve_self_call` (class_qname is the *enclosing* class) and
+        Java's `_resolve_java_qualified_call` (class_qname is a *named*
+        same-file class) -- same target dict, same edge shape, only the
+        `resolution` label and how `class_qname` is obtained differ."""
         target = self.methods.get((class_qname, name))
         if target is None:
             return  # unknown in this class (maybe inherited): skip, precision
         source = self._call_source(ts)
         self._add_call_edge(
-            source, target.id, ts.start_point[0] + 1, "same-class", name
+            source, target.id, ts.start_point[0] + 1, resolution, name
         )
+
+    def _resolve_self_call(self, name: str, ts) -> None:
+        """self.method() / this.method(): resolve within the enclosing class."""
+        class_qname = self._enclosing_class_qname(ts)
+        if class_qname is None:
+            return
+        self._resolve_method_in_class(class_qname, name, ts, "same-class")
 
     def _resolve_module_attr_call(self, prefix: str, name: str, ts) -> None:
         """alias.func() / alias.ClassName() where alias is an imported
@@ -1982,7 +1992,8 @@ class _JavaExtractor(_Extractor):
                 continue
             line = imp.start_point[0] + 1
             dotted = text
-            if dotted.startswith("static "):
+            is_static = dotted.startswith("static ")
+            if is_static:
                 # `import static pkg.Class.member;` — the resolvable target
                 # is the class, not the individual static member.
                 dotted = dotted[len("static "):].strip()
@@ -1994,6 +2005,19 @@ class _JavaExtractor(_Extractor):
             if targets:
                 for qname, path in targets:
                     self._add_import_edge(qname, path, line)
+                if not wildcard and not is_static and len(targets) == 1:
+                    # Bind the imported class's simple name (D34) so
+                    # `ClassName.staticMethod()` can resolve import-
+                    # qualified calls the same way `_resolve_plain_call`
+                    # already resolves `from module import Symbol` for
+                    # every other language -- the imported symbol here just
+                    # happens to be a class. As a side effect this also
+                    # extends D33's `new ClassName(...)` constructor
+                    # resolution (which already checks `symbol_aliases`) to
+                    # imported classes, not just same-file ones.
+                    local = dotted.rsplit(".", 1)[-1]
+                    qname, path = targets[0]
+                    self.symbol_aliases[local] = (qname, path, local)
             else:
                 self.external_imports.add(text)
 
@@ -2037,9 +2061,26 @@ class _JavaExtractor(_Extractor):
             obj = call.child_by_field_name("object")
             if name_node is None:
                 continue
+            name = self._text(name_node)
             if obj is None or obj.type == "this":
                 # bare / this-qualified invocation: resolve within the class
-                self._resolve_self_call(self._text(name_node), call)
+                self._resolve_self_call(name, call)
+            elif obj.type == "identifier":
+                # `Prefix.method()` (D34): a real tree-sitter parse-tree
+                # probe confirmed the Java grammar gives this the exact
+                # same shape as a variable-qualified call (`someVar.
+                # method()`) -- both are a bare `identifier` object field
+                # with no syntactic marker distinguishing "names a class"
+                # from "names a variable". Only resolve when `Prefix` is
+                # independently known to be a class (same-file or
+                # import-qualified); every other identifier -- including a
+                # local variable that merely isn't a known class -- is left
+                # unresolved, never guessed from capitalization or any
+                # other naming heuristic.
+                self._resolve_java_qualified_call(self._text(obj), name, call)
+            # Any other `object` shape (`field_access` for `pkg.Class.
+            # method()`/`a.b.method()`, `method_invocation` for chained
+            # calls, `array_access`, etc.) stays out of scope -- see D34.
         for new_expr in captures.get("new", []):
             # `new ClassName(...)` (D33): unlike `method_invocation`,
             # `object_creation_expression` is a self-contained node with its
@@ -2055,6 +2096,49 @@ class _JavaExtractor(_Extractor):
             if type_node is None or type_node.type != "type_identifier":
                 continue
             self._resolve_constructor_call(self._text(type_node), new_expr)
+
+    def _resolve_java_qualified_call(self, prefix: str, name: str, ts) -> None:
+        """`ClassName.staticMethod()` (D34): resolve only when `prefix` is
+        independently known to be a class name, same-file (`classes_by_name`)
+        or import-qualified (`symbol_aliases`) -- the same two registries
+        every other tier of this ladder already uses. A `prefix` that is not
+        a known class (an ordinary variable, an unresolved import, an
+        unknown name) does nothing here: this method never falls back to a
+        naming-convention guess.
+        """
+        same_file_class = self.classes_by_name.get(prefix)
+        if same_file_class is not None:
+            self._resolve_method_in_class(
+                same_file_class.qualified_name, name, ts, "same-file",
+            )
+            return
+        if prefix in self.symbol_aliases:
+            # Deliberately not routed through `_resolve_plain_call`'s own
+            # symbol_aliases tier: that tier targets a top-level Function/
+            # Class *of the module* (`f"{mod_qname}.{symbol}"`), because a
+            # bare name always means "a symbol the module exports directly".
+            # Here `name` is a *member of the already-resolved class*
+            # (`symbol`), one level deeper, so the target id needs an extra
+            # `.{symbol}` segment and is always a Method, never a Class --
+            # a genuinely different shape, not a copy that happened to
+            # diverge. `_PendingImportCall.func_target_id` is checked for
+            # existence by id alone in `finish_run` (already accepts both
+            # "Function" and "Method" types), so a Method-typed id here is
+            # resolved the same batched way as any other import-qualified
+            # candidate.
+            mod_qname, mod_path, symbol = self.symbol_aliases[prefix]
+            source = self._call_source(ts)
+            line = ts.start_point[0] + 1
+            func_target_id = node_id(
+                NodeType.METHOD, f"{mod_qname}.{symbol}.{name}", mod_path,
+            )
+            self.parser._pending_import_calls.append(
+                _PendingImportCall(
+                    caller_id=source.id, callee_name=name, path=self.path,
+                    line=line, func_target_id=func_target_id,
+                    class_target_id=None,
+                )
+            )
 
 
 class _RubyExtractor(_Extractor):

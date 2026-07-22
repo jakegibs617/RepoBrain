@@ -666,9 +666,10 @@ def test_ruby_constant_receiver_non_new_method_stays_skipped(indexer, store, tmp
 # with its own `type` field, resolved directly through
 # `_resolve_constructor_call` -- it never needs the separate, larger
 # `_resolve_plain_call`/`_resolve_module_attr_call` wiring gap that Java's
-# bare/qualified `method_invocation` calls still lack (that gap is
-# unrelated to constructor capture and stays out of scope; see DECISIONS.md
-# D33).
+# bare/qualified `method_invocation` calls used to lack. That gap (import-
+# and same-file-qualified `ClassName.staticMethod()` calls) is closed by
+# D34 below; a genuinely variable-qualified call remains out of scope there
+# since it needs type inference this codebase deliberately doesn't do.
 
 
 def test_java_new_expression_same_file(indexer, store, tmp_path: Path):
@@ -731,6 +732,121 @@ def test_java_qualified_new_expression_is_out_of_scope(indexer, store, tmp_path:
     )
     indexer.index(repo)
     assert _edges(store, "INSTANTIATES") == []
+    assert _edges(store, "CALLS") == []
+
+
+# -- Java `ClassName.staticMethod()` qualified-call resolution (D34) ---------
+#
+# A real tree-sitter parse-tree probe (see DECISIONS.md D34) confirmed that
+# Java's grammar gives a class-qualified call (`ClassName.staticMethod()`)
+# the exact same shape as a variable-qualified call (`someVar.method()`):
+# both are a `method_invocation` whose `object` field is a bare `identifier`
+# node, with no syntactic marker distinguishing the two. Resolution is only
+# possible by checking whether the identifier is independently known to be
+# a class (same-file `classes_by_name` or import-qualified `symbol_aliases`)
+# -- never by guessing from capitalization or any other naming convention.
+
+
+def test_java_qualified_call_resolves_same_file(indexer, store, tmp_path: Path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "App.java").write_text(
+        "class Util {\n    static void helper() {}\n}\n\n"
+        "class App {\n    void run() { Util.helper(); }\n}\n"
+    )
+    indexer.index(repo)
+    calls = _edges(store, "CALLS")
+    assert len(calls) == 1
+    assert calls[0]["source_qname"].endswith("App.run")
+    assert calls[0]["target_qname"].endswith("Util.helper")
+    assert calls[0]["confidence"] == 0.9
+    assert calls[0]["is_inferred"] == 0
+
+
+def test_java_qualified_call_resolves_import_qualified(indexer, store, tmp_path: Path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    pkg = repo / "src" / "main" / "java" / "com" / "example"
+    (pkg / "util").mkdir(parents=True)
+    (pkg / "util" / "Helper.java").write_text(
+        "package com.example.util;\n\npublic class Helper {\n"
+        "    public static void greet() {}\n}\n"
+    )
+    (pkg / "App.java").write_text(
+        "package com.example;\n\nimport com.example.util.Helper;\n\n"
+        "public class App {\n    void run() { Helper.greet(); }\n}\n"
+    )
+    indexer.index(repo)
+    calls = _edges(store, "CALLS")
+    assert len(calls) == 1
+    assert calls[0]["source_qname"].endswith("App.run")
+    assert calls[0]["target_qname"].endswith("Helper.greet")
+    assert calls[0]["confidence"] == 0.9
+    assert calls[0]["is_inferred"] == 0
+
+
+def test_java_qualified_call_import_qualified_constructor_bonus(
+    indexer, store, tmp_path: Path,
+):
+    """Side effect of D34: binding an imported class's simple name in
+    `symbol_aliases` also lets D33's `new ClassName(...)` resolve an
+    imported (not just same-file) class, closing a gap D33 left open."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    pkg = repo / "src" / "main" / "java" / "com" / "example"
+    (pkg / "util").mkdir(parents=True)
+    (pkg / "util" / "Widget.java").write_text(
+        "package com.example.util;\n\npublic class Widget {}\n"
+    )
+    (pkg / "App.java").write_text(
+        "package com.example;\n\nimport com.example.util.Widget;\n\n"
+        "public class App {\n    Widget make() { return new Widget(); }\n}\n"
+    )
+    indexer.index(repo)
+    edges = _edges(store, "INSTANTIATES")
+    assert len(edges) == 1
+    assert edges[0]["target_qname"].endswith("Widget")
+    assert edges[0]["confidence"] == 0.9
+    assert edges[0]["is_inferred"] == 0
+
+
+def test_java_variable_qualified_call_is_out_of_scope(indexer, store, tmp_path: Path):
+    """`someVar.method()` must produce nothing: tree-sitter gives it the
+    same shape as `ClassName.staticMethod()`, and `someVar` is not a known
+    class, so this is precision-preserving, not a regression."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "App.java").write_text(
+        "class Util {\n    void instanceMethod() {}\n}\n\n"
+        "class App {\n"
+        "    void run() {\n"
+        "        Util local = new Util();\n"
+        "        local.instanceMethod();\n"
+        "    }\n"
+        "}\n"
+    )
+    indexer.index(repo)
+    calls = _edges(store, "CALLS")
+    assert calls == []
+    edges = _edges(store, "INSTANTIATES")
+    assert len(edges) == 1
+    assert edges[0]["target_qname"].endswith("Util")
+
+
+def test_java_unknown_qualified_call_is_out_of_scope(indexer, store, tmp_path: Path):
+    """A qualified call whose prefix isn't a known class at all (not
+    same-file, not imported) must do nothing -- no cross-file name-match
+    fallback for the prefix, only the callee-name-blind fallback other
+    languages' truly bare calls already get."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "Elsewhere.java").write_text(
+        "class Elsewhere {\n    static void method() {}\n}\n"
+    )
+    (repo / "App.java").write_text(
+        "class App {\n    void run() { SomeUnknown.method(); }\n}\n"
+    )
+    indexer.index(repo)
     assert _edges(store, "CALLS") == []
 
 

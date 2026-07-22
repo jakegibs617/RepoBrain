@@ -391,12 +391,15 @@ scope).
 
 No open items remain from the original post-MVP/engineering-follow-up list,
 its two smallest carried-over gaps (INSTANTIATES edges, orphaned EnvVar
-sweep — both delivered, see D32), or D32's own named follow-on (real
+sweep — both delivered, see D32), D32's own named follow-on (real
 `new`/`.new` constructor-syntax capture for JS/TS/PHP/Ruby/Java — delivered,
-see D33). Java's separate, still-open `method_invocation` bare-call
-resolution wiring gap (D33 investigated and explicitly left it alone) is the
-only remaining named-but-unaddressed item, and it's small enough that it's
-folded into "Suggested Next Steps" below rather than tracked separately.
+see D33), or D33's own named follow-on (Java `ClassName.staticMethod()`
+qualified-call resolution — delivered, see D34; `someVar.method()` stays
+unresolved for good, a documented type-inference boundary, not a gap).
+This loop has now worked through every small, well-scoped engineering item
+carried since Milestone 3. See "Suggested Next Steps" below for the
+recommendation to route the next iteration through a human planning pass
+rather than manufacture a synthetic next milestone.
 
 ## Known Pitfalls
 
@@ -608,36 +611,35 @@ deterministic-first stance (D-series) until the delivery loop above proves out.
    expression` is self-contained and didn't need the separate wiring gap
    below fixed first.
 
-No open items remain from the original post-MVP/engineering-follow-up list
-or D32's own named follow-on. D33 surfaced one further named, scoped gap
-while investigating Java (not a new discovery — D33 documented it explicitly
-rather than silently skipping it): the recommended next milestone is that
-one, not the deliberately-flagged embeddings/multi-repo non-goals (still
-better suited to a dedicated human planning pass, not this loop's automatic
-next step — see below).
+7. **Java `ClassName.staticMethod()` call resolution. Delivered (D34).**
+   `_JavaExtractor._extract_calls` previously only resolved `self`/`this`-
+   qualified and bare invocations via `_resolve_self_call`. A real
+   tree-sitter parse probe (done first, before writing resolution code)
+   confirmed Java's grammar gives `ClassName.staticMethod()` and `someVar.
+   method()` the identical shape (`method_invocation` with a bare
+   `identifier` `object` field — no syntactic marker distinguishing the
+   two), so resolution is driven by the same name-registry lookup every
+   other CALLS tier already trusts (`classes_by_name`/`symbol_aliases`),
+   never a capitalization/naming heuristic. Same-file (`ClassName` defined
+   in the file) and import-qualified (`import pkg.ClassName;` then
+   `ClassName.method()`) both resolve at confidence 0.9, `is_inferred=0`,
+   through a new `_Extractor._resolve_method_in_class` helper shared with
+   `_resolve_self_call` and the existing `_PendingImportCall` batched
+   machinery. `someVar.method()` — a genuinely variable-qualified call —
+   remains unresolved for good: it needs the variable's declared type
+   (real type inference), which this deterministic, tree-sitter-only
+   codebase does not do. A side effect: binding an imported class's simple
+   name into `symbol_aliases` also lets D33's `new ClassName(...)` resolve
+   an imported class, not just a same-file one, closing a gap D33 had left
+   open. See D34 for the full investigation and scope boundary.
 
-7. **Java bare/qualified `method_invocation` call resolution (next, see
-   `docs/NEXT_SESSION_PROMPT.md`).** `_JavaExtractor._extract_calls` only
-   ever resolves `self`/`this`-qualified and bare invocations (treated as
-   implicit `this.method()`) via `_resolve_self_call` — it never routes
-   through `_resolve_plain_call`/`_resolve_module_attr_call` the way every
-   other first-class language does, so same-file free functions (Java has
-   none, but static methods called without a receiver do exist),
-   `ClassName.staticMethod()` calls to a locally-defined or imported class,
-   and cross-file name-match CALLS are all currently invisible for Java —
-   a real, if narrower-than-other-languages, "safer changes" gap. This is
-   more open-ended than D33's grammar-capture-only slices: Java's call
-   qualification isn't limited to "is it `self`/`this`" the way Python's is,
-   and general `obj.method()` resolution would need the receiver's declared
-   type (real type inference, out of scope for this deterministic-first
-   codebase). Investigate and scope down to what's resolvable without type
-   inference — most plausibly `ClassName.staticMethod()` where `ClassName`
-   matches a same-file class (`classes_by_name` + `self.methods`) or an
-   imported one (Java's import resolution already tracks source-root-
-   relative paths, D31) — and make an explicit, documented call about what's
-   in vs. out of scope, the same way D33 did for Java's constructor capture.
-   Precision over recall: an unresolvable qualifier should do nothing, not
-   guess a receiver's type.
+No open items remain from the original post-MVP/engineering-follow-up list,
+D32's own named follow-on, or D33's named follow-on (D34, above). This loop
+has now closed every small, well-scoped engineering gap carried since
+Milestone 3's CALLS/IMPORTS ladder landed. The recommended next step is the
+dedicated human planning checkpoint already flagged below (embeddings/
+multi-repo non-goals) rather than this loop inventing a synthetic next
+milestone — see `docs/NEXT_SESSION_PROMPT.md`.
 
 ## Source-Grounded Notes
 
