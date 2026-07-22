@@ -402,6 +402,338 @@ def test_instantiate_convergence_when_class_renamed(indexer, store, tmp_path: Pa
     assert _edges(store, "INSTANTIATES") == []
 
 
+# -- new-expression / .new constructor capture (D33) -------------------------
+
+
+def test_js_new_expression_same_file(indexer, store, tmp_path: Path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "mod.js").write_text(
+        "class Widget {}\n"
+        "function build() {\n  return new Widget();\n}\n"
+    )
+    indexer.index(repo)
+    assert _edges(store, "CALLS") == []
+    edges = _edges(store, "INSTANTIATES")
+    assert len(edges) == 1
+    edge = edges[0]
+    assert edge["source_qname"] == "mod.build"
+    assert edge["target_qname"] == "mod.Widget"
+    assert edge["confidence"] == 0.9
+    assert edge["is_inferred"] == 0
+
+
+def test_js_new_expression_prefers_class_even_when_same_named_function_exists(
+    indexer, store, tmp_path: Path,
+):
+    """`new Widget()` must resolve through the class-only ladder regardless
+    of a same-named function -- unlike a bare `Widget()` call, which keeps
+    resolving to the function exactly as D16/D32 left it. This is the
+    regression check that plain calls are unaffected by the new capture."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "mod.js").write_text(
+        "function Widget() { return 'factory'; }\n"
+        "class Widget {}\n"
+        "function build() { return Widget(); }\n"
+        "function make() { return new Widget(); }\n"
+    )
+    indexer.index(repo)
+    calls = _edges(store, "CALLS")
+    assert len(calls) == 1
+    assert calls[0]["source_qname"] == "mod.build"
+    assert calls[0]["target_qname"] == "mod.Widget"
+    instantiates = _edges(store, "INSTANTIATES")
+    assert len(instantiates) == 1
+    assert instantiates[0]["source_qname"] == "mod.make"
+    assert instantiates[0]["target_qname"] == "mod.Widget"
+
+
+def test_js_new_expression_import_qualified(indexer, store, tmp_path: Path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "models.js").write_text("export class User {}\n")
+    (repo / "app.js").write_text(
+        "import { User } from './models';\n"
+        "function create() {\n  return new User();\n}\n"
+    )
+    indexer.index(repo)
+    assert _edges(store, "CALLS") == []
+    edges = _edges(store, "INSTANTIATES")
+    assert len(edges) == 1
+    edge = edges[0]
+    assert edge["source_qname"] == "app.create"
+    assert edge["target_qname"] == "models.User"
+    assert edge["confidence"] == 0.9
+    assert edge["is_inferred"] == 0
+
+
+def test_js_new_expression_cross_file_name_match_is_inferred(indexer, store, tmp_path: Path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "a.js").write_text("class UniqueWidget {}\n")
+    (repo / "b.js").write_text("function build() {\n  return new UniqueWidget();\n}\n")
+    indexer.index(repo)
+    edges = _edges(store, "INSTANTIATES")
+    assert len(edges) == 1
+    edge = edges[0]
+    assert edge["confidence"] == 0.7
+    assert edge["is_inferred"] == 1
+    assert edge["inference_reason"] == "name-match"
+
+
+def test_js_new_expression_ambiguous_name_is_skipped(indexer, store, tmp_path: Path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "a.js").write_text("class Dup {}\n")
+    (repo / "b.js").write_text("class Dup {}\n")
+    (repo / "c.js").write_text("function build() {\n  return new Dup();\n}\n")
+    indexer.index(repo)
+    assert _edges(store, "INSTANTIATES") == []
+
+
+def test_js_qualified_new_expression_is_out_of_scope(indexer, store, tmp_path: Path):
+    """`new pkg.ClassName()` (a member_expression constructor field) is
+    deliberately out of scope for this milestone -- must do nothing, not
+    guess."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "mod.js").write_text(
+        "function build(pkg) {\n  return new pkg.Widget();\n}\n"
+    )
+    indexer.index(repo)
+    assert _edges(store, "INSTANTIATES") == []
+    assert _edges(store, "CALLS") == []
+
+
+def test_php_new_expression_same_file(indexer, store, tmp_path: Path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "mod.php").write_text(
+        "<?php\nclass Widget {}\nfunction build() { return new Widget(); }\n"
+    )
+    indexer.index(repo)
+    assert _edges(store, "CALLS") == []
+    edges = _edges(store, "INSTANTIATES")
+    assert len(edges) == 1
+    edge = edges[0]
+    assert edge["source_qname"] == "mod.build"
+    assert edge["target_qname"] == "mod.Widget"
+    assert edge["confidence"] == 0.9
+    assert edge["is_inferred"] == 0
+
+
+def test_php_new_expression_prefers_class_even_when_same_named_function_exists(
+    indexer, store, tmp_path: Path,
+):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "mod.php").write_text(
+        "<?php\n"
+        "function Widget() { return 'factory'; }\n"
+        "class Widget {}\n"
+        "function build() { return Widget(); }\n"
+        "function make() { return new Widget(); }\n"
+    )
+    indexer.index(repo)
+    calls = _edges(store, "CALLS")
+    assert len(calls) == 1
+    assert calls[0]["source_qname"] == "mod.build"
+    assert calls[0]["target_qname"] == "mod.Widget"
+    instantiates = _edges(store, "INSTANTIATES")
+    assert len(instantiates) == 1
+    assert instantiates[0]["source_qname"] == "mod.make"
+    assert instantiates[0]["target_qname"] == "mod.Widget"
+
+
+def test_php_new_expression_cross_file_name_match_is_inferred(indexer, store, tmp_path: Path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "a.php").write_text("<?php\nclass UniqueWidget {}\n")
+    (repo / "b.php").write_text(
+        "<?php\nfunction build() { return new UniqueWidget(); }\n"
+    )
+    indexer.index(repo)
+    edges = _edges(store, "INSTANTIATES")
+    assert len(edges) == 1
+    edge = edges[0]
+    assert edge["confidence"] == 0.7
+    assert edge["is_inferred"] == 1
+    assert edge["inference_reason"] == "name-match"
+
+
+def test_php_new_expression_ambiguous_name_is_skipped(indexer, store, tmp_path: Path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "a.php").write_text("<?php\nclass Dup {}\n")
+    (repo / "b.php").write_text("<?php\nclass Dup {}\n")
+    (repo / "c.php").write_text("<?php\nfunction build() { return new Dup(); }\n")
+    indexer.index(repo)
+    assert _edges(store, "INSTANTIATES") == []
+
+
+def test_php_qualified_new_expression_is_out_of_scope(indexer, store, tmp_path: Path):
+    """`new \\Pkg\\ClassName()` (qualified_name) and `new $var()`
+    (variable_name) are deliberately out of scope -- must do nothing."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "mod.php").write_text(
+        "<?php\n"
+        "function build($var) {\n"
+        "    $a = new \\Pkg\\Widget();\n"
+        "    $b = new $var();\n"
+        "    return [$a, $b];\n"
+        "}\n"
+    )
+    indexer.index(repo)
+    assert _edges(store, "INSTANTIATES") == []
+    assert _edges(store, "CALLS") == []
+
+
+def test_ruby_dot_new_same_file(indexer, store, tmp_path: Path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "mod.rb").write_text(
+        "class Widget\nend\n\ndef build\n  Widget.new\nend\n"
+    )
+    indexer.index(repo)
+    assert _edges(store, "CALLS") == []
+    edges = _edges(store, "INSTANTIATES")
+    assert len(edges) == 1
+    edge = edges[0]
+    assert edge["source_qname"] == "mod.build"
+    assert edge["target_qname"] == "mod.Widget"
+    assert edge["confidence"] == 0.9
+    assert edge["is_inferred"] == 0
+
+
+def test_ruby_dot_new_cross_file_name_match_is_inferred(indexer, store, tmp_path: Path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "a.rb").write_text("class UniqueThing\nend\n")
+    (repo / "b.rb").write_text("def build\n  UniqueThing.new\nend\n")
+    indexer.index(repo)
+    edges = _edges(store, "INSTANTIATES")
+    assert len(edges) == 1
+    edge = edges[0]
+    assert edge["confidence"] == 0.7
+    assert edge["is_inferred"] == 1
+    assert edge["inference_reason"] == "name-match"
+
+
+def test_ruby_dot_new_ambiguous_name_is_skipped(indexer, store, tmp_path: Path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "a.rb").write_text("class Dup\nend\n")
+    (repo / "b.rb").write_text("class Dup\nend\n")
+    (repo / "c.rb").write_text("def build\n  Dup.new\nend\n")
+    indexer.index(repo)
+    assert _edges(store, "INSTANTIATES") == []
+
+
+def test_ruby_variable_receiver_dot_new_stays_skipped(indexer, store, tmp_path: Path):
+    """Only a bare `constant` receiver whose method is exactly `new` gets the
+    constructor ladder; a variable receiver's `.new` call keeps being
+    skipped by the pre-existing dynamic-receiver guard exactly as before --
+    this is the regression check that the guard isn't generally weakened."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "mod.rb").write_text(
+        "class Widget\nend\n\ndef build(factory)\n  factory.new\nend\n"
+    )
+    indexer.index(repo)
+    assert _edges(store, "CALLS") == []
+    assert _edges(store, "INSTANTIATES") == []
+
+
+def test_ruby_constant_receiver_non_new_method_stays_skipped(indexer, store, tmp_path: Path):
+    """A bare constant receiver calling anything other than `new` keeps
+    being skipped -- only the exact `Constant.new` shape is special-cased."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "mod.rb").write_text(
+        "class Widget\nend\n\ndef build\n  Widget.build\nend\n"
+    )
+    indexer.index(repo)
+    assert _edges(store, "CALLS") == []
+    assert _edges(store, "INSTANTIATES") == []
+
+
+# -- Java `new ClassName(...)` constructor capture (D33) ---------------------
+#
+# Java is included in this milestone (unlike the rest of D33's carried-over
+# scope note) because `object_creation_expression` is a self-contained node
+# with its own `type` field, resolved directly through
+# `_resolve_constructor_call` -- it never needs the separate, larger
+# `_resolve_plain_call`/`_resolve_module_attr_call` wiring gap that Java's
+# bare/qualified `method_invocation` calls still lack (that gap is
+# unrelated to constructor capture and stays out of scope; see DECISIONS.md
+# D33).
+
+
+def test_java_new_expression_same_file(indexer, store, tmp_path: Path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "App.java").write_text(
+        "class Widget {}\n\n"
+        "class App {\n"
+        "    Widget make() {\n"
+        "        return new Widget();\n"
+        "    }\n"
+        "}\n"
+    )
+    indexer.index(repo)
+    assert _edges(store, "CALLS") == []
+    edges = _edges(store, "INSTANTIATES")
+    assert len(edges) == 1
+    edge = edges[0]
+    assert edge["source_qname"].endswith("App.make")
+    assert edge["target_qname"].endswith("Widget")
+    assert edge["confidence"] == 0.9
+    assert edge["is_inferred"] == 0
+
+
+def test_java_new_expression_cross_file_name_match_is_inferred(indexer, store, tmp_path: Path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "widget.java").write_text("class UniqueWidget {}\n")
+    (repo / "app.java").write_text(
+        "class App {\n    UniqueWidget make() { return new UniqueWidget(); }\n}\n"
+    )
+    indexer.index(repo)
+    edges = _edges(store, "INSTANTIATES")
+    assert len(edges) == 1
+    edge = edges[0]
+    assert edge["confidence"] == 0.7
+    assert edge["is_inferred"] == 1
+    assert edge["inference_reason"] == "name-match"
+
+
+def test_java_new_expression_ambiguous_name_is_skipped(indexer, store, tmp_path: Path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "a.java").write_text("class Dup {}\n")
+    (repo / "b.java").write_text("class Dup {}\n")
+    (repo / "c.java").write_text(
+        "class App {\n    Dup make() { return new Dup(); }\n}\n"
+    )
+    indexer.index(repo)
+    assert _edges(store, "INSTANTIATES") == []
+
+
+def test_java_qualified_new_expression_is_out_of_scope(indexer, store, tmp_path: Path):
+    """`new pkg.Widget()` (scoped_type_identifier) is deliberately out of
+    scope -- must do nothing, not guess."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "App.java").write_text(
+        "class App {\n    Object make() { return new pkg.Widget(); }\n}\n"
+    )
+    indexer.index(repo)
+    assert _edges(store, "INSTANTIATES") == []
+    assert _edges(store, "CALLS") == []
+
+
 def test_self_method_call_resolves_within_class(indexer, store, tmp_path: Path):
     repo = tmp_path / "repo"
     repo.mkdir()
