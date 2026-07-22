@@ -12,6 +12,38 @@ impact analysis, MCP tools, durable agent memory, and Markdown/HTML reports.
 
 ## Delivery Status
 
+- Real constructor-syntax capture is implemented on
+  `feat/new-expression-constructor-capture` (merged to `main`), closing D32's
+  own carried-over gap. `new ClassName(...)` (JS/TS `new_expression`;
+  PHP/Java `object_creation_expression`) and Ruby's `ClassName.new` (a bare
+  `constant` receiver) now resolve through a shared class-only ladder
+  (`_resolve_plain_call(..., class_only=True)`, delegated to via
+  `_resolve_constructor_call`) rather than a second resolution mechanism —
+  same tiers, same confidence/is_inferred values as D32's `ClassName()`
+  path. PHP's field-less `object_creation_expression` shape and Java's
+  `object_creation_expression.type` field were both verified against a real
+  tree-sitter parse before coding, not assumed. Java was folded in (not left
+  as a stretch item) because its `object_creation_expression` is
+  self-contained and doesn't need the separate, still-open
+  `method_invocation` bare-call wiring gap fixed first. Qualified/dynamic
+  constructors (`new pkg.Class()`, `new $var()`, a non-constant Ruby
+  receiver) stay out of scope, matching precision-over-recall. See D33 for
+  the full per-language grammar-shape rationale and what's still deliberately
+  unresolved.
+- Constructor-capture verification: 272 pytest tests passed (252 baseline +
+  20 new: same-file/import-qualified/cross-file-name-match/ambiguous-skipped
+  coverage per language, plus regression tests proving a non-`new`/non-`.new`
+  call to the same class name is unaffected, and out-of-scope-shape tests for
+  qualified/dynamic constructors). Code review (4 parallel finder angles)
+  found one real gap — the new `_resolve_constructor_call` didn't respect
+  `SUPPORTS_INSTANTIATES` the way `_resolve_plain_call` did at every tier,
+  a latent inconsistency (currently a no-op since no `SUPPORTS_INSTANTIATES
+  = False` language has `new`-shaped capture wired) — and one reuse finding
+  (the new method duplicated `_resolve_plain_call`'s ladder instead of
+  parameterizing it, contrary to the milestone's own instruction not to
+  build a second ladder). Both were fixed before merge by folding
+  `_resolve_constructor_call` into `_resolve_plain_call` via a `class_only`
+  parameter (see D33).
 - INSTANTIATES edges + orphaned EnvVar sweep are implemented on
   `feat/instantiates-envvar-sweep` (merged to `main`), closing both items
   named in "Open Questions" below. `EdgeType.INSTANTIATES` (previously
@@ -332,10 +364,13 @@ adapters, D29 for the protocol-level MCP boundary, D30 for scale
 hardening (touch_paths/finish_run batching, and which repository-wide costs
 are deliberately left unbatched), D31 for Go/Java internal import
 resolution (go.mod-based Go package resolution, Java conventional-source-root
-resolution, and their precisely documented unresolved cases), and D32 for
+resolution, and their precisely documented unresolved cases), D32 for
 INSTANTIATES edges (confidence ladder, language scope, the batched
 import-qualified existence-check refinement over D16) and the orphaned
-EnvVar sweep.
+EnvVar sweep, and D33 for real constructor-syntax capture (JS/TS/PHP/Java
+`new ClassName(...)`, Ruby `ClassName.new`; the shared `class_only`-
+parameterized ladder; the Java scope decision; and what's still out of
+scope).
 
 ## Assumptions
 
@@ -354,10 +389,14 @@ EnvVar sweep.
 
 ## Open Questions
 
-No open items remain from the original post-MVP/engineering-follow-up list
-or its two smallest carried-over gaps (INSTANTIATES edges, orphaned EnvVar
-sweep — both delivered, see D32). See "Suggested Next Steps" for the
-recommended next milestone or planning checkpoint.
+No open items remain from the original post-MVP/engineering-follow-up list,
+its two smallest carried-over gaps (INSTANTIATES edges, orphaned EnvVar
+sweep — both delivered, see D32), or D32's own named follow-on (real
+`new`/`.new` constructor-syntax capture for JS/TS/PHP/Ruby/Java — delivered,
+see D33). Java's separate, still-open `method_invocation` bare-call
+resolution wiring gap (D33 investigated and explicitly left it alone) is the
+only remaining named-but-unaddressed item, and it's small enough that it's
+folded into "Suggested Next Steps" below rather than tracked separately.
 
 ## Known Pitfalls
 
@@ -561,27 +600,44 @@ deterministic-first stance (D-series) until the delivery loop above proves out.
    false-positive risk), and `GraphStore.delete_orphan_envvars()` sweeps
    EnvVar nodes that lost their last reader.
 
-No open items remain from the original post-MVP/engineering-follow-up list.
-D32 itself named a small, natural follow-on while scoping INSTANTIATES: the
-recommended next milestone is that one, not the deliberately-flagged
-embeddings/multi-repo non-goals (still better suited to a dedicated human
-planning pass, not this loop's automatic next step — see below).
+6. **Constructor-call capture for `new X()` (JS/TS/Java), `object_creation_
+   expression` (PHP) and `X.new` (Ruby). Delivered (D33).** Real constructor
+   syntax now resolves through the same class-only ladder as D32's
+   `ClassName()` path (`_resolve_plain_call(..., class_only=True)`), not a
+   duplicated one. Java was folded in because its `object_creation_
+   expression` is self-contained and didn't need the separate wiring gap
+   below fixed first.
 
-6. **Constructor-call capture for `new X()` (JS/TS/PHP) and `X.new` (Ruby)
-   (next, see `docs/NEXT_SESSION_PROMPT.md`).** D32 activated INSTANTIATES
-   using only the call-shaped tree-sitter captures that already existed, so
-   in practice only Python's `ClassName()` idiom benefits — JS/TS/PHP's
-   `new ClassName(...)` and Ruby's `ClassName.new` are each a different
-   grammar shape (`new_expression`/`object_creation_expression`, or a
-   receiver call Ruby's extractor currently skips outright) that D32
-   explicitly left uncaptured. Extending capture patterns and routing the
-   extracted class name through the exact same resolution ladder and
-   `finish_run`/`_resolve_pending_import_calls` machinery D32 already built
-   would make INSTANTIATES actually fire for those languages' real
-   constructor syntax, not just the rare bare-call coincidence — directly
-   useful for "safer changes" on any non-Python-heavy repo. Bounded,
-   single-feature, reuses proven machinery: the same shape as this
-   milestone and the one before it.
+No open items remain from the original post-MVP/engineering-follow-up list
+or D32's own named follow-on. D33 surfaced one further named, scoped gap
+while investigating Java (not a new discovery — D33 documented it explicitly
+rather than silently skipping it): the recommended next milestone is that
+one, not the deliberately-flagged embeddings/multi-repo non-goals (still
+better suited to a dedicated human planning pass, not this loop's automatic
+next step — see below).
+
+7. **Java bare/qualified `method_invocation` call resolution (next, see
+   `docs/NEXT_SESSION_PROMPT.md`).** `_JavaExtractor._extract_calls` only
+   ever resolves `self`/`this`-qualified and bare invocations (treated as
+   implicit `this.method()`) via `_resolve_self_call` — it never routes
+   through `_resolve_plain_call`/`_resolve_module_attr_call` the way every
+   other first-class language does, so same-file free functions (Java has
+   none, but static methods called without a receiver do exist),
+   `ClassName.staticMethod()` calls to a locally-defined or imported class,
+   and cross-file name-match CALLS are all currently invisible for Java —
+   a real, if narrower-than-other-languages, "safer changes" gap. This is
+   more open-ended than D33's grammar-capture-only slices: Java's call
+   qualification isn't limited to "is it `self`/`this`" the way Python's is,
+   and general `obj.method()` resolution would need the receiver's declared
+   type (real type inference, out of scope for this deterministic-first
+   codebase). Investigate and scope down to what's resolvable without type
+   inference — most plausibly `ClassName.staticMethod()` where `ClassName`
+   matches a same-file class (`classes_by_name` + `self.methods`) or an
+   imported one (Java's import resolution already tracks source-root-
+   relative paths, D31) — and make an explicit, documented call about what's
+   in vs. out of scope, the same way D33 did for Java's constructor capture.
+   Precision over recall: an unresolvable qualifier should do nothing, not
+   guess a receiver's type.
 
 ## Source-Grounded Notes
 
@@ -592,6 +648,6 @@ planning pass, not this loop's automatic next step — see below).
   confidence, DATABASE_URL env read, `tests/test_users.py` via imports).
   Same for `node_api_app` with `createUser` / `src/config.js` (PORT,
   DATABASE_URL, LOG_LEVEL env reads; TestCases calling the service).
-- 252/252 pytest tests pass (`.venv/bin/pytest -q`; run with `PYTHONPATH`
+- 272/272 pytest tests pass (`.venv/bin/pytest -q`; run with `PYTHONPATH`
   pointed at the checkout under test — see Known Pitfalls above about the
   primary repo's `.venv` being an editable install pinned to its own path).

@@ -377,14 +377,18 @@ open setup/graph.html
 - Call-graph extraction prefers precision over recall: method calls on
   dynamic receivers (anything other than `self`/`this`) are skipped, and
   cross-file name-only matches require the name to be globally unique.
-- Constructor calls (`ClassName()`) become `INSTANTIATES` edges under the
-  exact same confidence ladder as `CALLS` (0.9 observed same-file/
-  import-qualified, 0.7 inferred cross-file-unique-name). Only languages
-  whose grammar routes a bare call-shaped node through the same resolution
-  path get this: in practice, Python's `ClassName()` idiom is the primary
-  beneficiary, since JS/TS/PHP/Java's `new ClassName()` and Ruby's
-  `ClassName.new` use different tree-sitter grammar productions not
-  currently captured by any query. Go is explicitly excluded: its `T(x)`
+- Constructor calls become `INSTANTIATES` edges under the exact same
+  confidence ladder as `CALLS` (0.9 observed same-file/import-qualified, 0.7
+  inferred cross-file-unique-name). Python's `ClassName()` idiom gets this
+  via the normal bare-call resolution path (it's syntactically identical to
+  a function call). Real constructor syntax is also captured directly:
+  JS/TS/Java `new ClassName(...)` (`new_expression`/
+  `object_creation_expression`), PHP `new ClassName(...)`
+  (`object_creation_expression`), and Ruby `ClassName.new` (a bare
+  `constant` receiver) all resolve through the same class-only ladder.
+  Qualified/dynamic constructors (`new pkg.ClassName()`, `new $var()`, a
+  non-constant Ruby receiver) are out of scope, not guessed. Go is
+  explicitly excluded from constructor resolution entirely: its `T(x)`
   type-conversion syntax parses as an ordinary call expression, and would
   otherwise be misread as instantiating a same-named type. A name that
   resolves to both a Function/Method and a Class always produces `CALLS`,

@@ -41,6 +41,17 @@ Conventions (see DECISIONS.md D14–D18):
 - EnvVar nodes are repo-global: id keyed on ("EnvVar", name, "") so reads of
   the same variable from many files converge on one node; each observation is
   its own READS_ENV edge carrying file/line provenance.
+- Real constructor syntax (D33) -- JS/TS/Java `new ClassName(...)`
+  (`new_expression`/`object_creation_expression`), PHP
+  `new ClassName(...)` (`object_creation_expression`), and Ruby
+  `ClassName.new` (a `call` with a bare `constant` receiver) -- is captured
+  directly and resolved through `_Extractor._resolve_constructor_call`, the
+  same tiered ladder as `_resolve_plain_call` but constrained to Class
+  candidates only (`_PendingCall.class_only`/`_PendingImportCall.class_only`
+  skip the Function/Method check entirely, since `new X()`/`X.new` can never
+  mean anything but a constructor). Qualified/dynamic constructors
+  (`new pkg.Class()`, `new $var()`, a non-constant Ruby receiver) are out of
+  scope, not guessed.
 
 Per-language Query objects are compiled once (lru_cache) and reused across
 files. Any per-file failure degrades to a warning; the file still gets its
@@ -78,6 +89,7 @@ _JS_QUERY = """
 (method_definition) @def.method
 (import_statement) @import.esm
 (call_expression) @call
+(new_expression) @new
 (member_expression) @member
 (subscript_expression) @subscript
 (program (lexical_declaration (variable_declarator) @var.decl))
@@ -119,6 +131,7 @@ _QUERY_SOURCES = {
 (include_once_expression) @import.req
 (function_call_expression) @call
 (member_call_expression) @call.member
+(object_creation_expression) @new
 (program (expression_statement (assignment_expression) @var.assign))
 (const_declaration) @var.const
 """,
@@ -144,6 +157,7 @@ _QUERY_SOURCES = {
 (constructor_declaration) @def.method
 (import_declaration) @import.java
 (method_invocation) @call
+(object_creation_expression) @new
 """,
     "ruby": """
 (method) @def.function
@@ -320,6 +334,13 @@ class _PendingCall:
     #: `T(x)` type conversion parses as the same `call_expression` shape as
     #: a real call) -- see `_Extractor.SUPPORTS_INSTANTIATES`.
     allow_instantiate: bool = True
+    #: True for real constructor syntax (`new X()`, `X.new`) queued by
+    #: `_Extractor._resolve_constructor_call` (D33): the callee is
+    #: unambiguously a constructor, so `finish_run` must only ever check it
+    #: against Class candidates, never Function/Method -- unlike a bare call
+    #: that merely happens to share a class's name (`allow_instantiate=True`
+    #: but `class_only=False`), which still tries CALLS first per D16/D32.
+    class_only: bool = False
 
 
 @dataclass
@@ -348,9 +369,14 @@ class _PendingImportCall:
     callee_name: str
     path: str
     line: int
-    func_target_id: str
+    #: None for a real constructor call (`class_only=True`, D33): there is
+    #: no Function/Method candidate to even check for `new X()`/`X.new`.
+    func_target_id: str | None
     #: None when the caller's language doesn't support INSTANTIATES (D32).
     class_target_id: str | None
+    #: True for real constructor syntax (D33) -- `func_target_id` is never
+    #: checked, mirroring `_PendingCall.class_only`.
+    class_only: bool = False
 
 
 class CodeParser(Parser):
@@ -453,7 +479,11 @@ class CodeParser(Parser):
             class_total = len(class_rows)
             class_path_counts = _path_counts(class_rows)
             for pc in pcs:
-                if func_total and func_total - func_path_counts.get(pc.path, 0) == 1:
+                if (
+                    not pc.class_only
+                    and func_total
+                    and func_total - func_path_counts.get(pc.path, 0) == 1
+                ):
                     candidates = [r for r in func_rows if r["path"] != pc.path]
                     if len(candidates) != 1:
                         continue  # defensive; unreachable given the count above
@@ -517,7 +547,8 @@ class CodeParser(Parser):
             return []
         all_ids: set[str] = set()
         for pic in pics:
-            all_ids.add(pic.func_target_id)
+            if pic.func_target_id is not None:
+                all_ids.add(pic.func_target_id)
             if pic.class_target_id is not None:
                 all_ids.add(pic.class_target_id)
         id_list = list(all_ids)
@@ -531,7 +562,11 @@ class CodeParser(Parser):
                 existing_types[row["id"]] = row["type"]
         edges: list[Edge] = []
         for pic in pics:
-            if existing_types.get(pic.func_target_id) in ("Function", "Method"):
+            if (
+                not pic.class_only
+                and pic.func_target_id is not None
+                and existing_types.get(pic.func_target_id) in ("Function", "Method")
+            ):
                 edges.append(
                     Edge(
                         type=EdgeType.CALLS,
@@ -976,23 +1011,33 @@ class _Extractor:
             )
         )
 
-    def _resolve_plain_call(self, name: str, ts) -> None:
-        """Shared bare-name call/constructor resolution ladder (D16/D32).
+    def _resolve_plain_call(self, name: str, ts, class_only: bool = False) -> None:
+        """Shared bare-name call/constructor resolution ladder (D16/D32/D33).
 
         Mirrors CALLS' confidence ladder for INSTANTIATES: a name is always
         checked against callables (``func_by_name``) before classes
         (``classes_by_name``), so a same-file function deterministically
         wins over a same-named class -- there is never a double-emit for a
         name that is locally ambiguous between the two.
+
+        ``class_only=True`` (D33) is the one exception to that ordering:
+        real constructor syntax (`new ClassName(...)`, `ClassName.new`) is
+        unambiguously a constructor, never a plain call, so callers that
+        already know that (see `_resolve_constructor_call`) skip the
+        `func_by_name` tier entirely and are only ever checked against Class
+        candidates -- constrained to a single shared ladder rather than a
+        second, duplicated one, per every tier below.
         """
+        if class_only and not self.SUPPORTS_INSTANTIATES:
+            return  # nothing else a constructor call could resolve to
         source = self._call_source(ts)
         line = ts.start_point[0] + 1
-        if name in self.func_by_name:
+        if not class_only and name in self.func_by_name:
             target = self.func_by_name[name]
             self._add_call_edge(source, target.id, line, "same-file", name)
             return
         if name in self.classes_by_name:
-            if self.SUPPORTS_INSTANTIATES:
+            if class_only or self.SUPPORTS_INSTANTIATES:
                 target = self.classes_by_name[name]
                 self._add_call_edge(
                     source, target.id, line, "same-file", name,
@@ -1001,16 +1046,19 @@ class _Extractor:
             return
         if name in self.symbol_aliases:
             mod_qname, mod_path, symbol = self.symbol_aliases[name]
-            func_target_id = node_id(NodeType.FUNCTION, f"{mod_qname}.{symbol}", mod_path)
+            func_target_id = (
+                None if class_only
+                else node_id(NodeType.FUNCTION, f"{mod_qname}.{symbol}", mod_path)
+            )
             class_target_id = (
                 node_id(NodeType.CLASS, f"{mod_qname}.{symbol}", mod_path)
-                if self.SUPPORTS_INSTANTIATES else None
+                if (class_only or self.SUPPORTS_INSTANTIATES) else None
             )
             self.parser._pending_import_calls.append(
                 _PendingImportCall(
                     caller_id=source.id, callee_name=name, path=self.path,
                     line=line, func_target_id=func_target_id,
-                    class_target_id=class_target_id,
+                    class_target_id=class_target_id, class_only=class_only,
                 )
             )
             return
@@ -1021,9 +1069,22 @@ class _Extractor:
                 callee_name=name,
                 path=self.path,
                 line=line,
-                allow_instantiate=self.SUPPORTS_INSTANTIATES,
+                allow_instantiate=class_only or self.SUPPORTS_INSTANTIATES,
+                class_only=class_only,
             )
         )
+
+    def _resolve_constructor_call(self, name: str, ts) -> None:
+        """Real constructor syntax (`new ClassName(...)`, `ClassName.new`,
+        D33): resolve `name` through `_resolve_plain_call`'s exact same
+        classes_by_name/symbol_aliases/pending-call tiers, constrained to
+        Class candidates only via ``class_only=True`` -- not a second,
+        duplicated ladder. Callers of this method already restrict `name` to
+        a bare, non-dynamic identifier/constant (qualified/member
+        constructors and dynamic receivers are out of scope, checked before
+        calling in).
+        """
+        self._resolve_plain_call(name, ts, class_only=True)
 
     def _resolve_self_call(self, name: str, ts) -> None:
         """self.method() / this.method(): resolve within the enclosing class."""
@@ -1639,6 +1700,14 @@ class _JsExtractor(_Extractor):
                     self._resolve_self_call(name, call)
                 elif obj.type == "identifier":
                     self._resolve_module_attr_call(self._text(obj), name, call)
+        for new_expr in captures.get("new", []):
+            ctor = new_expr.child_by_field_name("constructor")
+            if ctor is None or ctor.type != "identifier":
+                # `new pkg.ClassName()` (member_expression) or a dynamic
+                # constructor expression: out of scope for this milestone,
+                # not a guess (D33).
+                continue
+            self._resolve_constructor_call(self._text(ctor), new_expr)
 
 
 # ---------------------------------------------------------------------------
@@ -1713,6 +1782,17 @@ class _PhpExtractor(_Extractor):
                 continue
             if self._text(obj) == "$this":
                 self._resolve_self_call(self._text(name_node), call)
+        for new_expr in captures.get("new", []):
+            # `object_creation_expression` has no named field for the class
+            # (verified against a real parse tree, not assumed, D33): its
+            # first named child is `name` for a bare `new Foo()`,
+            # `qualified_name` for a namespaced `new \Pkg\Bar()`, or
+            # `variable_name`/other for a dynamic `new $var()` -- only the
+            # bare `name` shape is in scope here.
+            named = new_expr.named_children
+            if not named or named[0].type != "name":
+                continue
+            self._resolve_constructor_call(self._text(named[0]), new_expr)
 
 
 # ---------------------------------------------------------------------------
@@ -1960,6 +2040,21 @@ class _JavaExtractor(_Extractor):
             if obj is None or obj.type == "this":
                 # bare / this-qualified invocation: resolve within the class
                 self._resolve_self_call(self._text(name_node), call)
+        for new_expr in captures.get("new", []):
+            # `new ClassName(...)` (D33): unlike `method_invocation`,
+            # `object_creation_expression` is a self-contained node with its
+            # own `type` field (verified against a real parse tree) that
+            # doesn't go through Java's separate bare/qualified-call
+            # resolution gap at all -- `_resolve_constructor_call` only
+            # needs `classes_by_name`/`symbol_aliases`/the pending-call
+            # queue, all of which Java's extractor already populates. A
+            # qualified type (`new pkg.Bar()`, `scoped_type_identifier`) is
+            # out of scope, matching JS/PHP's qualified-constructor scope
+            # limit.
+            type_node = new_expr.child_by_field_name("type")
+            if type_node is None or type_node.type != "type_identifier":
+                continue
+            self._resolve_constructor_call(self._text(type_node), new_expr)
 
 
 class _RubyExtractor(_Extractor):
@@ -2002,7 +2097,19 @@ class _RubyExtractor(_Extractor):
         for call in captures.get("call", []):
             if call.id in self.env_consumed:
                 continue
-            if call.child_by_field_name("receiver") is not None:
+            receiver = call.child_by_field_name("receiver")
+            if receiver is not None:
+                # `ClassName.new` (D33): a bare `constant` receiver whose
+                # method is exactly `new` is real constructor syntax, so it
+                # gets the class-only ladder. Every other receiver shape
+                # (a variable, `self`, a method chain, any other method
+                # name) keeps being skipped exactly as before -- this is the
+                # one carved-out exception to the dynamic-receiver guard,
+                # not a general weakening of it.
+                if receiver.type == "constant":
+                    method = call.child_by_field_name("method")
+                    if method is not None and self._text(method) == "new":
+                        self._resolve_constructor_call(self._text(receiver), call)
                 continue  # dynamic receiver: skip
             method = call.child_by_field_name("method")
             if method is None or method.type != "identifier":

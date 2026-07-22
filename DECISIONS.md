@@ -731,3 +731,100 @@ precedent for the Markdown/runtime-adapter reconcilers: a small, fixed
 number of statements regardless of corpus size, even though the row-scan
 work isn't zero on a no-change run. `tests/test_scale.py`'s statement-count
 ceilings still pass with the extra statement.
+
+## 2026-07-22 — Real constructor-syntax capture
+
+### D33: `new ClassName(...)`/`ClassName.new` get real grammar capture for JS/TS, PHP, Ruby, and Java; one shared class-only ladder, not a second one
+
+D32 activated `EdgeType.INSTANTIATES` but only by reusing existing call-shaped
+captures, so it fired only for Python's `ClassName()` idiom (syntactically
+identical to a function call). This milestone adds real capture for each
+language's actual constructor syntax:
+
+- **JS/TS**: `(new_expression) @new` added to `_JS_QUERY` (shared by
+  JS/TS/TSX). The grammar's `new_expression` has a `constructor` field;
+  a bare `identifier` constructor (`new Foo()`) resolves, a
+  `member_expression` constructor (`new pkg.Foo()`) is out of scope.
+- **PHP**: `(object_creation_expression) @new` added. Verified against a
+  real tree-sitter parse (not assumed, matching D32's Go-exclusion
+  precedent): this node has **no named field** for the class — its first
+  named child is `name` for a bare `new Foo()`, `qualified_name` for
+  `new \Pkg\Bar()`, or `variable_name` for a dynamic `new $var()`. Only the
+  `name` shape resolves; the other two are out of scope.
+- **Ruby**: `ClassName.new` is a `call` node with a `receiver` field, and
+  `_RubyExtractor._extract_calls` previously skipped every call with a
+  receiver unconditionally (the dynamic-receiver precision guard). It now
+  special-cases exactly one shape before that skip: a `receiver` whose type
+  is the bare `constant` node (Ruby's capitalized-identifier node type) and
+  whose `method` field is exactly `new`. Every other receiver — a variable,
+  `self`, a method chain, a constant calling anything other than `new` —
+  keeps being skipped exactly as before; this is a carved-out exception, not
+  a general weakening (regression tests
+  `test_ruby_variable_receiver_dot_new_stays_skipped`/
+  `test_ruby_constant_receiver_non_new_method_stays_skipped` cover both
+  edges of that boundary).
+- **Java**: `(object_creation_expression) @new` added, resolved the same
+  way. Investigated per the milestone's explicit instruction to decide, not
+  guess, whether this needed Java's separate pre-existing wiring gap
+  (`_JavaExtractor._extract_calls` never routes bare/qualified
+  `method_invocation` calls through `_resolve_plain_call`/
+  `_resolve_module_attr_call` — only `self`/`this`-qualified calls resolve)
+  closed first. It doesn't: Java's `object_creation_expression` is a
+  self-contained node with its own `type` field (verified by parse probe:
+  `type_identifier` for a bare `new Foo()`, `scoped_type_identifier` for a
+  qualified `new pkg.Bar()`, out of scope), and is wired directly to the
+  shared resolution helper below without touching `method_invocation`
+  handling at all. Folding Java in was therefore small and well-scoped, not
+  a rewrite of Java's call resolution — the `method_invocation` gap remains
+  open and undisturbed, a separate future item if ever prioritized.
+
+**One shared ladder, not two.** The milestone's own instructions warned
+against a second resolution ladder. `_resolve_plain_call` gained a
+`class_only: bool = False` parameter: when `True`, it skips the
+`func_by_name` tier entirely (real constructor syntax is never a plain
+call, so there's nothing to check first) and every subsequent tier — same-file
+`classes_by_name`, import-qualified `symbol_aliases` queued as a
+`_PendingImportCall`, and the cross-file `_pending_calls`/`finish_run`
+fallback — is constrained to Class candidates only. A new
+`_resolve_constructor_call(name, ts)` is a one-line delegation:
+`self._resolve_plain_call(name, ts, class_only=True)`. `class_only` also
+guards `_resolve_plain_call` the same way `SUPPORTS_INSTANTIATES` already
+did for the non-constructor path, so a constructor call on a language that
+somehow had `SUPPORTS_INSTANTIATES = False` would resolve to nothing rather
+than silently bypassing the flag (currently a no-op — Go is the only such
+language and has no `new`-shaped capture wired — but keeps the flag a
+single per-language master switch rather than something future constructor
+capture could route around).
+
+Both `_PendingCall` and `_PendingImportCall` gained a matching `class_only:
+bool = False` field. `finish_run`'s per-name cross-file pass and
+`_resolve_pending_import_calls`'s batched existence check both gate their
+existing Function/Method-candidate branch on `not pc.class_only`/`not
+pic.class_only` — a no-op for every pre-D33 (`class_only=False`) pending
+call, since that condition was already unconditionally true for them — and
+otherwise proceed straight to the Class-candidate branch. No new batching
+mechanism: both still use the same chunked `name IN (...)` / `id IN (...)`
+queries D30 established.
+
+**Regression coverage.** Every language's test suite includes a same-file
+case where a function and a class share a name: the bare call
+(`Widget()`/`Widget.build`) must keep resolving via the unmodified
+`func_by_name`-first path (still `CALLS`, per D16/D32 precedent), while the
+`new`/`.new` call to the identical name must resolve to `INSTANTIATES`
+against the class — proving the new class-only path doesn't leak into or
+get leaked into by the existing bare-call ladder.
+
+**Scope left out**, all intentional, precision over recall:
+
+- Qualified/member constructors (`new pkg.ClassName()` in JS/Java, `new
+  \Pkg\ClassName()` in PHP) — a different tree-sitter shape than the bare
+  identifier this milestone captures; extending `_resolve_module_attr_call`
+  to cover it is plausible future work but wasn't a "trivial reuse" so was
+  left out per the milestone's own instruction not to force it.
+- Java's `method_invocation` (bare/qualified plain call) resolution gap —
+  unrelated to constructor capture, still open, still undisturbed.
+- Go — unchanged from D32: no `new`-shaped capture, `SUPPORTS_INSTANTIATES
+  = False`.
+- No changes to `impact_analysis`/`trace_data_flow`/`explain_file` query
+  surfacing — D32 already wired `INSTANTIATES` into all three; this
+  milestone only adds more edges of a type they already traverse.
