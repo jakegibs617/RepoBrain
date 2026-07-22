@@ -1011,23 +1011,33 @@ class _Extractor:
             )
         )
 
-    def _resolve_plain_call(self, name: str, ts) -> None:
-        """Shared bare-name call/constructor resolution ladder (D16/D32).
+    def _resolve_plain_call(self, name: str, ts, class_only: bool = False) -> None:
+        """Shared bare-name call/constructor resolution ladder (D16/D32/D33).
 
         Mirrors CALLS' confidence ladder for INSTANTIATES: a name is always
         checked against callables (``func_by_name``) before classes
         (``classes_by_name``), so a same-file function deterministically
         wins over a same-named class -- there is never a double-emit for a
         name that is locally ambiguous between the two.
+
+        ``class_only=True`` (D33) is the one exception to that ordering:
+        real constructor syntax (`new ClassName(...)`, `ClassName.new`) is
+        unambiguously a constructor, never a plain call, so callers that
+        already know that (see `_resolve_constructor_call`) skip the
+        `func_by_name` tier entirely and are only ever checked against Class
+        candidates -- constrained to a single shared ladder rather than a
+        second, duplicated one, per every tier below.
         """
+        if class_only and not self.SUPPORTS_INSTANTIATES:
+            return  # nothing else a constructor call could resolve to
         source = self._call_source(ts)
         line = ts.start_point[0] + 1
-        if name in self.func_by_name:
+        if not class_only and name in self.func_by_name:
             target = self.func_by_name[name]
             self._add_call_edge(source, target.id, line, "same-file", name)
             return
         if name in self.classes_by_name:
-            if self.SUPPORTS_INSTANTIATES:
+            if class_only or self.SUPPORTS_INSTANTIATES:
                 target = self.classes_by_name[name]
                 self._add_call_edge(
                     source, target.id, line, "same-file", name,
@@ -1036,16 +1046,19 @@ class _Extractor:
             return
         if name in self.symbol_aliases:
             mod_qname, mod_path, symbol = self.symbol_aliases[name]
-            func_target_id = node_id(NodeType.FUNCTION, f"{mod_qname}.{symbol}", mod_path)
+            func_target_id = (
+                None if class_only
+                else node_id(NodeType.FUNCTION, f"{mod_qname}.{symbol}", mod_path)
+            )
             class_target_id = (
                 node_id(NodeType.CLASS, f"{mod_qname}.{symbol}", mod_path)
-                if self.SUPPORTS_INSTANTIATES else None
+                if (class_only or self.SUPPORTS_INSTANTIATES) else None
             )
             self.parser._pending_import_calls.append(
                 _PendingImportCall(
                     caller_id=source.id, callee_name=name, path=self.path,
                     line=line, func_target_id=func_target_id,
-                    class_target_id=class_target_id,
+                    class_target_id=class_target_id, class_only=class_only,
                 )
             )
             return
@@ -1056,53 +1069,22 @@ class _Extractor:
                 callee_name=name,
                 path=self.path,
                 line=line,
-                allow_instantiate=self.SUPPORTS_INSTANTIATES,
+                allow_instantiate=class_only or self.SUPPORTS_INSTANTIATES,
+                class_only=class_only,
             )
         )
 
     def _resolve_constructor_call(self, name: str, ts) -> None:
         """Real constructor syntax (`new ClassName(...)`, `ClassName.new`,
-        D33): resolve `name` through the exact same tiers as
-        `_resolve_plain_call`'s classes_by_name/symbol_aliases/pending-call
-        branches, but constrained to Class candidates only -- a `new`
-        expression is unambiguously a constructor, never a plain call, so
-        (unlike a bare `ClassName()` call that merely happens to share a
-        class's name) there is no Function/Method candidate to even try
-        first. Callers of this method already restrict `name` to a bare,
-        non-dynamic identifier/constant (qualified/member constructors and
-        dynamic receivers are out of scope, checked before calling in).
+        D33): resolve `name` through `_resolve_plain_call`'s exact same
+        classes_by_name/symbol_aliases/pending-call tiers, constrained to
+        Class candidates only via ``class_only=True`` -- not a second,
+        duplicated ladder. Callers of this method already restrict `name` to
+        a bare, non-dynamic identifier/constant (qualified/member
+        constructors and dynamic receivers are out of scope, checked before
+        calling in).
         """
-        source = self._call_source(ts)
-        line = ts.start_point[0] + 1
-        if name in self.classes_by_name:
-            target = self.classes_by_name[name]
-            self._add_call_edge(
-                source, target.id, line, "same-file", name,
-                edge_type=EdgeType.INSTANTIATES,
-            )
-            return
-        if name in self.symbol_aliases:
-            mod_qname, mod_path, symbol = self.symbol_aliases[name]
-            class_target_id = node_id(NodeType.CLASS, f"{mod_qname}.{symbol}", mod_path)
-            self.parser._pending_import_calls.append(
-                _PendingImportCall(
-                    caller_id=source.id, callee_name=name, path=self.path,
-                    line=line, func_target_id=None, class_target_id=class_target_id,
-                    class_only=True,
-                )
-            )
-            return
-        self.parser._pending_calls.append(
-            _PendingCall(
-                caller_id=source.id,
-                caller_qname=source.qualified_name,
-                callee_name=name,
-                path=self.path,
-                line=line,
-                allow_instantiate=True,
-                class_only=True,
-            )
-        )
+        self._resolve_plain_call(name, ts, class_only=True)
 
     def _resolve_self_call(self, name: str, ts) -> None:
         """self.method() / this.method(): resolve within the enclosing class."""
