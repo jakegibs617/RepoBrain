@@ -3,14 +3,38 @@
 ## Project Summary
 
 RepoBrain: a local-first second brain for AI coding agents (see `prd.md`).
-All ten PRD milestones, post-MVP Milestones 11–16, and protocol-level MCP
-hardening are now implemented. Milestones 1–4 delivered storage,
+All ten PRD milestones, post-MVP Milestones 11–16, protocol-level MCP
+hardening, deterministic scale hardening, and Go/Java internal import
+resolution are now implemented. Milestones 1–4 delivered storage,
 incremental indexing, code/docs parsing, search, and documentation mapping.
 Milestones 5–10 add config adapters and tracing, route/data-flow analysis,
 impact analysis, MCP tools, durable agent memory, and Markdown/HTML reports.
 
 ## Delivery Status
 
+- Go/Java internal import resolution is implemented on
+  `feat/go-java-import-resolution` (merged to `main`), closing the last open
+  question carried since Milestone 3. Go imports resolve against a `go.mod`
+  `module` directive read once at the indexed root; an import matching that
+  module resolves to every non-test `.go` file in the corresponding package
+  directory (D19/D31). Java imports resolve against a single unambiguous
+  `src/main/java`/`src/test/java` root detected from the scanned file set;
+  fully-qualified, wildcard, and static imports all resolve, and a
+  multi-module (ambiguous-root) layout stays external rather than guessing.
+  Both resolvers reuse the existing `begin_run(known_files)` deterministic-id
+  pattern (D15) with no filesystem access mid-parse; a per-directory index is
+  precomputed once in `begin_run` so resolution stays O(1) per import
+  regardless of corpus size (consistent with D30). See D31 for the precise
+  rules, edge cases (go.mod block comments, Java path-segment-boundary
+  matching), and what stays unresolved by design.
+- Go/Java verification: 236 pytest tests passed (222 baseline + 6 Go tests +
+  8 Java tests, including two regression tests for review-caught edge cases:
+  a Java source-root marker matching a substring instead of a path segment,
+  and a go.mod block-comment false match). Two independent review passes
+  (correctness angle + cleanup/efficiency angle) confirmed one real
+  correctness bug (the substring-boundary marker match), one plausible edge
+  case (go.mod block comments), and one real efficiency finding (per-import
+  linear scans over the known-files set); all three were fixed before merge.
 - Scale hardening is implemented on `feat/scale-hardening`: a deterministic
   synthetic large-repo generator (`repobrain/testing/synthetic_repo.py`, 1,050+
   real parseable files with known graph answers, never committed) plus
@@ -196,13 +220,16 @@ impact analysis, MCP tools, durable agent memory, and Markdown/HTML reports.
   rebuilt inside the index transaction and guarded by a version stamp.
 - `repobrain/parsers/route_parser.py` — source-local Flask-style/Express Route
   facts only; handler resolution is deliberately outside the parser.
-- `repobrain/parsers/code_treesitter.py` — **new**: `CodeParser` +
+- `repobrain/parsers/code_treesitter.py` — `CodeParser` +
   per-language `_Extractor` subclasses (Python, JS/TS shared, PHP, Bash, Go,
   Java, Ruby). One compiled tree-sitter Query per grammar (lru_cache); the
   query captures def/import/call/env candidates and Python-side logic does
-  scoping, qualified names, and resolution. Emits Module/Function/Class/
-  Method/Variable/TestFile/TestCase/EnvVar nodes; DEFINES/CONTAINS/IMPORTS/
-  CALLS/READS_ENV edges; FTS rows per symbol (name + qualified name +
+  scoping, qualified names, and resolution. `CodeParser.begin_run(known_files,
+  root)` also reads `go.mod` (bounded, once) and detects Java's conventional
+  source root(s) from `known_files`, precomputing per-directory indices so
+  Go/Java import resolution (D31) is O(1) per import. Emits Module/Function/
+  Class/Method/Variable/TestFile/TestCase/EnvVar nodes; DEFINES/CONTAINS/
+  IMPORTS/CALLS/READS_ENV edges; FTS rows per symbol (name + qualified name +
   signature line).
 - `repobrain/parsers/base.py` — `Parser` interface, `ParseResult`, registry
   (now with `.all()`), `GenericFileParser`. All matching parsers run per file:
@@ -266,9 +293,11 @@ impact analysis, MCP tools, durable agent memory, and Markdown/HTML reports.
 
 See `DECISIONS.md` D24 for M13 change context, D25 for M14 Git history,
 D26 for M15 memory verification, D27 for distribution, D28 for runtime
-adapters, D29 for the protocol-level MCP boundary, and D30 for scale
+adapters, D29 for the protocol-level MCP boundary, D30 for scale
 hardening (touch_paths/finish_run batching, and which repository-wide costs
-are deliberately left unbatched).
+are deliberately left unbatched), and D31 for Go/Java internal import
+resolution (go.mod-based Go package resolution, Java conventional-source-root
+resolution, and their precisely documented unresolved cases).
 
 ## Assumptions
 
@@ -278,6 +307,12 @@ are deliberately left unbatched).
 - Cross-file CALLS precision: a name-only match must be globally unique.
 - EnvVar nodes with `path=""` are never removed by path-based cleanup; a
   reader's deletion removes only its READS_ENV edges.
+- Go module resolution assumes exactly one `go.mod` at the indexed root; a
+  module whose `go.mod` lives above the indexed root (sub-directory-as-root
+  layouts) is out of scope and those imports stay external. Java resolution
+  assumes exactly one `src/main/java`/`src/test/java` tree per kind; a
+  multi-module repo with more than one such tree leaves every import under
+  it external rather than guessed.
 
 ## Open Questions
 
@@ -285,7 +320,6 @@ are deliberately left unbatched).
   skipped for precision)?
 - Should orphaned EnvVar nodes (no remaining READS_ENV edges) be swept, or
   left for M5 config parsing to reclaim?
-- Go/Java internal import resolution (needs go.mod / package-root awareness).
 
 ## Known Pitfalls
 
@@ -380,12 +414,42 @@ are deliberately left unbatched).
   and don't let its synthetic fixtures' guaranteed-unique naming scheme
   stand in for a fixture that exercises name collisions (see
   `tests/test_code_parser.py`'s dedicated ambiguity tests for that).
+- Java/Go source-root and marker detection must match on whole path segments,
+  never a raw substring: `f.find("src/main/java/")` matches inside a
+  directory like `thirdparty-src/main/java/` (the substring starts mid-token),
+  which both poisons ambiguity detection for a real root elsewhere in the
+  repo and can silently misdetect a vendored tree as a source root. Compare
+  `path.split("/")` slices against the exact segment tuple, as
+  `_detect_java_source_roots` does — this was a review-caught bug, not a
+  hypothetical, with a regression test
+  (`test_java_source_root_marker_matches_path_segments_not_substring`).
+- `_read_go_module_prefix` strips `/* ... */` block comments from `go.mod`
+  text before scanning for the `module` directive; a commented-out `module`
+  line would otherwise match first since the regex scan is line-based with
+  no per-line comment-state tracking. Also review-caught; regression test is
+  `test_go_mod_module_directive_ignores_block_comments`.
+- Go/Java directory-based import resolution (D31) is backed by a
+  `dict[str, list[str]]` index (`_go_dir_index`/`_java_dir_index`)
+  precomputed once in `begin_run`, not a per-import scan of `known_files` —
+  keep it that way per D30's precedent; re-introducing a linear scan per
+  import statement would regress at scale even though no test currently
+  measures it by statement/scan count the way `tests/test_scale.py` does for
+  `touch_paths`/`finish_run`.
+- `.venv` in the primary repo checkout is an **editable** install pointing at
+  the primary repo's own path (`_editable_impl_repobrain.pth`), not whichever
+  worktree you're running from. Running `.venv/bin/pytest` from inside a
+  worktree silently tests the *primary repo's* `repobrain` package, not the
+  worktree's changes, and gives no error — it just imports a different copy.
+  Always run tests from a worktree with
+  `PYTHONPATH="$(pwd)" /path/to/primary/repo/.venv/bin/pytest`, or verify
+  `python3 -c "import repobrain; print(repobrain.__file__)"` resolves inside
+  the worktree first. Discovered this milestone after a batch of new tests
+  silently ran against stale (pre-change) code and passed for the wrong
+  reason.
 
 ## Suggested Next Steps
 
-A ready-to-use prompt for the next session (scoped to protocol-level MCP
-integration tests, the last remaining engineering follow-up below) is in
-`docs/NEXT_SESSION_PROMPT.md`.
+A ready-to-use prompt for the next session is in `docs/NEXT_SESSION_PROMPT.md`.
 
 ### Product direction (post-MVP review, 2026-07-10)
 
@@ -435,10 +499,32 @@ deterministic-first stance (D-series) until the delivery loop above proves out.
    tool tests; confirmed present while reviewing this list, not net-new.
 3. **Profile indexing and traversal on repositories above 1,000 files.
    Delivered (scale hardening).** See D30 and `docs/SCALE_BENCHMARKS.md`.
+4. **Go/Java internal import resolution. Delivered.** See D31; go.mod-based
+   Go package resolution and conventional-source-root Java resolution, with
+   documented ambiguous/non-conventional-layout limits.
 
-All three prior engineering follow-ups are now delivered. Next up, per the
-still-open M3 question below: Go/Java internal import resolution. See
-`docs/NEXT_SESSION_PROMPT.md`.
+No open items remain from the original post-MVP/engineering-follow-up list.
+The two smallest carried-over precision/graph-hygiene gaps — both explicitly
+named in "Open Questions" above and both natural extensions of an existing,
+already-battle-tested pattern rather than new mechanisms — are the
+recommended next milestone:
+
+5. **INSTANTIATES edges + orphaned EnvVar sweep (next, see
+   `docs/NEXT_SESSION_PROMPT.md`).** `ClassName()` constructor calls are
+   currently skipped entirely (D16); mirroring the existing CALLS confidence
+   ladder (same-file/import-qualified observed at 0.9, cross-file
+   globally-unique name-match inferred at 0.7) for `Class INSTANTIATES`
+   edges directly serves "safer changes" (impact analysis currently can't
+   see who constructs a class you're about to change) with a well-understood,
+   low-risk pattern. Bundled with it: EnvVar nodes whose last `READS_ENV`
+   edge disappears currently linger forever (D17's documented trade-off) —
+   a bounded sweep (no incoming `READS_ENV` edge → delete) closes that,
+   analogous to the existing Directory-liveness and orphan-edge sweeps.
+   Revisiting the deliberate embeddings/multi-repo non-goals (there is now
+   substantial delivery evidence across 16+ milestones) is a larger,
+   architecture-level decision better suited to a dedicated planning pass
+   than folding into this loop's next cadence — flagged here for the human
+   to weigh in on, not scheduled as the next milestone by default.
 
 ## Source-Grounded Notes
 
@@ -449,4 +535,6 @@ still-open M3 question below: Go/Java internal import resolution. See
   confidence, DATABASE_URL env read, `tests/test_users.py` via imports).
   Same for `node_api_app` with `createUser` / `src/config.js` (PORT,
   DATABASE_URL, LOG_LEVEL env reads; TestCases calling the service).
-- 208/208 pytest tests pass (`.venv/bin/pytest -q`).
+- 236/236 pytest tests pass (`.venv/bin/pytest -q`; run with `PYTHONPATH`
+  pointed at the checkout under test — see Known Pitfalls above about the
+  primary repo's `.venv` being an editable install pinned to its own path).

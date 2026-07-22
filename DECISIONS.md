@@ -153,8 +153,8 @@ resolves literal relative `require`/`include` paths. Resolved imports become
 `Module IMPORTS Module` edges whose target id is computed deterministically
 (D2) — no placeholder node needed. Anything unresolvable (stdlib, npm
 packages, dynamic paths) lands in the module node's `external_imports`
-metadata list, never as a dangling node. Go/Java imports are metadata-only for
-now (resolution needs go.mod / package roots).
+metadata list, never as a dangling node. Go/Java internal imports resolve too,
+per the same `begin_run(known_files)` pattern — see D31.
 
 ### D16: CALLS = observed 0.9, name-match inferred 0.7; Module may be a caller
 
@@ -563,3 +563,67 @@ used an existing index except the substring branch of keyword search's
 name LIKE (an inherent full scan for a leading wildcard, sub-millisecond at
 tested corpus sizes) — no schema index was added without corpus evidence it
 would help, per the milestone's constraint against speculative indexes.
+
+## 2026-07-22 — Go/Java internal import resolution
+
+### D31: Go resolves against a root-level go.mod; Java resolves against one unambiguous conventional source root; both stay within the existing per-file resolution pattern
+
+This closes the last open question carried since Milestone 3 (D15/D19): Go
+and Java internal imports now become `Module IMPORTS Module` edges instead of
+always landing in `external_imports` metadata, using the same
+`begin_run(known_files)` / deterministic-id pattern Python/JS/Ruby/PHP
+already use — no new mechanism, no filesystem access mid-parse (parsers
+still only see `known_files`; the two exceptions below are bounded, one-time
+reads done in `begin_run`, before any file is parsed, analogous to the
+indexer's own `git rev-parse` call in `git_commit_hash`).
+
+**Go.** `_read_go_module_prefix` reads the `module <path>` directive from
+`go.mod` located *exactly* at the indexed root (block comments are stripped
+first so a commented-out `module` line can't be mistaken for the real one).
+A `go.mod` in an ancestor directory outside the indexed root — e.g. indexing
+a subdirectory of a larger module — is not read; those imports stay external
+rather than guessing a module boundary from a partial view of the tree. An
+import matching the module prefix resolves to *every* non-test `.go` file in
+the corresponding package directory (exact directory match, no recursion —
+Go packages are one directory each): a package commonly spans multiple
+files, and the existing Module-per-file model has no natural way to name
+"the package" as one node, so resolving to every file-Module in that
+directory is the precise choice per this codebase's precision-over-recall
+stance, rather than guessing a single file. `_test.go` files are excluded as
+targets (an external package cannot import another package's test files).
+
+**Java.** `_detect_java_source_roots` scans the known-file set for a single
+unambiguous `src/main/java` and/or `src/test/java` prefix, matched on whole
+path segments (not a raw substring — a directory that merely ends in
+`...src` immediately followed by `main/java/` must not be mistaken for a
+real root). A fully-qualified import `com.example.pkg.ClassName` maps to
+`<root>/com/example/pkg/ClassName.java`; wildcard imports
+(`import com.example.pkg.*;`) resolve to every `.java` file directly in that
+package directory, mirroring Go's multi-file handling; static imports
+(`import static com.example.pkg.Class.member;`) resolve to the declaring
+class. If more than one distinct `src/main/java` (or `src/test/java`) tree
+exists in the scanned files — a multi-module monorepo layout — that root is
+left `None` (ambiguous) rather than guessed, and every import under it stays
+external. The package-declaration-content-derived fallback considered during
+scoping (deriving a root by matching a file's own `package` statement against
+its path) was not implemented: it would require reading file content during
+`begin_run`, before any file has been parsed, which no resolver in this
+codebase does — non-conventional layouts (no `src/main/java`-style prefix
+anywhere) stay external metadata rather than adding that new capability for
+one language's edge case.
+
+**Efficiency.** Both directory-based resolutions (Go's exact-directory match,
+Java's wildcard match) are backed by a `dict[str, list[str]]` directory index
+(`_index_files_by_dir`) precomputed once in `begin_run` alongside
+`_go_module_prefix`/`_java_source_roots`, not a linear scan of `known_files`
+per import statement — consistent with D30's scale-hardening precedent
+against repeated full scans in hot paths. Java's single-class (non-wildcard)
+resolution is an exact `frozenset` membership check, the same O(1) pattern
+Python's `_resolve_module` already uses.
+
+**Convergence.** Both resolvers stay purely per-parse: an importer file's
+edges are only recomputed when that file itself is reparsed (same documented
+incremental limitation as D16's CALLS), but a deleted/renamed *target* whose
+importer isn't reparsed still converges correctly, because the existing
+orphan-edge sweep (which already ran before this milestone) removes any edge
+whose target node no longer exists — no Go/Java-specific cleanup was needed.

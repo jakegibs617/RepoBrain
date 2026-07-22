@@ -64,12 +64,41 @@ runtime wiring remain intentionally conservative; see Limitations.
 | TypeScript | yes (+interfaces/enums as Class) | same as JavaScript | same as JavaScript | same as JavaScript |
 | PHP        | yes     | `require`/`include` with literal relative paths | same-file, `$this->method` | `getenv('X')` |
 | Bash       | functions + top-level variables | no | same-file function invocations | no |
-| Go         | yes (structs/types as Class) | no (imports recorded as metadata) | same-file | no |
-| Java       | yes (interfaces/enums as Class) | no (imports recorded as metadata) | within-class | no |
+| Go         | yes (structs/types as Class) | yes, if `go.mod` is at the indexed root (import path → every non-test `.go` file in that package directory) | same-file | no |
+| Java       | yes (interfaces/enums as Class) | yes, if a single unambiguous `src/main/java`/`src/test/java` root exists (fully-qualified/wildcard/static imports → file(s) under that root) | within-class | no |
 | Ruby       | yes (modules as Class) | `require_relative` | same-file, within-class, name-match | no |
 
 Unresolvable or third-party imports are stored as `external_imports` metadata
 on the module node — never as dangling graph nodes.
+
+**Go import resolution** reads the `module` directive from a `go.mod` file
+located exactly at the indexed root (a single bounded text read done once per
+index run, never a `go` toolchain invocation). An import matching that module
+path resolves to *every* non-test `.go` file in the corresponding package
+directory (Go packages are directories that commonly hold multiple files;
+resolving to all of them avoids guessing which file the caller means).
+`go.mod` files outside the indexed root (e.g. an ancestor directory, for a
+sub-directory-as-root layout) are not read — resolution stays external in
+that case, by design. Example: with `module example.com/foo` in `go.mod`,
+`import "example.com/foo/util"` resolves to every `util/*.go` file
+(excluding `util/*_test.go`); `import "example.com/bar/util"` (a different
+module) or an import with no `go.mod` present stays `external_imports`.
+
+**Java import resolution** looks for the scanned tree's single conventional
+`src/main/java/` and/or `src/test/java/` prefix and maps a fully-qualified
+import `com.example.pkg.ClassName` to
+`<root>/com/example/pkg/ClassName.java`. Wildcard imports
+(`import com.example.pkg.*;`) resolve to every `.java` file directly in that
+package directory, mirroring Go's multi-file package handling. Static
+imports (`import static com.example.pkg.Class.member;`) resolve to the
+declaring class. If more than one distinct `src/main/java` (or
+`src/test/java`) tree exists in the scanned files — a multi-module layout —
+that root is treated as ambiguous and left undetected entirely: imports stay
+external rather than guessing which tree a caller means. Non-conventional
+layouts (no `src/main/java`-style prefix anywhere in the scanned tree) are
+not resolved; there is no package-declaration-content-based fallback, since
+that would require reading file content before any file is parsed, which
+this codebase's import resolvers don't do.
 
 ### Supported framework/runtime patterns
 
@@ -359,8 +388,13 @@ open setup/graph.html
 - Markdown mention matching is intentionally strict: exact local paths and
   exact unique symbol names are linked; fuzzy text, ambiguous symbols,
   external URLs, and route literals without a Route node are skipped.
-- Go/Java imports are recorded as module metadata only (resolving them needs
-  module/package roots, deferred).
+- Go imports resolve only when `go.mod` is exactly at the indexed root; a
+  module's `go.mod` living in an ancestor directory outside the indexed root
+  (a sub-directory-as-root layout) is not read, and those imports stay
+  external metadata. Java imports resolve only when the scanned tree has one
+  unambiguous `src/main/java`/`src/test/java` root; multi-module layouts with
+  more than one such tree, and layouts with no conventional root at all,
+  leave every import as external metadata rather than guessing.
 - Empty directories produce no Directory nodes (directories are derived from
   file paths).
 - Git history evidence is correlation over a bounded recent window (default

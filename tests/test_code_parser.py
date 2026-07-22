@@ -432,3 +432,318 @@ def test_is_test_file_conventions():
     assert is_test_file("__tests__/thing.js")
     assert not is_test_file("app/services/user_service.py")
     assert not is_test_file("src/testimonials.js")
+
+
+# -- Go import resolution (D19) ------------------------------------------------
+
+
+def test_go_internal_import_resolves_to_package_files(indexer, store, tmp_path: Path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "go.mod").write_text("module example.com/foo\n\ngo 1.21\n")
+    (repo / "main.go").write_text(
+        'package main\n\nimport "example.com/foo/util"\n\n'
+        "func main() {\n\tutil.Helper()\n}\n"
+    )
+    (repo / "util").mkdir()
+    (repo / "util" / "helper.go").write_text("package util\n\nfunc Helper() {}\n")
+    indexer.index(repo)
+    imports = {(e["source_qname"], e["target_qname"]) for e in _edges(store, "IMPORTS")}
+    assert ("main", "util/helper") in imports
+
+
+def test_go_internal_import_covers_every_file_in_package(indexer, store, tmp_path: Path):
+    """A Go import names a package (directory), which may hold multiple
+    files; precision over recall means resolving to every file-Module in
+    that directory rather than guessing one (D19)."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "go.mod").write_text("module example.com/foo\n")
+    (repo / "main.go").write_text(
+        'package main\n\nimport (\n\t"fmt"\n\t"example.com/foo/util"\n)\n\n'
+        'func main() {\n\tfmt.Println("hi")\n\tutil.Helper()\n}\n'
+    )
+    (repo / "util").mkdir()
+    (repo / "util" / "helper.go").write_text("package util\n\nfunc Helper() {}\n")
+    (repo / "util" / "other.go").write_text("package util\n\nfunc Other() {}\n")
+    # a package's own test file is never an import target
+    (repo / "util" / "helper_test.go").write_text(
+        "package util\n\nfunc TestHelper() {}\n"
+    )
+    indexer.index(repo)
+    imports = {(e["source_qname"], e["target_qname"]) for e in _edges(store, "IMPORTS")}
+    assert ("main", "util/helper") in imports
+    assert ("main", "util/other") in imports
+    assert not any(t == "util/helper_test" for _, t in imports)
+    # stdlib import stays external, no dangling/guessed node
+    module = store.conn.execute(
+        "SELECT metadata_json FROM nodes WHERE type='Module' AND path='main.go'"
+    ).fetchone()
+    import json
+    assert "fmt" in json.loads(module["metadata_json"])["external_imports"]
+    assert _node(store, "Module", "fmt") is None
+
+
+def test_go_import_outside_module_stays_external(indexer, store, tmp_path: Path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "go.mod").write_text("module example.com/foo\n")
+    (repo / "main.go").write_text(
+        'package main\n\nimport "github.com/other/pkg"\n\n'
+        "func main() {\n\tpkg.Do()\n}\n"
+    )
+    (repo / "pkg").mkdir()
+    (repo / "pkg" / "pkg.go").write_text("package pkg\n\nfunc Do() {}\n")
+    indexer.index(repo)
+    assert _edges(store, "IMPORTS") == []
+    import json
+    module = store.conn.execute(
+        "SELECT metadata_json FROM nodes WHERE type='Module' AND path='main.go'"
+    ).fetchone()
+    assert "github.com/other/pkg" in json.loads(module["metadata_json"])["external_imports"]
+
+
+def test_go_without_go_mod_stays_external(indexer, store, tmp_path: Path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "main.go").write_text(
+        'package main\n\nimport "example.com/foo/util"\n\n'
+        "func main() {\n\tutil.Helper()\n}\n"
+    )
+    (repo / "util").mkdir()
+    (repo / "util" / "helper.go").write_text("package util\n\nfunc Helper() {}\n")
+    indexer.index(repo)
+    assert _edges(store, "IMPORTS") == []
+
+
+def test_go_mod_module_directive_ignores_block_comments(indexer, store, tmp_path: Path):
+    """A commented-out `module` line inside a `/* ... */` block must not be
+    mistaken for the real directive."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "go.mod").write_text(
+        "/*\nmodule example.com/wrong\n*/\nmodule example.com/foo\n\ngo 1.21\n"
+    )
+    (repo / "main.go").write_text(
+        'package main\n\nimport "example.com/foo/util"\n\n'
+        "func main() {\n\tutil.Helper()\n}\n"
+    )
+    (repo / "util").mkdir()
+    (repo / "util" / "helper.go").write_text("package util\n\nfunc Helper() {}\n")
+    indexer.index(repo)
+    imports = {(e["source_qname"], e["target_qname"]) for e in _edges(store, "IMPORTS")}
+    assert ("main", "util/helper") in imports
+
+
+def test_go_import_target_deleted_edge_swept(indexer, store, tmp_path: Path):
+    """The importer file itself isn't reparsed, so its previously-resolved
+    edge lingers until the orphan-edge sweep removes it once the target node
+    is gone (same convergence contract as D16's CALLS pitfall)."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "go.mod").write_text("module example.com/foo\n")
+    (repo / "main.go").write_text(
+        'package main\n\nimport "example.com/foo/util"\n\n'
+        "func main() {\n\tutil.Helper()\n}\n"
+    )
+    (repo / "util").mkdir()
+    (repo / "util" / "helper.go").write_text("package util\n\nfunc Helper() {}\n")
+    indexer.index(repo)
+    assert ("main", "util/helper") in {
+        (e["source_qname"], e["target_qname"]) for e in _edges(store, "IMPORTS")
+    }
+    (repo / "util" / "helper.go").unlink()
+    indexer.index(repo)
+    assert _edges(store, "IMPORTS") == []
+
+
+def test_go_import_target_renamed_converges_on_reparse(indexer, store, tmp_path: Path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "go.mod").write_text("module example.com/foo\n")
+    (repo / "main.go").write_text(
+        'package main\n\nimport "example.com/foo/util"\n\n'
+        "func main() {\n\tutil.Helper()\n}\n"
+    )
+    (repo / "util").mkdir()
+    (repo / "util" / "helper.go").write_text("package util\n\nfunc Helper() {}\n")
+    indexer.index(repo)
+    (repo / "util" / "helper.go").unlink()
+    (repo / "util" / "helper2.go").write_text("package util\n\nfunc Helper() {}\n")
+    # touch the importer so it re-parses and recomputes its import edges
+    (repo / "main.go").write_text(
+        'package main\n\n// re-touched\nimport "example.com/foo/util"\n\n'
+        "func main() {\n\tutil.Helper()\n}\n"
+    )
+    indexer.index(repo)
+    imports = {(e["source_qname"], e["target_qname"]) for e in _edges(store, "IMPORTS")}
+    assert ("main", "util/helper2") in imports
+    assert not any(t == "util/helper" for _, t in imports)
+
+
+# -- Java import resolution (D19) ----------------------------------------------
+
+
+def test_java_internal_import_resolves_via_src_main_java(indexer, store, tmp_path: Path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    pkg = repo / "src" / "main" / "java" / "com" / "example"
+    (pkg / "util").mkdir(parents=True)
+    (pkg / "util" / "Helper.java").write_text(
+        "package com.example.util;\n\npublic class Helper {\n"
+        "    public static void greet() {}\n}\n"
+    )
+    (pkg / "App.java").write_text(
+        "package com.example;\n\nimport com.example.util.Helper;\n\n"
+        "public class App {\n    void run() { Helper.greet(); }\n}\n"
+    )
+    indexer.index(repo)
+    imports = {(e["source_qname"], e["target_qname"]) for e in _edges(store, "IMPORTS")}
+    assert (
+        "src/main/java/com/example/App",
+        "src/main/java/com/example/util/Helper",
+    ) in imports
+
+
+def test_java_wildcard_import_covers_every_file_in_package(indexer, store, tmp_path: Path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    pkg = repo / "src" / "main" / "java" / "com" / "example"
+    (pkg / "util").mkdir(parents=True)
+    (pkg / "util" / "Helper.java").write_text(
+        "package com.example.util;\n\npublic class Helper {}\n"
+    )
+    (pkg / "util" / "Other.java").write_text(
+        "package com.example.util;\n\npublic class Other {}\n"
+    )
+    (pkg / "App.java").write_text(
+        "package com.example;\n\nimport com.example.util.*;\n\n"
+        "public class App {\n    void run() { new Helper(); }\n}\n"
+    )
+    indexer.index(repo)
+    imports = {(e["source_qname"], e["target_qname"]) for e in _edges(store, "IMPORTS")}
+    assert ("src/main/java/com/example/App", "src/main/java/com/example/util/Helper") in imports
+    assert ("src/main/java/com/example/App", "src/main/java/com/example/util/Other") in imports
+
+
+def test_java_static_import_resolves_to_declaring_class(indexer, store, tmp_path: Path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    pkg = repo / "src" / "main" / "java" / "com" / "example"
+    (pkg / "util").mkdir(parents=True)
+    (pkg / "util" / "Constants.java").write_text(
+        "package com.example.util;\n\npublic class Constants {\n"
+        "    public static final int MAX = 10;\n}\n"
+    )
+    (pkg / "App.java").write_text(
+        "package com.example;\n\nimport static com.example.util.Constants.MAX;\n\n"
+        "public class App {\n    int limit() { return MAX; }\n}\n"
+    )
+    indexer.index(repo)
+    imports = {(e["source_qname"], e["target_qname"]) for e in _edges(store, "IMPORTS")}
+    assert (
+        "src/main/java/com/example/App",
+        "src/main/java/com/example/util/Constants",
+    ) in imports
+
+
+def test_java_ambiguous_source_roots_stay_external(indexer, store, tmp_path: Path):
+    """Two distinct `src/main/java` trees (a multi-module layout) make the
+    conventional root ambiguous; imports stay external rather than guessing
+    which tree the caller means (D19)."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    backend = repo / "backend" / "src" / "main" / "java" / "com" / "example"
+    backend.mkdir(parents=True)
+    (backend / "App.java").write_text(
+        "package com.example;\n\nimport com.other.Thing;\n\n"
+        "public class App {\n    void run() {}\n}\n"
+    )
+    frontend = repo / "frontend" / "src" / "main" / "java" / "com" / "other"
+    frontend.mkdir(parents=True)
+    (frontend / "Thing.java").write_text(
+        "package com.other;\n\npublic class Thing {}\n"
+    )
+    indexer.index(repo)
+    assert _edges(store, "IMPORTS") == []
+    import json
+    module = store.conn.execute(
+        "SELECT metadata_json FROM nodes WHERE type='Module' "
+        "AND path='backend/src/main/java/com/example/App.java'"
+    ).fetchone()
+    assert "com.other.Thing" in json.loads(module["metadata_json"])["external_imports"]
+
+
+def test_java_without_conventional_root_stays_external(indexer, store, tmp_path: Path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "src").mkdir()
+    (repo / "src" / "Other.java").write_text(
+        "package other;\n\npublic class Other {}\n"
+    )
+    (repo / "src" / "App.java").write_text(
+        "import other.Other;\n\npublic class App {\n    void run() {}\n}\n"
+    )
+    indexer.index(repo)
+    assert _edges(store, "IMPORTS") == []
+
+
+def test_java_source_root_marker_matches_path_segments_not_substring(
+    indexer, store, tmp_path: Path,
+):
+    """A directory that merely *ends* in `...src` immediately followed by
+    `main/java/` (e.g. a vendored `thirdparty-src/main/java/` tree) must not
+    be mistaken for a real `src/main/java` root and must not poison
+    detection of the one legitimate root by looking ambiguous."""
+    from repobrain.parsers.code_treesitter import _detect_java_source_roots
+
+    known = frozenset({
+        "backend/src/main/java/com/example/App.java",
+        "thirdparty-src/main/java/com/other/Thing.java",
+    })
+    roots = _detect_java_source_roots(known)
+    assert roots["main"] == "backend/src/main/java/"
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    pkg = repo / "backend" / "src" / "main" / "java" / "com" / "example"
+    (pkg / "util").mkdir(parents=True)
+    (pkg / "util" / "Helper.java").write_text(
+        "package com.example.util;\n\npublic class Helper {}\n"
+    )
+    (pkg / "App.java").write_text(
+        "package com.example;\n\nimport com.example.util.Helper;\n\n"
+        "public class App {\n    void run() { new Helper(); }\n}\n"
+    )
+    (repo / "thirdparty-src" / "main" / "java" / "com" / "other").mkdir(parents=True)
+    (
+        repo / "thirdparty-src" / "main" / "java" / "com" / "other" / "Thing.java"
+    ).write_text("package com.other;\n\npublic class Thing {}\n")
+    indexer.index(repo)
+    imports = {(e["source_qname"], e["target_qname"]) for e in _edges(store, "IMPORTS")}
+    assert (
+        "backend/src/main/java/com/example/App",
+        "backend/src/main/java/com/example/util/Helper",
+    ) in imports
+
+
+def test_java_import_target_deleted_edge_swept(indexer, store, tmp_path: Path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    pkg = repo / "src" / "main" / "java" / "com" / "example"
+    (pkg / "util").mkdir(parents=True)
+    (pkg / "util" / "Helper.java").write_text(
+        "package com.example.util;\n\npublic class Helper {}\n"
+    )
+    (pkg / "App.java").write_text(
+        "package com.example;\n\nimport com.example.util.Helper;\n\n"
+        "public class App {\n    void run() { new Helper(); }\n}\n"
+    )
+    indexer.index(repo)
+    assert ("src/main/java/com/example/App", "src/main/java/com/example/util/Helper") in {
+        (e["source_qname"], e["target_qname"]) for e in _edges(store, "IMPORTS")
+    }
+    (pkg / "util" / "Helper.java").unlink()
+    indexer.index(repo)
+    assert _edges(store, "IMPORTS") == []
+    assert not is_test_file("src/testimonials.js")

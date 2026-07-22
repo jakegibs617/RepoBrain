@@ -1,7 +1,6 @@
 # Next Session Prompt
 
-Copy-paste the prompt below to start the Go/Java internal import resolution
-milestone.
+Copy-paste the prompt below to start the INSTANTIATES-edges + orphaned-EnvVar-sweep milestone.
 
 ```text
 You are continuing work on RepoBrain, a local-first second brain for AI
@@ -10,93 +9,126 @@ per feat/ branch, merge only when the full pytest suite passes and all
 confirmed /code-review findings are fixed.
 
 Start by reading AGENT_HANDOFF.md (especially Known Pitfalls) and
-DECISIONS.md D15, D16, D19, and D30, then repobrain/parsers/code_treesitter.py
-(_GoExtractor and _JavaExtractor, and _PythonExtractor._resolve_module for
-the pattern first-class languages already use), repobrain/indexing/
-indexer.py (the begin_run(known_paths) hook parsers use for cross-file
-resolution), and the existing Go/Java coverage in tests/test_code_parser.py.
+DECISIONS.md D16 (CALLS confidence ladder) and D17 (EnvVar repo-global
+identity), then repobrain/parsers/code_treesitter.py (`_add_call_edge`,
+`_resolve_plain_call`/`_resolve_self_call`, `CodeParser.finish_run`'s
+cross-file name-match pass, and `_extract_env`/EnvVar handling), and
+repobrain/graph/store.py (`delete_orphan_edges`, and the indexer's
+`_cleanup_directories` liveness-sweep pattern in
+repobrain/indexing/indexer.py). Also note: `EdgeType.INSTANTIATES` already
+exists in repobrain/graph/schema.py — it has never been emitted by any
+extractor, so this milestone activates a reserved-but-unused vocabulary
+slot rather than adding a new one.
 
-Your milestone: resolve Go and Java internal (same-module/same-project)
-imports to real Module IMPORTS Module edges, the way Python/JS/TS/Ruby/PHP
-already do (D15), instead of recording every Go/Java import as
-`external_imports` metadata regardless of whether it points inside the
-repository. This is the last open question from Milestone 3 (see
-AGENT_HANDOFF.md "Open Questions").
+Your milestone has two parts, both small precision/graph-hygiene gaps
+carried since Milestone 3 (see AGENT_HANDOFF.md "Open Questions"):
 
-Implement:
-1. Go: locate and parse `go.mod` (module directive) if present at or above
-   the indexed root to learn the module's import path prefix. Resolve an
-   import whose path starts with that prefix to the scanned .go file(s)
-   under the corresponding relative directory (Go packages are
-   directories, not single files — an import resolves to a package, which
-   may contain multiple files; decide and document how CodeParser's
-   existing Module-per-file model represents "imports this package" when
-   multiple files satisfy it, favoring precision over guessing a single
-   file). Without a `go.mod` (or an import outside its module path),
-   continue to record the import as external metadata exactly as today —
-   do not guess a fake root.
-2. Java: resolve imports against the scanned file set using the standard
-   `groupId`-agnostic convention that a fully-qualified import
-   `com.example.pkg.ClassName` maps to `.../com/example/pkg/ClassName.java`
-   relative to a source root. Detect the source root deterministically
-   (e.g. the first `src/main/java`-style conventional prefix found among
-   scanned .java files, falling back to package-declaration-derived
-   stripping — pick one precise, documented rule; do not heuristically
-   guess between multiple candidate roots when the scanned tree is
-   ambiguous, matching this codebase's existing precision-over-recall
-   stance). Unresolvable imports (external libraries, ambiguous roots)
-   remain external metadata, exactly as today.
-3. Reuse the existing `begin_run(known_files)` / resolved-import-edge
-   pattern (D15) rather than inventing a new mechanism; internal resolution
-   must stay a metadata-driven, deterministic id computation like Python's
-   `_resolve_module`, not a filesystem probe at parse time (parsers don't
-   have filesystem access mid-parse by design — check how Python/JS do it
-   before reaching for `os.path`).
-4. Add fixtures and tests mirroring the existing Python/JS import-resolution
-   tests: resolved same-module import becomes an edge; an import outside
-   the module/source root stays external; an ambiguous Java multi-root case
-   is documented as unresolved rather than guessed; incremental re-indexing
-   converges when a target file is added, renamed, or removed (existing
-   orphan-edge sweep must still clean up dangling targets, per
-   "Known Pitfalls").
-5. Update the language-support table in README.md and D15/D19 in
-   DECISIONS.md to reflect the new Go/Java behavior precisely (what
-   resolves, what still doesn't, and why).
+## Part 1 — INSTANTIATES edges for constructor calls
+
+`ClassName()` call expressions are currently indistinguishable from any
+other bare call and are skipped for precision (D16). Mirror the existing
+CALLS confidence ladder exactly, using the same resolution machinery
+already in code_treesitter.py rather than inventing new logic:
+
+1. When a bare call's callee name resolves to a known Class (same-file via
+   `classes_by_name`, or import-qualified via `module_aliases`/
+   `symbol_aliases`), emit `Function/Method/Module INSTANTIATES Class` at
+   confidence 0.9, `is_inferred=0` — the same observed tier as same-file/
+   import-qualified CALLS.
+2. Remaining bare calls whose name matches a Class only by name (not
+   resolved via same-file/import) go through `finish_run`'s existing
+   post-index batched-candidate-lookup pass (the one that already resolves
+   CALLS by exactly-one-global-match): extend it, or add a parallel pass
+   reusing its batching pattern (chunked `name IN (...)`, not one query per
+   name — see D30), so a name that resolves to exactly one Class in the
+   whole graph becomes an INSTANTIATES edge at confidence 0.7,
+   `is_inferred=1`, `inference_reason="name-match"`. Ambiguous names create
+   nothing.
+3. Do not double-emit: a callee name that resolves to both a Class and a
+   Function/Method (e.g. a factory function shadowing a class name) must
+   pick one deterministically and document the rule — don't guess or emit
+   both.
+4. Decide and document whether Python/JS/PHP/Ruby/Go/Java all get this (the
+   PRD's call-resolution scope already covers all of them for CALLS) or
+   whether language-specific constructor syntax differences (e.g. Go has no
+   `new ClassName()` scanned distinctly — struct literals like
+   `Foo{}`/`&Foo{}` are a different tree-sitter shape than a call
+   expression) mean some languages stay out of scope for now; precision
+   over recall — an unsupported language's constructor calls should do
+   nothing, not guess.
+5. Add tests mirroring the existing CALLS test shapes in
+   tests/test_code_parser.py: same-file resolved INSTANTIATES at 0.9,
+   cross-file unique-name-match inferred at 0.7, ambiguous name skipped,
+   and incremental convergence (a class added/renamed/removed updates or
+   orphans the edge via the existing orphan-edge sweep, same as CALLS/
+   IMPORTS already do — no new cleanup mechanism should be needed).
+6. Impact analysis / data-flow queries in repobrain/graph/queries.py may or
+   may not need to surface INSTANTIATES depending on what "safer changes"
+   value it adds — investigate whether `impact_analysis`/`explain file`
+   should include instantiation evidence the way they include CALLS, or
+   whether that's premature; make a documented call either way.
+
+## Part 2 — Sweep orphaned EnvVar nodes
+
+D17 documents that `EnvVar` nodes (id keyed on `("EnvVar", name, "")`) are
+deliberately excluded from path-based cleanup so a single reader's deletion
+never destroys the shared node — but this means an EnvVar whose *last*
+`READS_ENV` edge disappears (e.g. the only file reading `STRIPE_KEY` is
+deleted or edited to stop reading it) lingers forever as an edgeless node.
+
+1. Add a bounded sweep — analogous to the existing Directory-liveness sweep
+   in `Indexer._cleanup_directories` and `GraphStore.delete_orphan_edges` —
+   that removes `EnvVar` nodes with zero incoming `READS_ENV` edges. Decide
+   where it runs (inside the index transaction, after `delete_orphan_edges`
+   so edge cleanup has already happened, is the natural spot — verify against
+   Known Pitfalls' ordering constraints) and whether it needs to run on
+   every index (cheap: bounded `SELECT` for EnvVar nodes with no matching
+   edge, likely a handful of rows even at scale) or only when env-reading
+   files changed.
+2. Add tests: an EnvVar's last reader is deleted → node is swept; an
+   EnvVar's last reader stops reading it (file edited) → node is swept; an
+   EnvVar with multiple readers loses one → node survives; a fresh EnvVar
+   with no readers yet (shouldn't be reachable via current extraction, but
+   verify the sweep doesn't need one to exist first) doesn't crash anything.
+3. Confirm this doesn't reintroduce a per-row query loop at scale (D30) —
+   one bounded `SELECT`/`DELETE` pair covering all orphaned EnvVars in one
+   run, not one query per node.
 
 Constraints:
 - No hosted API, model, embeddings, network, Docker, or external service.
-  No `go` or `java`/`javac` toolchain invocation — resolution is path/text
-  based against `go.mod`/package declarations and the scanned file set only,
-  the same way every other language in this codebase resolves imports.
-- Precision over recall: an ambiguous or unresolvable import must remain
-  external metadata, never a guessed or dangling edge.
-- Do not weaken existing Python/JS/TS/PHP/Ruby import resolution, the
-  orphan-edge sweep, or any scale-hardening invariant from D30 (e.g. don't
-  reintroduce a per-file query in begin_run/finish_run when a batched
-  approach already exists for the equivalent Python/JS case).
+- Precision over recall: an ambiguous constructor-name match must not
+  create a guessed edge, matching CALLS' existing rule exactly.
+- Do not weaken any existing CALLS/IMPORTS resolution, the orphan-edge
+  sweep, or any D30 scale-hardening invariant (no per-row queries in
+  begin_run/finish_run/the transaction where a batched approach is
+  available).
 - Do not push or publish without explicit user permission.
+- When running the full pytest suite from a worktree, remember the primary
+  repo's `.venv` is an editable install pinned to the primary repo's own
+  path — run with `PYTHONPATH` pointed at the checkout under test (see
+  AGENT_HANDOFF.md Known Pitfalls), or you will silently test stale code.
 
 When done, run the full suite, run /code-review and fix confirmed findings,
-update AGENT_HANDOFF.md and DECISIONS.md with what resolves and what
-doesn't (evidence-based, with example resolved/unresolved cases), report
-test results, and rewrite this file for the next highest-priority milestone
-(re-evaluate the product-direction and engineering-follow-up backlog in
-AGENT_HANDOFF.md — after this, no open items remain from the original list,
-so use your judgment on what serves the PRD's product goals next: candidates
-include the orphaned-EnvVar-node sweep open question, INSTANTIATES edges for
-`ClassName()` calls, or revisiting the deliberate embeddings/multi-repo
-non-goals now that the milestone loop has substantial delivery evidence
-behind it).
+update AGENT_HANDOFF.md and DECISIONS.md (a new D-numbered entry) with what
+was implemented and any documented scope decisions (which languages get
+INSTANTIATES, whether impact analysis surfaces it, sweep timing), and
+rewrite this file for the next highest-priority milestone. If no further
+open items remain and no small carried-over gap is a clear next step, use
+your judgment against the PRD's product goals (§6.2) — the deliberate
+embeddings/multi-repo non-goals are flagged in AGENT_HANDOFF.md as a
+candidate for a dedicated planning pass rather than this loop's next
+cadence by default; revisit that framing if it still seems right, or
+propose otherwise with reasoning.
 ```
 
 ## Scoping notes
 
-- This closes the last open question carried since Milestone 3
-  (AGENT_HANDOFF.md "Open Questions": "Go/Java internal import resolution
-  (needs go.mod / package-root awareness)").
-- Keep the same precision-first posture as every other D15 resolution rule:
-  when in doubt, leave it as external metadata rather than emit a wrong or
-  guessed edge.
-- Ruby's `require_relative` resolution is a much simpler existing pattern
-  (relative paths only, no module/root inference) — Go/Java need a real
-  root-detection step first, which is the actual new work here.
+- Both parts reuse existing, already-proven machinery (CALLS' confidence
+  ladder and batched cross-file resolution; the orphan/liveness sweep
+  pattern) rather than introducing new mechanisms — keep it that way.
+- `EdgeType.INSTANTIATES` is already defined in `repobrain/graph/schema.py`
+  and unused; this milestone is the first thing to emit it.
+- Keep the two parts in one milestone/branch since both are small,
+  low-risk, and in the same "close a documented D-series gap" spirit, but
+  they are logically independent — implement and test them separately so a
+  problem in one doesn't block landing the other.
