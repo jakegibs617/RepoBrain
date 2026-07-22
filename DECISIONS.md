@@ -828,3 +828,124 @@ get leaked into by the existing bare-call ladder.
 - No changes to `impact_analysis`/`trace_data_flow`/`explain_file` query
   surfacing — D32 already wired `INSTANTIATES` into all three; this
   milestone only adds more edges of a type they already traverse.
+
+## 2026-07-22 — Java qualified call resolution
+
+### D34: `ClassName.staticMethod()` resolves same-file and import-qualified via name-registry lookup, not grammar shape; `someVar.method()` stays out of scope for good, confirmed by parse probe, not assumed
+
+D33 named Java's `method_invocation` gap explicitly as carried-over scope:
+every other first-class-or-better language routes bare and qualified calls
+through the shared `_resolve_plain_call`/`_resolve_module_attr_call`
+ladder, but `_JavaExtractor._extract_calls` only ever called
+`_resolve_self_call` for a bare or `this`-qualified invocation — any other
+`object` (`someVar.method()`, `ClassName.staticMethod()`,
+`importedAlias.method()`) produced nothing.
+
+**The investigation, first.** A real tree-sitter parse-tree probe (not
+assumption, matching D32's Go-exclusion discipline and D33's field
+verification) confirmed the grammar shape before any resolution code was
+written: a Java `method_invocation`'s `object` field is a bare `identifier`
+node for both `someVar.method()` and `ClassName.staticMethod()` —
+tree-sitter's Java grammar does **not** syntactically distinguish a
+variable-qualified call from a class-qualified one. (`this.method()` is its
+own `this` node type, already handled; `pkg.Class.method()` and
+`obj.field.method()` are `field_access` objects; `getFoo().method()` is a
+`method_invocation` object; `arr[0].method()` is `array_access` — all
+distinguishable by node type, all still out of scope, see below.)
+
+Given that, grammar shape alone cannot drive the decision — but the milestone
+spec's "not distinguishable" bar was specifically about avoiding a
+*capitalization/naming-convention heuristic* (`if identifier looks like a
+ClassName, assume it's one` — a real guess, since Java has no rule that a
+variable can't be named like a class). That heuristic was rejected. What
+was implemented instead is a **name-registry check** — `classes_by_name`/
+`symbol_aliases`, the exact same registries every other resolution tier of
+this codebase already trusts (D16's whole CALLS ladder is itself built on
+"is this name known to be X", never true type information). This is not a
+new risk tier: it's the same established precision model, applied to one
+more callee shape.
+
+**What resolves.**
+
+1. **Same-file**: `ClassName.staticMethod()` where `ClassName` is a class
+   defined in the same file resolves via `classes_by_name.get(prefix)` then
+   `self.methods[(class.qualified_name, name)]` — the identical target dict
+   `_resolve_self_call` already uses, factored into a new shared
+   `_Extractor._resolve_method_in_class(class_qname, name, ts, resolution)`
+   helper so the two call sites (enclosing-class lookup vs named-class
+   lookup) share one lookup-and-emit implementation, not two copies.
+   Confidence 0.9, `is_inferred=0`, resolution label `"same-file"`.
+2. **Import-qualified**: `import com.example.pkg.Foo;` now also binds the
+   simple name `Foo` into `symbol_aliases[Foo] = (mod_qname, mod_path,
+   "Foo")` — the same shape Python's `from pkg import Symbol` already
+   populates, just with the imported symbol being a class. Only for a
+   single-target, non-wildcard, non-static import (`len(targets) == 1`);
+   wildcard imports don't bind one name, and `import static
+   pkg.Class.member;` binds `member`, a different name in a different
+   position, not the class. `Foo.staticMethod()` then queues a
+   `_PendingImportCall` with `func_target_id = node_id(NodeType.METHOD,
+   f"{mod_qname}.{symbol}.{name}", mod_path)` — a Method one level deeper
+   than the Function/Class target ids `_resolve_plain_call`'s own
+   symbol_aliases tier builds for a bare imported name, since here `name`
+   is a member of the already-resolved class, not a top-level module
+   symbol. `_resolve_pending_import_calls`'s existence check already
+   accepted both `"Function"` and `"Method"` node types (pre-dates this
+   milestone), so no change was needed there. Resolved through the existing
+   batched `finish_run` check, same as every other import-qualified call.
+3. **Bare invocation from a static context** (item 3 of the milestone
+   scoping): investigated, not a bug. `_resolve_self_call`'s
+   `self.methods[(class_qname, name)]` lookup doesn't distinguish static
+   from instance methods, so a bare call to a static method of the
+   enclosing class from another static method already resolved correctly
+   before this milestone; nothing to fix.
+
+**What stays out of scope, and why:**
+
+- `someVar.method()` where `someVar` is a local variable, parameter, or
+  field — the prefix simply isn't found in `classes_by_name` or
+  `symbol_aliases`, so it silently resolves to nothing. This needs the
+  variable's *declared type*, i.e. real type inference, which this
+  deterministic, tree-sitter-only, no-compiler codebase does not do
+  (D19/D30 precedent). Not guessed from the variable's name or its
+  assigned constructor's class.
+- An unresolved prefix (`SomeUnknown.method()`, a class from a package this
+  run never scanned) does **not** fall through to the cross-file
+  callee-name-only `_pending_calls`/`finish_run` fallback other bare calls
+  use. That fallback matches purely by method name, ignoring the prefix
+  entirely — queuing an unresolved-prefix qualified call into it would mean
+  a variable named `x` calling `x.process()` could pick up an unrelated
+  class's `process()` method anywhere in the graph just because the name is
+  globally unique, which is exactly the false-precision trap the milestone
+  spec warned against. Only prefix-resolved calls (same-file class or
+  import-qualified symbol alias) get an edge.
+- `pkg.Class.method()`/`a.b.method()` (`field_access` object),
+  `getFoo().method()` (chained `method_invocation` object), `arr[0].method()`
+  (`array_access` object), `super.method()`, lambda/method references
+  (`Foo::method`) — all a different, distinguishable tree-sitter shape than
+  the plain-`identifier` case this milestone covers, and none is a
+  low-risk trivial extension of it; left alone rather than forced.
+- A same-file class shadowed by a local variable of the identical simple
+  name (`Foo local = ...; Foo.method();` where `Foo` is also a real
+  same-file class) resolves against the class, same as every other
+  name-registry-based tier in this codebase already accepts as its
+  precision model — this codebase has never tracked local-variable scope to
+  detect shadowing for any language, and this milestone doesn't start.
+
+**Side effect (documented, not accidental scope creep):** binding an
+imported class's simple name into `symbol_aliases` also lets D33's `new
+ClassName(...)` constructor resolution — which already checks
+`symbol_aliases` via `_resolve_plain_call`'s `class_only=True` path —
+resolve an *imported* class, not just a same-file one, closing a gap D33
+explicitly left open ("Qualified/member constructors... a different
+tree-sitter shape... left out"). Covered by
+`test_java_qualified_call_import_qualified_constructor_bonus`.
+
+**Verification.** Full suite: 277 passed (272 baseline + 5 new tests),
+`PYTHONPATH` pointed at the worktree checkout per the known .venv pitfall.
+`/code-review` (medium effort) found no correctness bugs; two reuse
+findings were fixed by factoring `_resolve_method_in_class` out of
+`_resolve_self_call` and documenting why the `symbol_aliases`→
+`_PendingImportCall` construction in the new
+`_resolve_java_qualified_call` is a genuinely different target shape from
+`_resolve_plain_call`'s own symbol_aliases tier (Method-nested-in-class vs
+top-level Function/Class), not accidental duplication.
