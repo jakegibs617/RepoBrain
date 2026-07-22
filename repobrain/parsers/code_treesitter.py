@@ -11,6 +11,12 @@ Conventions (see DECISIONS.md D14–D18):
 - Internal imports become Module IMPORTS Module edges resolved against the
   set of scanned repo files; unresolvable/external imports are recorded in
   the module node's ``external_imports`` metadata, never as dangling nodes.
+  Go resolves against the module path declared in ``go.mod`` at the indexed
+  root (a bounded, one-time text read done once in ``begin_run``, not a Go
+  toolchain invocation); Java resolves fully-qualified imports against a
+  conventional ``src/main/java``/``src/test/java`` source root detected from
+  the scanned file set. See D15/D19 in DECISIONS.md for the precise rules
+  and their documented limits.
 - CALLS precision over recall: same-file / self.method() / import-qualified
   resolutions get confidence 0.9 (observed); cross-file name-only matches are
   added in a post-index pass with is_inferred=1, confidence 0.7,
@@ -29,6 +35,7 @@ import posixpath
 import re
 from dataclasses import dataclass
 from functools import lru_cache
+from pathlib import Path
 
 from ..graph.schema import Edge, EdgeType, FtsRow, Node, NodeType, node_id
 from .base import Parser, ParseResult
@@ -168,6 +175,100 @@ def default_module_qname(path: str) -> str:
     return root or path
 
 
+_GO_MODULE_RE = re.compile(r"^module\s+(\S+)")
+_GO_BLOCK_COMMENT_RE = re.compile(r"/\*.*?\*/", re.DOTALL)
+
+
+def _read_go_module_prefix(root: str | Path | None) -> str | None:
+    """Read the ``module`` directive from ``go.mod`` at the indexed root.
+
+    A single bounded text read done once per index run (analogous to the
+    indexer's own ``git rev-parse`` call), not a Go toolchain invocation and
+    not a filesystem probe during per-file parsing. Only ``go.mod`` located
+    exactly at the indexed root is honored (D19): a module whose ``go.mod``
+    lives in an ancestor directory outside the indexed root is not resolved,
+    matching this codebase's precision-over-recall stance rather than
+    guessing at a module boundary. Block comments (``/* ... */``) are
+    stripped before scanning so a commented-out ``module`` line can never be
+    mistaken for the real directive.
+    """
+    if root is None:
+        return None
+    go_mod = Path(root) / "go.mod"
+    try:
+        text = go_mod.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    text = _GO_BLOCK_COMMENT_RE.sub("", text)
+    for line in text.splitlines():
+        match = _GO_MODULE_RE.match(line.strip())
+        if match:
+            prefix = match.group(1).split("//", 1)[0].strip()
+            return prefix or None
+    return None
+
+
+_JAVA_SOURCE_SEGMENTS = {"main": ("src", "main", "java"), "test": ("src", "test", "java")}
+
+
+def _detect_java_source_roots(known_files: frozenset[str]) -> dict[str, str | None]:
+    """Detect the conventional Maven/Gradle ``src/main|test/java`` root(s).
+
+    Purely path-based over the scanned file set (no filesystem/content
+    access), mirroring how Python/JS resolve against ``known_files`` alone.
+    Matching is done on whole path segments (``"src/main/java".split("/")``
+    as a contiguous subsequence of ``path.split("/")``), not a raw substring
+    search — a directory that merely *ends* in ``...src`` immediately
+    followed by ``main/java/`` (e.g. ``thirdparty-src/main/java/``) must not
+    be mistaken for a real ``src/main/java`` root.
+    If a marker appears under more than one distinct prefix (e.g. a
+    multi-module monorepo with two ``src/main/java`` trees), that marker's
+    root is left ``None`` (ambiguous) rather than guessed — imports stay
+    external metadata in that case, per this codebase's precision-over-recall
+    stance (D19). The package-declaration-derived fallback mentioned as an
+    option for non-conventional layouts is intentionally not implemented: it
+    would require reading file content during ``begin_run`` (before any file
+    is parsed), which this codebase's parsers don't do.
+    """
+    candidates: dict[str, set[str]] = {"main": set(), "test": set()}
+    for f in known_files:
+        if not f.endswith(".java"):
+            continue
+        parts = f.split("/")
+        for kind, segments in _JAVA_SOURCE_SEGMENTS.items():
+            n = len(segments)
+            for i in range(len(parts) - n + 1):
+                if tuple(parts[i : i + n]) == segments:
+                    candidates[kind].add("/".join(parts[: i + n]) + "/")
+                    break  # first occurrence in this file is enough
+    return {
+        kind: next(iter(roots)) if len(roots) == 1 else None
+        for kind, roots in candidates.items()
+    }
+
+
+def _index_files_by_dir(
+    known_files: frozenset[str], suffix: str, exclude_suffix: str | None = None,
+) -> dict[str, list[str]]:
+    """Group scanned paths by directory for O(1) package-directory lookups.
+
+    Go/Java "resolve every file in this exact directory" import resolution
+    (D19) would otherwise re-scan the full ``known_files`` set per import
+    statement; this precomputes the grouping once in ``begin_run``, the same
+    place ``_java_source_roots``/``_go_module_prefix`` are computed, so
+    per-import resolution is a dict lookup regardless of corpus size (in the
+    spirit of D30's scale-hardening precedent against repeated full scans).
+    """
+    index: dict[str, list[str]] = {}
+    for f in known_files:
+        if not f.endswith(suffix):
+            continue
+        if exclude_suffix is not None and f.endswith(exclude_suffix):
+            continue
+        index.setdefault(posixpath.dirname(f), []).append(f)
+    return index
+
+
 @lru_cache(maxsize=None)
 def _ts_parser(grammar: str):
     from tree_sitter_language_pack import get_parser
@@ -206,14 +307,31 @@ class CodeParser(Parser):
     def __init__(self) -> None:
         self._known_files: frozenset[str] = frozenset()
         self._pending_calls: list[_PendingCall] = []
+        self._go_module_prefix: str | None = None
+        self._java_source_roots: dict[str, str | None] = {"main": None, "test": None}
+        self._go_dir_index: dict[str, list[str]] = {}
+        self._java_dir_index: dict[str, list[str]] = {}
 
     # -- indexer hooks -------------------------------------------------------
 
-    def begin_run(self, known_files: set[str]) -> None:
+    def begin_run(
+        self, known_files: set[str], root: str | Path | None = None,
+    ) -> None:
         """Called by the indexer with every scanned repo path (for import
-        resolution) before any file is parsed."""
+        resolution) before any file is parsed. ``root`` is the indexed repo
+        root; it is used only for the bounded ``go.mod`` read described in
+        ``_read_go_module_prefix`` (optional — omitting it just means Go
+        imports stay external metadata, as before this milestone)."""
         self._known_files = frozenset(known_files)
         self._pending_calls = []
+        self._go_module_prefix = _read_go_module_prefix(root)
+        self._java_source_roots = _detect_java_source_roots(self._known_files)
+        # Precomputed once per run so per-import resolution (D19) is a dict
+        # lookup, not a scan of the full known-files set per import spec.
+        self._go_dir_index = _index_files_by_dir(
+            self._known_files, ".go", exclude_suffix="_test.go",
+        )
+        self._java_dir_index = _index_files_by_dir(self._known_files, ".java")
 
     def finish_run(self, store) -> list[Edge]:
         """Cross-file name-only CALLS resolution (after nodes are upserted).
@@ -1513,8 +1631,43 @@ class _GoExtractor(_Extractor):
         for spec in captures.get("import.go", []):
             path_node = spec.child_by_field_name("path")
             value = self._string_value(path_node) if path_node is not None else None
-            if value:
+            if not value:
+                continue
+            line = spec.start_point[0] + 1
+            targets = self._resolve_go_import(value)
+            if targets:
+                for qname, path in targets:
+                    self._add_import_edge(qname, path, line)
+            else:
                 self.external_imports.add(value)
+
+    def _resolve_go_import(self, import_path: str) -> list[tuple[str, str]] | None:
+        """Resolve a Go import path to every non-test ``.go`` file in the
+        corresponding package directory (D19).
+
+        Go imports name a package (a directory), not a single file, and a
+        package commonly spans multiple files; rather than guess which file
+        the caller means, an internal import resolves to *every* file-Module
+        in that exact directory (no recursion — Go packages are one
+        directory each). ``_test.go`` files are excluded as targets because
+        an external package cannot import another package's test files.
+        Returns ``None`` (stays external metadata) when the module prefix is
+        unknown or the import falls outside it — never a guessed target.
+        """
+        module = self.parser._go_module_prefix
+        if not module:
+            return None
+        if import_path == module:
+            rel_dir = ""
+        elif import_path.startswith(f"{module}/"):
+            rel_dir = import_path[len(module) + 1 :]
+        else:
+            return None
+        matches = [
+            (default_module_qname(f), f)
+            for f in self.parser._go_dir_index.get(rel_dir, [])
+        ]
+        return matches or None
 
     def _extract_calls(self, captures: dict[str, list]) -> None:
         for call in captures.get("call", []):
@@ -1533,8 +1686,58 @@ class _JavaExtractor(_Extractor):
     def _extract_imports(self, captures: dict[str, list]) -> None:
         for imp in captures.get("import.java", []):
             text = self._text(imp).removeprefix("import").strip(" ;")
-            if text:
+            if not text:
+                continue
+            line = imp.start_point[0] + 1
+            dotted = text
+            if dotted.startswith("static "):
+                # `import static pkg.Class.member;` — the resolvable target
+                # is the class, not the individual static member.
+                dotted = dotted[len("static "):].strip()
+                dotted = dotted.rsplit(".", 1)[0] if "." in dotted else dotted
+            wildcard = dotted.endswith(".*")
+            if wildcard:
+                dotted = dotted[:-2]
+            targets = self._resolve_java_import(dotted, wildcard)
+            if targets:
+                for qname, path in targets:
+                    self._add_import_edge(qname, path, line)
+            else:
                 self.external_imports.add(text)
+
+    def _resolve_java_import(
+        self, dotted: str, wildcard: bool,
+    ) -> list[tuple[str, str]] | None:
+        """Resolve a fully-qualified Java import against the detected
+        conventional source root(s) (D19).
+
+        `com.example.pkg.ClassName` maps to
+        `<source-root>/com/example/pkg/ClassName.java`. A wildcard
+        (`import com.example.pkg.*;`) mirrors Go's multi-file package
+        handling: it resolves to every `.java` file directly in that package
+        directory (non-recursive) rather than guessing a single class.
+        Checks the `main` root before `test` (imports of test-only classes
+        from production code are not a real Java scenario, but a test file
+        importing another test-tree class still resolves).
+        """
+        roots = self.parser._java_source_roots
+        for kind in ("main", "test"):
+            root = roots.get(kind)
+            if not root:
+                continue
+            if wildcard:
+                pkg_dir = f"{root}{dotted.replace('.', '/')}".rstrip("/")
+                matches = [
+                    (default_module_qname(f), f)
+                    for f in self.parser._java_dir_index.get(pkg_dir, [])
+                ]
+                if matches:
+                    return matches
+            else:
+                candidate = f"{root}{dotted.replace('.', '/')}.java"
+                if candidate in self.known:
+                    return [(default_module_qname(candidate), candidate)]
+        return None
 
     def _extract_calls(self, captures: dict[str, list]) -> None:
         for call in captures.get("call", []):

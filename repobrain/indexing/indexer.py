@@ -83,12 +83,16 @@ class Indexer:
         stats.files_deleted = len(diff.deleted)
 
         # Parsers that resolve cross-file references (e.g. imports) get the
-        # full set of scanned paths before any file is parsed.
+        # full set of scanned paths before any file is parsed. `root` is also
+        # passed for parsers that need one small bounded manifest read (e.g.
+        # CodeParser reading go.mod for Go module-path resolution, D19) — it
+        # is not "filesystem access mid-parse" since it happens once here,
+        # before per-file parsing starts.
         known_paths = {f.path for f in scanned}
         for parser in self.registry.all():
             begin = getattr(parser, "begin_run", None)
             if begin is not None:
-                begin(known_paths)
+                begin(known_paths, root)
 
         combined = ParseResult()
         combined.warnings.extend(diff.warnings)
