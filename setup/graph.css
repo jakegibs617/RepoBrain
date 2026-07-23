@@ -14,7 +14,8 @@
 .canvas-wrap { position: relative; min-width: 0; background-color: #202821; background-image: radial-gradient(#354138 1px, transparent 1px); background-size: 20px 20px; }
 #graph-canvas { display: block; width: 100%; height: 680px; cursor: grab; } #graph-canvas.dragging { cursor: grabbing; }
 .canvas-hint { position: absolute; left: 17px; bottom: 15px; padding: 7px 10px; border-radius: 3px; color: #aab5ac; background: rgba(21,27,22,.82); font-size: 8px; text-transform: uppercase; letter-spacing: .09em; pointer-events: none; }
-#graph-empty { position: absolute; inset: 0; display: grid; place-items: center; color: #cbd4cc; font-size: 12px; }
+#graph-empty { position: absolute; inset: 0; display: grid; place-items: center; color: #cbd4cc; font-size: 12px; pointer-events: none; }
+#graph-empty[hidden] { display: none; }
 .node-inspector { padding: 28px 25px; border-left: 1px solid var(--line); overflow: auto; }
 .inspector-empty { min-height: 100%; display: flex; flex-direction: column; align-items: center; justify-content: center; text-align: center; }.inspector-empty > span { width: 42px; height: 42px; display: grid; place-items: center; border-radius: 50%; color: var(--ink); background: var(--yellow); }.inspector-empty h2 { margin: 14px 0 5px; font-size: 17px; }.inspector-empty p { max-width: 190px; margin: 0; color: var(--muted); font-size: 9px; line-height: 1.6; }
 .node-kind { display: flex; align-items: center; gap: 7px; color: var(--green); text-transform: uppercase; letter-spacing: .12em; font-size: 8px; font-weight: 700; }.node-kind i { width: 8px; height: 8px; border-radius: 50%; }

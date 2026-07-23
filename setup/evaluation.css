@@ -6,7 +6,7 @@
 .release-gauge { position: relative; flex: 0 0 178px; height: 178px; display: grid; place-items: center; }
 .release-gauge svg { position: absolute; inset: 0; transform: rotate(-90deg); }
 .release-gauge circle { fill: none; stroke-width: 7; }
-.gauge-track { stroke: var(--line); }.gauge-value { stroke: var(--green); stroke-dasharray: 40 100; stroke-linecap: round; }
+.gauge-track { stroke: var(--line); }.gauge-value { stroke: var(--green); stroke-dasharray: 100 100; stroke-linecap: round; }
 .release-gauge > div { text-align: center; }.release-gauge strong { display: block; font-size: 35px; letter-spacing: -.06em; }.release-gauge strong span { color: var(--muted); font-size: 15px; }
 .release-gauge small { color: var(--muted); font-size: 9px; text-transform: uppercase; letter-spacing: .12em; line-height: 1.5; }
 .verified-line { margin-top: 42px; padding-top: 20px; border-top: 1px solid var(--line); color: var(--muted); font-size: 10px; text-transform: uppercase; letter-spacing: .1em; }

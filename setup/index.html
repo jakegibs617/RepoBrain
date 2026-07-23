@@ -20,6 +20,7 @@
           <a class="active" href="index.html">Setup</a>
           <a href="evaluation.html">Quality</a>
           <a href="graph.html">Graph</a>
+          <a href="#faq">FAQ</a>
         </nav>
         <span class="local-pill"><span></span> 100% local</span>
         <a class="ghost-link" href="../README.md">Read the docs <span aria-hidden="true">↗</span></a>
@@ -42,16 +43,17 @@
         <aside class="step-nav">
           <div class="progress-track"><span id="progress-line"></span></div>
           <button class="step-link active" data-step="1"><span>1</span><b>Check prerequisites</b><small>Python and uv</small></button>
-          <button class="step-link" data-step="2"><span>2</span><b>Build the graph</b><small>One uvx command, no install</small></button>
-          <button class="step-link" data-step="3"><span>3</span><b>Connect your agent</b><small>Add the MCP server</small></button>
-          <button class="step-link" data-step="4"><span>4</span><b>Get oriented</b><small>Generate a session brief</small></button>
-          <button class="step-link" data-step="5"><span>5</span><b>Ask a question</b><small>Search your new memory</small></button>
+          <button class="step-link" data-step="2"><span>2</span><b>Get the shortcut</b><small>Install repobrain on your PATH</small></button>
+          <button class="step-link" data-step="3"><span>3</span><b>Build the graph</b><small>Index this project</small></button>
+          <button class="step-link" data-step="4"><span>4</span><b>Connect your agent</b><small>Add the MCP server</small></button>
+          <button class="step-link" data-step="5"><span>5</span><b>Get oriented</b><small>Generate a session brief</small></button>
+          <button class="step-link" data-step="6"><span>6</span><b>Ask a question</b><small>Search your new memory</small></button>
         </aside>
 
         <div class="steps">
           <article class="step-card" id="step-1" data-step="1">
             <div class="step-heading"><span>01</span><div><p>Prerequisites</p><h2>Make sure you’re ready</h2></div></div>
-            <p class="step-copy">RepoBrain needs Python 3.11 or newer and <a href="https://docs.astral.sh/uv/" target="_blank" rel="noreferrer">uv</a>, a fast Python package manager. There is nothing else to install — <code>uvx</code> runs RepoBrain in an isolated, throwaway environment on demand.</p>
+            <p class="step-copy">RepoBrain needs Python 3.11 or newer and <a href="https://docs.astral.sh/uv/" target="_blank" rel="noreferrer">uv</a>, a fast Python package manager. There's nothing to <code>pip install</code> by hand — <code>uv</code> handles isolated environments for you, either on demand each time or as a real installed command (next step).</p>
             <div class="platform-tabs" role="tablist" aria-label="Operating system">
               <button class="platform-tab active" data-platform="unix" role="tab" aria-selected="true">macOS / Linux</button>
               <button class="platform-tab" data-platform="windows" role="tab" aria-selected="false">Windows</button>
@@ -66,46 +68,57 @@ uv --version</span></code></pre>
           </article>
 
           <article class="step-card" id="step-2" data-step="2">
-            <div class="step-heading"><span>02</span><div><p>Index</p><h2>Build your knowledge graph</h2></div></div>
-            <p class="step-copy">From the project you want RepoBrain to understand, run one command. <code>uvx</code> fetches RepoBrain on the fly — no <code>pip install</code>, no virtualenv to manage — then scans the project and connects its files, symbols, imports, calls, tests, docs, and environment variables.</p>
-            <div class="command" data-command-unix="uvx repobrain index ." data-command-windows="uvx repobrain index .">
+            <div class="step-heading"><span>02</span><div><p>Shortcut</p><h2>Put <code>repobrain</code> on your <code>PATH</code></h2></div></div>
+            <p class="step-copy">RepoBrain isn't published to PyPI yet, so a bare <code>uvx repobrain</code> won't resolve on its own. Run this once with <code>uv tool install</code> and you get a real <code>repobrain</code> command — the same way <code>code</code> or <code>subl</code> work — so every command from here on stays short.</p>
+            <div class="command" data-command-unix="uv tool install --from git+https://github.com/jakegibs617/RepoBrain repobrain" data-command-windows="uv tool install --from git+https://github.com/jakegibs617/RepoBrain repobrain">
+              <div class="command-top"><span>Terminal · run once</span><button class="copy-btn" aria-label="Copy install command">Copy</button></div>
+              <pre><code><span class="prompt">$</span> <span class="command-text">uv tool install --from git+https://github.com/jakegibs617/RepoBrain repobrain</span></code></pre>
+            </div>
+            <div class="note"><span>i</span><p>Open a new terminal afterward. Not found? Run <code>uv tool update-shell</code> and try again. Refresh to the latest commit any time with the same command plus <code>--reinstall</code>; remove it with <code>uv tool uninstall repobrain</code>. Skipping this step is fine too — just prefix every command below with <code>uvx --from git+https://github.com/jakegibs617/RepoBrain</code> instead of plain <code>uvx</code>.</p></div>
+            <button class="complete-btn"><span>✓</span> Mark complete</button>
+          </article>
+
+          <article class="step-card" id="step-3" data-step="3">
+            <div class="step-heading"><span>03</span><div><p>Index</p><h2>Build your knowledge graph</h2></div></div>
+            <p class="step-copy">From the project you want RepoBrain to understand, run one command. It scans the project and connects its files, symbols, imports, calls, tests, docs, and environment variables.</p>
+            <div class="command" data-command-unix="repobrain index ." data-command-windows="repobrain index .">
               <div class="command-top"><span>Terminal · project root</span><button class="copy-btn" aria-label="Copy index command">Copy</button></div>
-              <pre><code><span class="prompt">$</span> <span class="command-text">uvx repobrain index .</span></code></pre>
+              <pre><code><span class="prompt">$</span> <span class="command-text">repobrain index .</span></code></pre>
             </div>
             <p class="microcopy">Your graph lives in <code>.repobrain/repobrain.sqlite</code> inside the project. Nothing leaves your machine, and re-running this command later only re-parses what changed.</p>
             <button class="complete-btn"><span>✓</span> Mark complete</button>
           </article>
 
-          <article class="step-card" id="step-3" data-step="3">
-            <div class="step-heading"><span>03</span><div><p>Connect</p><h2>Give your agent MCP tools</h2></div></div>
+          <article class="step-card" id="step-4" data-step="4">
+            <div class="step-heading"><span>04</span><div><p>Connect</p><h2>Give your agent MCP tools</h2></div></div>
             <p class="step-copy">This is the actual point of RepoBrain: your AI coding agent gets first-class access to the graph you just built. One command writes a repository-scoped <code>.mcp.json</code> entry, a marker-owned <code>CLAUDE.md</code> section, and (for Claude Code) an idempotent SessionStart hook.</p>
-            <div class="command" data-command-unix="uvx repobrain install-agent ." data-command-windows="uvx repobrain install-agent .">
+            <div class="command" data-command-unix="repobrain install-agent ." data-command-windows="repobrain install-agent .">
               <div class="command-top"><span>Terminal · project root</span><button class="copy-btn" aria-label="Copy install-agent command">Copy</button></div>
-              <pre><code><span class="prompt">$</span> <span class="command-text">uvx repobrain install-agent .</span></code></pre>
+              <pre><code><span class="prompt">$</span> <span class="command-text">repobrain install-agent .</span></code></pre>
             </div>
-            <div class="note"><span>i</span><p>Add <code>--git-hooks</code> to also keep the index fresh after every commit and merge. Restart your agent client afterward, then confirm the tools are registered with <code>cat .mcp.json</code>. Run <code>uvx repobrain uninstall-agent .</code> any time to remove only RepoBrain-owned entries.</p></div>
+            <div class="note"><span>i</span><p>Add <code>--git-hooks</code> to also keep the index fresh after every commit and merge. Restart your agent client afterward, then confirm the tools are registered with <code>cat .mcp.json</code>. Run the same command with <code>uninstall-agent .</code> any time to remove only RepoBrain-owned entries.</p></div>
             <button class="complete-btn"><span>✓</span> Mark complete</button>
           </article>
 
-          <article class="step-card" id="step-4" data-step="4">
-            <div class="step-heading"><span>04</span><div><p>Orient</p><h2>Generate a session brief</h2></div></div>
+          <article class="step-card" id="step-5" data-step="5">
+            <div class="step-heading"><span>05</span><div><p>Orient</p><h2>Generate a session brief</h2></div></div>
             <p class="step-copy">A stale or silent knowledge base doesn’t help anyone. <code>brief</code> produces a token-budgeted orientation pack — purpose, subsystems, entrypoints, open assumptions, and recent memory — grounded entirely in what was just indexed, not a guess.</p>
-            <div class="command" data-command-unix="uvx repobrain brief --budget 2000" data-command-windows="uvx repobrain brief --budget 2000">
+            <div class="command" data-command-unix="repobrain brief --budget 2000" data-command-windows="repobrain brief --budget 2000">
               <div class="command-top"><span>Terminal</span><button class="copy-btn" aria-label="Copy brief command">Copy</button></div>
-              <pre><code><span class="prompt">$</span> <span class="command-text">uvx repobrain brief --budget 2000</span></code></pre>
+              <pre><code><span class="prompt">$</span> <span class="command-text">repobrain brief --budget 2000</span></code></pre>
             </div>
             <p class="microcopy">Once <code>install-agent</code> has run, a compatible agent client gets this automatically at session start — you shouldn’t need to run it by hand day to day.</p>
             <button class="complete-btn"><span>✓</span> Mark complete</button>
           </article>
 
-          <article class="step-card final-card" id="step-5" data-step="5">
-            <div class="step-heading"><span>05</span><div><p>Explore</p><h2>Ask your first question</h2></div></div>
+          <article class="step-card final-card" id="step-6" data-step="6">
+            <div class="step-heading"><span>06</span><div><p>Explore</p><h2>Ask your first question</h2></div></div>
             <p class="step-copy">Search the indexed project, look up a symbol, or ask RepoBrain to explain a file — the same graph facts your agent's MCP tools now use.</p>
-            <div class="command" data-command-unix="uvx repobrain search &quot;database&quot;&#10;uvx repobrain find-symbol create_user&#10;uvx repobrain explain file repobrain/cli.py" data-command-windows="uvx repobrain search &quot;database&quot;&#10;uvx repobrain find-symbol create_user&#10;uvx repobrain explain file repobrain/cli.py">
+            <div class="command" data-command-unix="repobrain search &quot;database&quot;&#10;repobrain find-symbol create_user&#10;repobrain explain file repobrain/cli.py" data-command-windows="repobrain search &quot;database&quot;&#10;repobrain find-symbol create_user&#10;repobrain explain file repobrain/cli.py">
               <div class="command-top"><span>Try one—or all three</span><button class="copy-btn" aria-label="Copy example commands">Copy</button></div>
-              <pre><code><span class="prompt">$</span> <span class="command-text">uvx repobrain search "database"
-uvx repobrain find-symbol create_user
-uvx repobrain explain file repobrain/cli.py</span></code></pre>
+              <pre><code><span class="prompt">$</span> <span class="command-text">repobrain search "database"
+repobrain find-symbol create_user
+repobrain explain file repobrain/cli.py</span></code></pre>
             </div>
             <div class="finish-banner">
               <div class="finish-icon">✦</div>
@@ -114,6 +127,55 @@ uvx repobrain explain file repobrain/cli.py</span></code></pre>
             </div>
             <button class="complete-btn"><span>✓</span> Finish setup</button>
           </article>
+        </div>
+      </section>
+
+      <section class="faq" id="faq">
+        <div class="faq-heading">
+          <div class="eyebrow"><span>FAQ</span> Common questions</div>
+          <h2>Straight answers, no hand-waving.</h2>
+          <p>RepoBrain is a graph of what your codebase actually is — not a summary someone (or something) wrote about it once and forgot to update.</p>
+        </div>
+        <div class="faq-list">
+          <details class="faq-item" open>
+            <summary>Does RepoBrain store an AI's interpretation of my code, or the actual code?</summary>
+            <div class="faq-answer">
+              <span class="faq-badge">The core design</span>
+              <p>Both, deliberately kept apart. Every fact in the graph — symbols, imports, calls, env reads — is re-parsed from source on every index run, tagged with a confidence score and which extractor produced it. Nothing here is a stale guess: unchanged files aren't even re-read, and changed ones are rebuilt from scratch.</p>
+              <p>Interpretation lives in its own lane. When your agent forms an opinion — a decision, an assumption, an open question — it can write that into the graph as its own node type, anchored to the exact file and line it's about. <code>repobrain memory verify</code> then rechecks every one of those anchors against current source and marks it <code>verified</code>, <code>drifted</code>, or <code>invalidated</code>. So the graph never lets an old assumption quietly pass as still-true fact.</p>
+            </div>
+          </details>
+          <details class="faq-item">
+            <summary>Does RepoBrain call an LLM or send my code anywhere?</summary>
+            <div class="faq-answer">
+              <p>No. Indexing, parsing, and search all run locally with no API keys and no network calls. The graph lives in a single SQLite file inside your project (<code>.repobrain/repobrain.sqlite</code>) and never leaves your machine unless you copy it yourself.</p>
+            </div>
+          </details>
+          <details class="faq-item">
+            <summary>Does the graph go stale as I keep coding?</summary>
+            <div class="faq-answer">
+              <p>Every read command checks freshness before answering — if source files changed since the last index, it re-indexes automatically (or refuses to answer, in strict mode) before returning anything. Re-indexing is incremental: only files whose content hash changed get re-parsed, so this stays fast even on large repos.</p>
+            </div>
+          </details>
+          <details class="faq-item">
+            <summary>Is RepoBrain on PyPI yet?</summary>
+            <div class="faq-answer">
+              <p>Not yet — it's still pre-release. Until it's published, run it straight from GitHub with <code>uvx --from git+https://github.com/jakegibs617/RepoBrain repobrain index .</code></p>
+              <p>Tired of typing the <code>--from git+…</code> part? That's what <a href="#step-2">step 2 above</a> is for — a one-time <code>uv tool install</code> that gives you a real <code>repobrain</code> command on your <code>PATH</code>, the same way <code>code</code> or <code>subl</code> work. See the <a href="../README.md#skip-typing-the-github-url-every-time">README</a> for an always-fresh alternative that skips the install step entirely.</p>
+            </div>
+          </details>
+          <details class="faq-item">
+            <summary>What languages does it understand?</summary>
+            <div class="faq-answer">
+              <p>Symbol, import, call, and env-var extraction for Python, JavaScript, TypeScript, PHP, Bash, Go, Java, and Ruby, plus generic parsing for Markdown, YAML, and dotenv files. See the <a href="../README.md#supported-languages-code-parsing">supported-languages table</a> for exactly what's resolved per language.</p>
+            </div>
+          </details>
+          <details class="faq-item">
+            <summary>Will it modify my source code?</summary>
+            <div class="faq-answer">
+              <p>No. RepoBrain only reads your files and writes to its own <code>.repobrain/</code> directory (plus an optional <code>.mcp.json</code> entry and <code>CLAUDE.md</code> section if you run <code>install-agent</code>). It never edits your source.</p>
+            </div>
+          </details>
         </div>
       </section>
     </main>

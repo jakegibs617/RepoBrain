@@ -131,25 +131,69 @@ Prefer a visual walkthrough? Open [`setup/index.html`](setup/index.html) in your
 
 Requires Python 3.11+ and [uv](https://docs.astral.sh/uv/).
 
+**Not yet published to PyPI.** `repobrain` isn't a registered package yet, so
+a bare `uvx repobrain ...` will fail (or grab an unrelated package of that
+name). Until it's published, run it straight from this GitHub repo by adding
+`--from git+https://github.com/jakegibs617/RepoBrain` before `repobrain` in
+every command:
+
 ```bash
-# one-off commands run in an isolated environment
-uvx repobrain --help
-uvx repobrain index .
+# one-off commands run in an isolated environment, fetched straight from GitHub
+uvx --from git+https://github.com/jakegibs617/RepoBrain repobrain --help
+uvx --from git+https://github.com/jakegibs617/RepoBrain repobrain index .
 
 # a token-budgeted orientation pack: what this project is, entrypoints,
 # open assumptions, recent memory — grounded in the graph you just built
-uvx repobrain brief --budget 2000
+uvx --from git+https://github.com/jakegibs617/RepoBrain repobrain brief --budget 2000
 
 # install the MCP server entry and Claude session context in this repository
 # add --git-hooks to also keep the index fresh after commits and merges
-uvx repobrain install-agent .
+uvx --from git+https://github.com/jakegibs617/RepoBrain repobrain install-agent .
 
 # restart the agent client, then verify that its RepoBrain MCP tools are listed
 # and call explain_project (or inspect the generated argument-array config)
 cat .mcp.json
 
 # remove only RepoBrain-owned entries and marker blocks
-uvx repobrain uninstall-agent .
+uvx --from git+https://github.com/jakegibs617/RepoBrain repobrain uninstall-agent .
+```
+
+Once `repobrain` is published to PyPI, the `--from git+...` prefix becomes
+unnecessary and the plain `uvx repobrain ...` form works as shown further
+below.
+
+### Skip typing the GitHub URL every time
+
+**Recommended: install it as a real command, like `code` or `subl`.**
+`uv tool install` (uv's equivalent of `pipx install`) fetches the package once
+and drops an actual executable shim on your `PATH` — not a wrapper, a real
+`repobrain` binary you can call from anywhere:
+
+```bash
+uv tool install --from git+https://github.com/jakegibs617/RepoBrain repobrain
+```
+
+That's it — open a new terminal and `repobrain index .` just works, no prefix
+needed. A few things worth knowing:
+
+- **Refresh to the latest commit** (git installs don't auto-update):
+  `uv tool install --reinstall --from git+https://github.com/jakegibs617/RepoBrain repobrain`
+- **Uninstall:** `uv tool uninstall repobrain`
+- If `repobrain` isn't found after installing, your shell's `PATH` doesn't yet
+  include uv's tool directory — run `uv tool update-shell` and open a new
+  terminal.
+- Once `repobrain` is published to PyPI, re-run the same install command
+  without `--from git+...` to switch to registry releases.
+
+**Alternative: always-fresh, no persistent install.** If you're actively
+tracking new commits and don't want to re-run `--reinstall` each time, use a
+shell function instead — it re-fetches via `uvx` on every call. Add this to
+your `~/.zshrc` (or `~/.bashrc`/`~/.bash_profile`):
+
+```bash
+repobrain() {
+  uvx --from git+https://github.com/jakegibs617/RepoBrain repobrain "$@"
+}
 ```
 
 The generated `.mcp.json` launches the repository-scoped server as
