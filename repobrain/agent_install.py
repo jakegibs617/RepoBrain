@@ -24,9 +24,22 @@ def _installed_requirement(*, mcp: bool = False) -> str:
     direct_url = installed.read_text("direct_url.json")
     if direct_url:
         try:
-            url = json.loads(direct_url).get("url")
-        except (AttributeError, json.JSONDecodeError):
-            url = None
+            data = json.loads(direct_url)
+        except json.JSONDecodeError:
+            data = None
+        url = data.get("url") if isinstance(data, dict) else None
+        vcs_info = data.get("vcs_info") if isinstance(data, dict) else None
+        if url and isinstance(vcs_info, dict) and vcs_info.get("vcs"):
+            # PEP 610 stores VCS direct URLs without the scheme prefix (e.g.
+            # "https://..." not "git+https://..."); PEP 508 requires the
+            # prefix, so uv/uvx can't parse the bare form as a direct
+            # reference. Reconstruct it, and pin to the resolved commit.
+            vcs = vcs_info["vcs"]
+            if not url.startswith(f"{vcs}+"):
+                url = f"{vcs}+{url}"
+            commit_id = vcs_info.get("commit_id")
+            if commit_id:
+                url = f"{url}@{commit_id}"
         if url:
             return f"{project} @ {url}"
     return f"{project}=={installed.version}"

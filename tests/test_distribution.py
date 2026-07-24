@@ -8,6 +8,7 @@ import sys
 import pytest
 from click.testing import CliRunner
 
+from repobrain import agent_install
 from repobrain.agent_install import (
     HOOK_COMMAND,
     MCP_SERVER_NAME,
@@ -16,6 +17,39 @@ from repobrain.agent_install import (
     uninstall_agent,
 )
 from repobrain.cli import main
+
+
+class _FakeDistribution:
+    def __init__(self, version, direct_url_json):
+        self.version = version
+        self._direct_url_json = direct_url_json
+
+    def read_text(self, filename):
+        if filename == "direct_url.json":
+            return self._direct_url_json
+        return None
+
+
+def test_installed_requirement_reconstructs_git_vcs_url_with_scheme_and_commit(monkeypatch):
+    # Mirrors the direct_url.json pip/uv write for `uv tool install --from
+    # git+https://github.com/jakegibs617/RepoBrain repobrain`: PEP 610 stores
+    # the bare https URL plus vcs_info, without the `git+` scheme prefix.
+    direct_url_json = json.dumps({
+        "url": "https://github.com/jakegibs617/RepoBrain",
+        "vcs_info": {
+            "vcs": "git",
+            "commit_id": "199bbdc26cff3b391e402ae632db785ab823cb8c",
+        },
+    })
+    fake = _FakeDistribution("0.1.0", direct_url_json)
+    monkeypatch.setattr(agent_install, "distribution", lambda name: fake)
+
+    result = agent_install._installed_requirement(mcp=True)
+
+    assert result == (
+        "repobrain[mcp] @ git+https://github.com/jakegibs617/RepoBrain"
+        "@199bbdc26cff3b391e402ae632db785ab823cb8c"
+    )
 
 
 def test_agent_install_merges_mcp_config_and_handles_spaces(tmp_path):
