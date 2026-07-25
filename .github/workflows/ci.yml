@@ -28,8 +28,28 @@ jobs:
           enable-cache: true
       - name: Install locked development and MCP dependencies
         run: uv sync --locked --extra dev --extra mcp
+      - name: Ruff
+        if: matrix.python-version == '3.11'
+        run: uv run --no-sync ruff check repobrain
+      - name: Mypy
+        if: matrix.python-version == '3.11'
+        run: uv run --no-sync mypy repobrain
       - name: Run tests
+        if: matrix.python-version != '3.11'
         run: uv run --no-sync pytest
+      - name: Run tests with coverage
+        if: matrix.python-version == '3.11'
+        run: >-
+          uv run --no-sync pytest
+          --cov=repobrain
+          --cov-report=term-missing
+          --cov-fail-under=88
       - name: Verify published quality metrics
         if: matrix.python-version == '3.11'
         run: uv run --no-sync python scripts/verify_setup_metrics.py
+      - name: Measure extraction precision and recall
+        if: matrix.python-version == '3.11'
+        run: >-
+          uv run --no-sync python scripts/evaluate_extraction.py
+          tests/fixtures/small_python_app
+          docs/evaluation/small-python-facts.json

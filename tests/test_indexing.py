@@ -5,7 +5,7 @@ import pytest
 
 from repobrain.graph.store import GraphStore
 from repobrain.indexing.indexer import Indexer, RepoRootMismatchError
-from repobrain.indexing.scanner import IgnoreMatcher, scan
+from repobrain.indexing.scanner import IgnoreMatcher, detect_language, scan
 
 
 def _node_paths(store, type_=None):
@@ -152,6 +152,58 @@ def test_anchored_dir_pattern_matches_only_at_root():
     m2 = IgnoreMatcher(["dist/"])
     assert m2.matches("src/dist", is_dir=True)
     assert m2.matches("src/dist/bundle.js")
+
+
+def test_dockerfile_variants_are_classified_without_stealing_markdown():
+    assert detect_language("Dockerfile") == "dockerfile"
+    assert detect_language("containers/dockerfile.DEV") == "dockerfile"
+    assert detect_language("docs/dockerfile.md") == "markdown"
+
+
+def test_gitignore_negation_and_nested_scope(tmp_path):
+    (tmp_path / ".gitignore").write_text(
+        "*.generated\n!important.generated\n/root-only.txt\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "drop.generated").write_text("ignored", encoding="utf-8")
+    (tmp_path / "important.generated").write_text("kept", encoding="utf-8")
+    (tmp_path / "root-only.txt").write_text("ignored", encoding="utf-8")
+    nested = tmp_path / "nested"
+    nested.mkdir()
+    (nested / ".gitignore").write_text(
+        "!keep.generated\n/only-here.txt\n",
+        encoding="utf-8",
+    )
+    (nested / "keep.generated").write_text("kept", encoding="utf-8")
+    (nested / "only-here.txt").write_text("ignored", encoding="utf-8")
+    deep = nested / "deep"
+    deep.mkdir()
+    (deep / "only-here.txt").write_text("kept", encoding="utf-8")
+    (nested / "root-only.txt").write_text("kept", encoding="utf-8")
+
+    paths = {item.path for item in scan(tmp_path)}
+
+    assert "drop.generated" not in paths
+    assert "important.generated" in paths
+    assert "root-only.txt" not in paths
+    assert "nested/keep.generated" in paths
+    assert "nested/only-here.txt" not in paths
+    assert "nested/deep/only-here.txt" in paths
+    assert "nested/root-only.txt" in paths
+
+
+def test_gitignore_negation_cannot_override_mandatory_safety_excludes(tmp_path):
+    (tmp_path / ".gitignore").write_text(
+        "!.env.local\n!.repobrain/\n!.repobrain/repobrain.sqlite\n",
+        encoding="utf-8",
+    )
+    (tmp_path / ".env.local").write_text("TOKEN=secret\n", encoding="utf-8")
+    database_dir = tmp_path / ".repobrain"
+    database_dir.mkdir()
+    (database_dir / "repobrain.sqlite").write_text("not-a-db", encoding="utf-8")
+    (tmp_path / "safe.txt").write_text("safe", encoding="utf-8")
+
+    assert {item.path for item in scan(tmp_path)} == {".gitignore", "safe.txt"}
 
 
 def test_stat_shortcut_detects_same_size_change_with_restored_mtime(

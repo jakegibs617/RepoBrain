@@ -29,9 +29,27 @@ class RepoBrainConfig:
         cfg_path = Path(root) / REPOBRAIN_DIR / CONFIG_FILENAME
         if not cfg_path.is_file():
             return cls()
-        data = json.loads(cfg_path.read_text(encoding="utf-8"))
-        known = {f: data[f] for f in cls.__dataclass_fields__ if f in data}
-        return cls(**known)
+        try:
+            data = json.loads(cfg_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError as exc:
+            raise ValueError(
+                f"Invalid RepoBrain config at {cfg_path}: malformed JSON "
+                f"({exc.msg} at line {exc.lineno}, column {exc.colno})"
+            ) from None
+
+        if not isinstance(data, dict):
+            raise ValueError(
+                f"Invalid RepoBrain config at {cfg_path}: "
+                "config must contain a JSON object"
+            )
+
+        unknown = sorted(set(data) - set(cls.__dataclass_fields__))
+        if unknown:
+            raise ValueError(
+                f"Invalid RepoBrain config at {cfg_path}: "
+                f"unknown keys: {', '.join(unknown)}"
+            )
+        return cls(**data)
 
     def save(self, root: str | Path) -> Path:
         cfg_path = Path(root) / REPOBRAIN_DIR / CONFIG_FILENAME

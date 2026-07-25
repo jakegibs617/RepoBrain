@@ -1,5 +1,15 @@
-"""Tests for graph.queries: find_symbol and explain_file."""
-from repobrain.graph.queries import explain_file, find_symbol, resolve_file_path
+"""Tests for reusable graph queries."""
+from click.testing import CliRunner
+import pytest
+
+from repobrain.cli import main
+from repobrain.graph.queries import (
+    explain_file,
+    find_symbol,
+    impact_analysis,
+    resolve_file_path,
+    trace_symbol,
+)
 
 
 def test_find_symbol_exact(indexer, store, small_app):
@@ -42,6 +52,43 @@ def test_find_symbol_empty_and_no_match(indexer, store, small_app):
     indexer.index(small_app)
     assert find_symbol(store, "") == []
     assert find_symbol(store, "does_not_exist_anywhere") == []
+
+
+def test_trace_symbol_depth_and_direction_are_explicit(indexer, store, small_app):
+    indexer.index(small_app)
+
+    zero = trace_symbol(store, "create_user", depth=0)
+    assert zero["nodes"]
+    assert zero["edges"] == []
+
+    incoming = trace_symbol(store, "create_user", depth=1, direction="in")
+    outgoing_start = trace_symbol(store, "handle_create_user", depth=0)
+    outgoing = trace_symbol(store, "handle_create_user", depth=1, direction="out")
+    assert incoming["edges"]
+    assert outgoing["edges"]
+    start_ids = {node["id"] for node in zero["nodes"]}
+    outgoing_start_ids = {node["id"] for node in outgoing_start["nodes"]}
+    assert all(edge["target_node_id"] in start_ids for edge in incoming["edges"])
+    assert all(
+        edge["source_node_id"] in outgoing_start_ids for edge in outgoing["edges"]
+    )
+
+    with pytest.raises(ValueError, match="direction"):
+        trace_symbol(store, "create_user", direction="sideways")
+
+
+def test_impact_analysis_rejects_unknown_change_type(indexer, store, small_app):
+    indexer.index(small_app)
+    with pytest.raises(ValueError, match="change_type"):
+        impact_analysis(store, "app/services/user_service.py", change_type="rewrite")
+
+
+def test_cli_impact_rejects_unknown_change_type_before_opening_store():
+    result = CliRunner().invoke(
+        main, ["impact", "target.py", "--change-type", "rewrite"]
+    )
+    assert result.exit_code == 2
+    assert "Invalid value for '--change-type'" in result.output
 
 
 def test_resolve_file_path_variants(indexer, store, small_app):

@@ -106,6 +106,11 @@ CREATE INDEX IF NOT EXISTS idx_git_commit_files_path ON git_commit_files(path);
 CREATE VIRTUAL TABLE IF NOT EXISTS content_fts USING fts5(path, name, content, node_id UNINDEXED);
 """
 
+# SQLite records the last successfully applied migration in the database
+# header.  Version zero is reserved for databases created before versioned
+# migrations were introduced.
+_SCHEMA_VERSION = 2
+
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -138,10 +143,37 @@ class GraphStore:
         self.conn.execute("PRAGMA secure_delete=ON")
         self.conn.execute("PRAGMA journal_mode=WAL")
         self.conn.execute("PRAGMA foreign_keys=ON")
+        current_version = self.conn.execute("PRAGMA user_version").fetchone()[0]
+        if current_version > _SCHEMA_VERSION:
+            self.conn.close()
+            raise RuntimeError(
+                "RepoBrain database schema version "
+                f"{current_version} is newer than supported version {_SCHEMA_VERSION}"
+            )
         self.conn.executescript(_SCHEMA)
-        self._migrate_file_stats()
-        self._migrate_fts()
+        self._migrate_schema(current_version)
         self.conn.commit()
+
+    def _migrate_schema(self, current: int) -> None:
+        """Apply pending schema migrations in order.
+
+        ``_SCHEMA`` always describes the latest shape so new databases can be
+        created in one pass.  Migrations remain defensive and inspect the
+        actual schema, allowing both fresh databases and pre-versioning
+        databases (whose ``user_version`` is zero) to take the same path.
+        Each version marker is committed atomically with its migration.
+        """
+        migrations = (
+            (1, self._migrate_file_stats),
+            (2, self._migrate_fts),
+        )
+        for version, migrate in migrations:
+            if current >= version:
+                continue
+            with self.conn:
+                migrate()
+                self.conn.execute(f"PRAGMA user_version = {version}")
+            current = version
 
     def _migrate_file_stats(self) -> None:
         """Add high-resolution freshness signals to pre-upgrade databases.

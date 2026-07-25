@@ -9,11 +9,12 @@ import yaml
 from yaml.nodes import MappingNode, Node as YamlNode, ScalarNode, SequenceNode
 
 from .base import ParseResult, Parser
-from ..graph.schema import Edge, EdgeType, FtsRow, Node, NodeType
+from ..graph.schema import Edge, EdgeType, Node, NodeType
 
 
 _ENV_NAME = re.compile(r"^[A-Z_][A-Z0-9_]*$")
 _ENV_INTERPOLATION = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)(?:(?::?[-?])[^}]*)?\}")
+_PORT_SPEC = re.compile(r"^[0-9a-fA-F.:/-]+(?:tcp|udp|sctp)?$")
 
 
 def _walk(node: YamlNode, path: tuple[str, ...] = ()) -> Iterator[tuple[tuple[str, ...], YamlNode]]:
@@ -64,10 +65,9 @@ class GitHubActionsAdapter(YamlAdapter):
                 if not isinstance(step_data, dict):
                     continue
                 sp = (*jp, "steps", str(index))
-                name = str(step_data.get("name") or step_data.get("uses") or f"step {index + 1}")
+                name = str(step_data.get("name") or f"step {index + 1}")
                 step = parser.entity(result, NodeType.GITHUB_STEP, name, f"{path}:{job_name}:step:{index}",
-                                     path, _line(lines, sp) or _line(lines, (*sp, "name")),
-                                     {k: step_data[k] for k in ("run", "uses") if k in step_data})
+                                     path, _line(lines, sp) or _line(lines, (*sp, "name")))
                 parser.edge(result, EdgeType.CONTAINS, job, step, path, step.start_line)
                 parser.extract_env(result, step, step_data.get("env"), path, (*sp, "env"), lines)
 
@@ -91,14 +91,18 @@ class DockerComposeAdapter(YamlAdapter):
                 continue
             if spec.get("image"):
                 image_name = str(spec["image"])
-                image = parser.entity(result, NodeType.DOCKER_IMAGE, image_name, image_name, "",
-                                      _line(lines, (*sp, "image")))
-                parser.edge(result, EdgeType.USES_IMAGE, service, image, path, image.start_line)
-            if spec.get("build") is not None:
-                service.metadata["build"] = spec["build"]
-            for field in ("ports", "volumes", "command"):
-                if field in spec:
-                    service.metadata[field] = spec[field]
+                parser.extract_interpolations(
+                    result, service, image_name, path, _line(lines, (*sp, "image"))
+                )
+                if "$" not in image_name:
+                    image = parser.entity(result, NodeType.DOCKER_IMAGE, image_name, image_name, "",
+                                          _line(lines, (*sp, "image")))
+                    parser.edge(result, EdgeType.USES_IMAGE, service, image, path, image.start_line)
+            if isinstance(spec.get("ports"), list):
+                service.metadata["ports"] = [
+                    str(port) for port in spec["ports"]
+                    if _PORT_SPEC.fullmatch(str(port))
+                ]
             parser.extract_env(result, service, spec.get("environment"), path, (*sp, "environment"), lines)
             parser.extract_interpolations(result, service, spec, path, service.start_line)
         for service_name, spec in services.items():
@@ -127,16 +131,23 @@ class KubernetesAdapter(YamlAdapter):
         containers = (((data.get("spec") or {}).get("template") or {}).get("spec") or {}).get("containers")
         if containers is None and kind in {"Pod", "Job", "CronJob"}:
             spec = data.get("spec") or {}
-            if kind == "Job": spec = (spec.get("template") or {}).get("spec") or {}
-            if kind == "CronJob": spec = ((((spec.get("jobTemplate") or {}).get("spec") or {}).get("template") or {}).get("spec") or {})
+            if kind == "Job":
+                spec = (spec.get("template") or {}).get("spec") or {}
+            if kind == "CronJob":
+                spec = ((((spec.get("jobTemplate") or {}).get("spec") or {}).get("template") or {}).get("spec") or {})
             containers = spec.get("containers")
-        for index, container in enumerate(containers or []):
-            if not isinstance(container, dict): continue
+        for container in containers or []:
+            if not isinstance(container, dict):
+                continue
             image_name = container.get("image")
             if image_name:
-                image = parser.entity(result, NodeType.DOCKER_IMAGE, str(image_name), str(image_name), "",
-                                      None)
-                parser.edge(result, EdgeType.USES_IMAGE, resource, image, path, resource.start_line)
+                parser.extract_interpolations(
+                    result, resource, image_name, path, resource.start_line
+                )
+                if "$" not in str(image_name):
+                    image = parser.entity(result, NodeType.DOCKER_IMAGE, str(image_name), str(image_name), "",
+                                          None)
+                    parser.edge(result, EdgeType.USES_IMAGE, resource, image, path, resource.start_line)
             parser.extract_k8s_env(result, resource, container.get("env"), path, resource.start_line)
 
 
@@ -153,14 +164,13 @@ class YamlParser(Parser):
         result = ParseResult()
         config = self.entity(result, NodeType.CONFIG_FILE, posixpath.basename(path), path, path, 1,
                             {"format": "yaml"})
-        result.fts_rows.append(FtsRow(path=path, name=config.name, content=content, node_id=config.id))
         try:
             composed = list(yaml.compose_all(content))
             documents = list(yaml.safe_load_all(content))
-        except yaml.YAMLError as exc:
-            result.warnings.append(f"{path}: invalid YAML: {exc}")
+        except yaml.YAMLError:
+            result.warnings.append(f"{path}: invalid YAML")
             return result
-        for doc_index, (root, data) in enumerate(zip(composed, documents)):
+        for doc_index, (root, data) in enumerate(zip(composed, documents, strict=True)):
             if root is None or data is None:
                 continue
             line_map = {p: n.start_mark.line + 1 for p, n in _walk(root)}
@@ -171,17 +181,19 @@ class YamlParser(Parser):
                 if key_path[-1].isdigit():
                     continue
                 qualified = ".".join((*prefix, *key_path))
-                value = value_node.value if isinstance(value_node, ScalarNode) else None
+                value_type = value_node.tag.rsplit(":", 1)[-1]
                 key = self.entity(result, NodeType.CONFIG_KEY, key_path[-1], qualified, path,
                                   value_node.start_mark.line + 1,
-                                  {"value": value, "value_type": type(value).__name__})
+                                  {"value_type": value_type})
                 keys[key_path] = key
                 parent_path = key_path[:-1]
                 parent = keys.get(parent_path, config)
                 self.edge(result, EdgeType.DECLARES_CONFIG if parent is config else EdgeType.CONTAINS,
                           parent, key, path, key.start_line)
-                if value:
-                    self.extract_interpolations(result, key, value, path, key.start_line)
+                if isinstance(value_node, ScalarNode):
+                    self.extract_interpolations(
+                        result, key, value_node.value, path, key.start_line
+                    )
             for adapter in self.adapters:
                 if adapter.matches(path, data):
                     adapter.adapt(self, path, data, line_map, result)
@@ -197,38 +209,44 @@ class YamlParser(Parser):
         result.edges.append(Edge(type=type_, source_node_id=source.id, target_node_id=target.id,
                                  path=path, start_line=line, metadata=metadata or {}, extractor=self.name))
 
-    def env(self, result, owner, name, path, line, value=None, metadata=None):
+    def env(self, result, owner, name, path, line, metadata=None):
         env = Node(type=NodeType.ENV_VAR, name=name, qualified_name=name, path="", extractor=self.name)
         result.nodes.append(env)
-        meta = {"value": value}
-        meta.update(metadata or {})
-        self.edge(result, EdgeType.SETS_ENV, owner, env, path, line, meta)
+        self.edge(
+            result,
+            EdgeType.SETS_ENV,
+            owner,
+            env,
+            path,
+            line,
+            metadata or {},
+        )
 
     def extract_env(self, result, owner, env_data, path, key_path, lines):
         if isinstance(env_data, dict):
-            for name, value in env_data.items():
+            for name in env_data:
                 if _ENV_NAME.match(str(name)):
-                    self.env(result, owner, str(name), path, _line(lines, (*key_path, str(name))), value)
+                    self.env(result, owner, str(name), path, _line(lines, (*key_path, str(name))))
         elif isinstance(env_data, list):
             for index, item in enumerate(env_data):
                 if isinstance(item, str):
-                    name, _, value = item.partition("=")
+                    name, _, _ = item.partition("=")
                     if _ENV_NAME.match(name):
-                        self.env(result, owner, name, path, _line(lines, (*key_path, str(index))), value or None)
+                        self.env(result, owner, name, path, _line(lines, (*key_path, str(index))))
 
     def extract_interpolations(self, result, owner, value, path, line):
         text = str(value)
         for name in _ENV_INTERPOLATION.findall(text):
-            self.env(result, owner, name, path, line, metadata={"interpolation": text})
+            self.env(result, owner, name, path, line, metadata={"interpolation": True})
 
     def extract_k8s_env(self, result, owner, env_data, path, line):
         for entry in env_data or []:
-            if not isinstance(entry, dict) or not _ENV_NAME.match(str(entry.get("name", ""))): continue
+            if not isinstance(entry, dict) or not _ENV_NAME.match(str(entry.get("name", ""))):
+                continue
             name = str(entry["name"])
             value_from = entry.get("valueFrom") or {}
             secret = value_from.get("secretKeyRef") if isinstance(value_from, dict) else None
-            metadata = {"value_from": value_from} if value_from else {}
-            self.env(result, owner, name, path, line, entry.get("value"), metadata)
+            self.env(result, owner, name, path, line)
             if isinstance(secret, dict) and secret.get("name"):
                 ref_name = str(secret["name"])
                 ref = self.entity(result, NodeType.SECRET_REF, ref_name, ref_name, path, line,

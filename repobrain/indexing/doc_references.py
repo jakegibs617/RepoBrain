@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import posixpath
 from dataclasses import dataclass
+from typing import Any
 from urllib.parse import unquote, urlsplit
 
 from ..graph.schema import Edge, EdgeType
@@ -117,18 +118,18 @@ class MarkdownMentionReconciler:
         return index
 
     @staticmethod
-    def _sections_by_path(store: GraphStore) -> dict[str, list[object]]:
+    def _sections_by_path(store: GraphStore) -> dict[str, list[Any]]:
         rows = store.conn.execute(
             "SELECT id, path, start_line, end_line FROM nodes "
             "WHERE type = 'MarkdownSection' ORDER BY path, start_line"
         ).fetchall()
-        result: dict[str, list[object]] = {}
+        result: dict[str, list[Any]] = {}
         for row in rows:
             result.setdefault(row["path"], []).append(row)
         return result
 
     @staticmethod
-    def _source_for_line(document_id: str, sections: list[object], line: int | None) -> str:
+    def _source_for_line(document_id: str, sections: list[Any], line: int | None) -> str:
         if line is None:
             return document_id
         candidates = [
@@ -144,8 +145,8 @@ class MarkdownMentionReconciler:
         raw: str,
         kind: str,
         doc_path: str,
-        files: dict[str, object],
-        symbols: dict[str, list[object]],
+        files: dict[str, Any],
+        symbols: dict[str, list[Any]],
     ) -> _ResolvedReference | None:
         path = self._normalize_path(raw, doc_path)
         if path is not None and path in files:

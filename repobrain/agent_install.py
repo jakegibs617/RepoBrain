@@ -328,7 +328,10 @@ def uninstall_agent(root: str | Path) -> dict:
     if hooks_present and not isinstance(raw_hooks, dict):
         raise ValueError(f"Refusing to modify {settings_path}: hooks must be an object")
     sessions_present = isinstance(raw_hooks, dict) and "SessionStart" in raw_hooks
-    raw_sessions = raw_hooks.get("SessionStart") if sessions_present else None
+    raw_sessions = (
+        raw_hooks.get("SessionStart") if isinstance(raw_hooks, dict) and sessions_present
+        else None
+    )
     if sessions_present and not isinstance(raw_sessions, list):
         raise ValueError(
             f"Refusing to modify {settings_path}: hooks.SessionStart must be an array"

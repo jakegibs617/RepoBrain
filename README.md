@@ -2,9 +2,9 @@
 
 RepoBrain is a **local-first "second brain" for AI coding agents**. It indexes a
 software project into a durable, queryable SQLite graph spanning source code,
-Markdown documentation, and (eventually) config files and runtime wiring — so
-an agent can re-enter a repository and immediately know what it is, where
-things live, and what connects to what.
+Markdown documentation, structured configuration, and selected runtime
+wiring — so an agent can re-enter a repository and immediately know what it
+is, where things live, and what connects to what.
 
 Everything runs offline. No API keys, no network calls.
 
@@ -13,11 +13,14 @@ Everything runs offline. No API keys, no network calls.
 Implemented:
 
 - Python package, CLI, and SQLite storage (WAL mode) under `.repobrain/`
-- Graph schema with the full node/edge type vocabulary from the PRD,
-  deterministic sha1 node/edge IDs, and provenance on every row
-  (path, span, extractor, confidence, commit hash, timestamps)
-- File scanner with `.gitignore` / `.repobrainignore` support (fnmatch-based
-  subset), default excludes, binary sniffing, and a 2 MB size cap
+- Graph schema declaring the full, future-compatible node/edge vocabulary
+  from the PRD, with deterministic sha1 IDs and provenance on every row
+  (path, span, extractor, confidence, commit hash, timestamps). Parsers and
+  reports use only the subset they currently produce; reserved types such as
+  `Endpoint`, `CLICommand`, `Script`, and `ADR` are not synthesized.
+- File scanner with gitwildmatch-compatible root and nested `.gitignore`
+  rules, `.repobrainignore`, mandatory secret/database excludes, binary
+  sniffing, and a 2 MB size cap
 - Incremental indexing: sha256 content hashes; unchanged files are never
   re-parsed; changed/deleted files have their nodes, edges, and FTS rows
   removed before re-adding
@@ -37,13 +40,20 @@ Implemented:
   are deliberately skipped
 - Bidirectional `docs-for-code` and `code-for-docs` queries, also surfaced in
   the "Referencing docs" section of `explain file`
-- YAML and dotenv parsing with GitHub Actions, Docker Compose, and Kubernetes
-  adapters; config definitions connect to code-level environment reads
+- Value-free JSON, TOML, and YAML config-key extraction, value-redacted
+  Dockerfile instruction and base-image extraction, and GitHub Actions,
+  Docker Compose, and Kubernetes adapters. Dotenv files are excluded by
+  default; a defensive parser retains key/line provenance without values when
+  invoked directly. YAML config definitions connect to code-level environment
+  reads without persisting assigned values.
 - Deterministic Flask-style and Express route adapters with precise named and
   inline callback identities, plus conservative SQLAlchemy table flow
 - Grounded data-flow tracing and confidence-bucketed impact analysis shared by
   CLI, MCP, and change-context surfaces
 - A local FastMCP server exposing 19 repository-scoped tools
+- Silent-by-default structured diagnostics, opt-in via CLI `--verbose` /
+  `--log-level` or `REPOBRAIN_LOG_LEVEL`; MCP logs stay on stderr and exclude
+  query/config/source payloads
 - Append-only structured agent memory mirrored into Markdown handoff files,
   with deterministic graph-anchor verification and drift evidence
 - Grounded project overviews and Markdown/HTML graph reports
@@ -440,18 +450,23 @@ open setup/graph.html
 
 ## Limitations
 
-- Gitignore support is a simple fnmatch-based subset: no `!negation`, no
-  nested `.gitignore` files in subdirectories, and no true gitignore `*`/`**`
-  semantics — fnmatch's `*` crosses `/`, so a pattern like `docs/*`
-  over-matches nested paths such as `docs/a/b.md` (real gitignore would only
-  match direct children).
+- Gitignore matching follows gitwildmatch rules, including negation and nested
+  `.gitignore` files. RepoBrain's mandatory `.git/`, `.repobrain/`, and dotenv
+  exclusions cannot be negated; this is an intentional safety boundary rather
+  than exact parity with `git check-ignore`.
 - Paths are stored relative to the indexed root; one repository per database
   (enforced: the database is pinned to its root and refuses other roots).
-- Incremental change detection trusts size+mtime: a same-length edit that
-  also restores the file's mtime is missed until a `--no-incremental` run
-  (the same trade-off git's index makes).
-- Markdown and the eight code languages above get structural parsing; other
-  text files are indexed whole-file for full-text search.
+- On POSIX, incremental change detection trusts size plus nanosecond mtime and
+  ctime before hashing; on Windows, where ctime is creation time, unchanged
+  candidates are conservatively hashed. `--no-incremental` remains the
+  explicit full-reparse recovery path.
+- Markdown, JSON, TOML, YAML, Dockerfiles, and the eight code languages above
+  get dedicated structural parsing; other text files are indexed whole-file
+  for full-text search. Structured configuration values and raw configuration
+  bodies are deliberately not persisted. Dotenv files are excluded by
+  default. ADR-named Markdown files are represented as grounded
+  `MarkdownDocument`/`MarkdownSection` nodes rather than a synthetic `ADR`
+  node.
 - Call-graph extraction prefers precision over recall: method calls on
   dynamic receivers (anything other than `self`/`this`) are skipped, and
   cross-file name-only matches require the name to be globally unique.

@@ -69,15 +69,23 @@ def search(
     fts_rows: list[sqlite3.Row] = []
     if fts:
         try:
+            type_clause = "AND n.type = ?" if node_type else ""
+            params: list = [fts]
+            if node_type:
+                params.append(node_type)
+            params.append(max(limit * 5, 50))
             fts_rows = store.conn.execute(
-                """
-                SELECT path, name, node_id,
+                f"""
+                SELECT content_fts.path, content_fts.name, content_fts.node_id,
                        snippet(content_fts, 2, '[', ']', '…', 12) AS snip,
-                       bm25(content_fts) AS rank
-                FROM content_fts WHERE content_fts MATCH ?
+                       bm25(content_fts) AS rank,
+                       n.type, n.start_line, n.end_line
+                FROM content_fts
+                LEFT JOIN nodes n ON n.id = content_fts.node_id
+                WHERE content_fts MATCH ? {type_clause}
                 ORDER BY rank LIMIT ?
                 """,
-                (fts, max(limit * 5, 50)),
+                params,
             ).fetchall()
         except sqlite3.OperationalError:
             # e.g. punctuation-only query that tokenizes to nothing; fall
@@ -89,8 +97,9 @@ def search(
             score = -row["rank"]
             if res is None:
                 results[key] = SearchResult(
-                    path=row["path"], name=row["name"], node_type=None,
-                    start_line=None, end_line=None, snippet=row["snip"],
+                    path=row["path"], name=row["name"], node_type=row["type"],
+                    start_line=row["start_line"], end_line=row["end_line"],
+                    snippet=row["snip"],
                     score=score, reasons=["full-text match"],
                 )
             else:
@@ -100,13 +109,18 @@ def search(
     # not present in indexed content). One row per node id, so the boost is
     # applied at most once per result.
     like = f"%{_escape_like(q)}%"
+    type_clause = "AND type = ?" if node_type else ""
+    params = [q, like]
+    if node_type:
+        params.append(node_type)
     cur = store.conn.execute(
-        r"""
+        rf"""
         SELECT id, name, path, type, start_line, end_line FROM nodes
-        WHERE lower(name) = lower(?) OR lower(name) LIKE lower(?) ESCAPE '\'
+        WHERE (lower(name) = lower(?) OR lower(name) LIKE lower(?) ESCAPE '\')
+          {type_clause}
         LIMIT 200
         """,
-        (q, like),
+        params,
     )
     for row in cur.fetchall():
         key = row["id"]
@@ -147,6 +161,4 @@ def search(
                 res.end_line = row["end_line"]
 
     ranked = sorted(results.values(), key=lambda r: r.score, reverse=True)
-    if node_type:
-        ranked = [r for r in ranked if r.node_type == node_type]
     return ranked[:limit]

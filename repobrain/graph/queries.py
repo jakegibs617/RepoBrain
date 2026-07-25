@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import posixpath
+from typing import Any
 
 from .store import GraphStore
 
@@ -15,6 +16,11 @@ SYMBOL_TYPES = ("Function", "Method", "Class", "Variable", "Module", "TestCase")
 _CODE_TARGET_TYPES = SYMBOL_TYPES + ("Table", "Route", "Endpoint")
 
 _CALLABLE_TYPES = ("Function", "Method", "TestCase")
+
+#: Supported impact scenarios.  The current analysis uses this as a
+#: documented scenario label; accepting arbitrary strings implied precision
+#: the static graph cannot provide.
+CHANGE_TYPES = ("modify", "modified", "added", "deleted", "renamed")
 
 
 def trace_config(store: GraphStore, name: str) -> dict:
@@ -26,7 +32,7 @@ def trace_config(store: GraphStore, name: str) -> dict:
     cannot assert that the key sets an environment variable.
     """
     name = name.strip()
-    result = {"name": name, "definitions": [], "usages": []}
+    result: dict[str, Any] = {"name": name, "definitions": [], "usages": []}
     if not name:
         return result
     env = store.conn.execute(
@@ -613,6 +619,88 @@ def _node_payload(row) -> dict:
     }
 
 
+def trace_symbol(
+    store: GraphStore,
+    symbol: str,
+    depth: int = 2,
+    direction: str = "both",
+) -> dict:
+    """Trace all structural relationships around an exact graph reference.
+
+    ``depth`` counts graph edges (0 returns only matching start nodes).
+    ``direction`` is relative to each frontier node: ``out`` follows outgoing
+    edges, ``in`` follows incoming edges, and ``both`` follows either.  Git
+    co-change correlation is deliberately excluded from structural traces.
+    """
+    if direction not in {"in", "out", "both"}:
+        raise ValueError("direction must be 'in', 'out', or 'both'")
+    depth = max(0, min(depth, 10))
+    symbol = symbol.strip()
+    starts = store.conn.execute(
+        """
+        SELECT id, type, name, path
+        FROM nodes
+        WHERE lower(name) = lower(?)
+           OR lower(qualified_name) = lower(?)
+           OR path = ?
+        ORDER BY path, start_line, id
+        LIMIT 20
+        """,
+        (symbol, symbol, symbol),
+    ).fetchall()
+    frontier = {row["id"] for row in starts}
+    seen = set(frontier)
+    edges: dict[str, dict] = {}
+    for _ in range(depth):
+        if not frontier:
+            break
+        placeholders = ",".join("?" for _ in frontier)
+        clauses: list[str] = []
+        params: list[str] = []
+        ordered_frontier = sorted(frontier)
+        if direction in {"out", "both"}:
+            clauses.append(f"source_node_id IN ({placeholders})")
+            params.extend(ordered_frontier)
+        if direction in {"in", "both"}:
+            clauses.append(f"target_node_id IN ({placeholders})")
+            params.extend(ordered_frontier)
+        found = store.conn.execute(
+            f"""
+            SELECT * FROM edges
+            WHERE type != 'CO_CHANGED_WITH' AND ({' OR '.join(clauses)})
+            ORDER BY path, start_line, id
+            """,
+            params,
+        ).fetchall()
+        for row in found:
+            edges.setdefault(row["id"], dict(row))
+        adjacent = {
+            value
+            for row in found
+            for value in (row["source_node_id"], row["target_node_id"])
+        }
+        frontier = adjacent - seen
+        seen.update(frontier)
+
+    nodes = []
+    if seen:
+        placeholders = ",".join("?" for _ in seen)
+        nodes = store.conn.execute(
+            f"""
+            SELECT id, type, name, qualified_name, path, start_line, end_line
+            FROM nodes
+            WHERE id IN ({placeholders})
+            ORDER BY path, start_line, id
+            """,
+            sorted(seen),
+        ).fetchall()
+    return {
+        "start": symbol,
+        "nodes": [dict(row) for row in nodes],
+        "edges": list(edges.values()),
+    }
+
+
 def trace_data_flow(store: GraphStore, start: str, depth: int = 4,
                     direction: str = "both", limit: int = 200) -> dict | None:
     """Trace a route/symbol/file through runtime-oriented graph edges."""
@@ -763,6 +851,9 @@ def impact_analysis(store: GraphStore, target: str, change_type: str = "modify",
     historical bucket is withheld with the reason instead of quietly serving
     evidence extracted at a different HEAD.
     """
+    if change_type not in CHANGE_TYPES:
+        choices = ", ".join(CHANGE_TYPES)
+        raise ValueError(f"change_type must be one of: {choices}")
     resolved = _resolve_code_target(store, target)
     if resolved is None:
         return None
@@ -807,6 +898,7 @@ def impact_analysis(store: GraphStore, target: str, change_type: str = "modify",
     from ..history import history_serveable, history_status_message
 
     start_paths = sorted({r["path"] for r in start_rows if r["path"]})
+    historical: dict[str, Any]
     if not include_history:
         historical = {"items": [], "explanation": "History excluded by caller.",
                       "provenance": None}

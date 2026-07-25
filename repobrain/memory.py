@@ -5,7 +5,7 @@ import json
 import re
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Iterable
+from typing import Any, Iterable
 
 from .config import RepoBrainConfig
 from .graph.queries import resolve_graph_reference
@@ -141,7 +141,7 @@ def write_agent_memory(
     if not summary:
         raise ValueError("summary must not be empty")
     created_at = datetime.now(timezone.utc).isoformat()
-    entry = {
+    entry: dict[str, Any] = {
         "created_at": created_at,
         "summary": summary,
         "decisions": _items(decisions),
@@ -230,7 +230,7 @@ def _renamed_anchor_target(store: GraphStore, expected: dict) -> dict:
         "JOIN files f ON f.path=g.path AND f.status='active' "
         "WHERE g.original_path=? ORDER BY g.path", (expected.get("path"),),
     ).fetchall()
-    matches = []
+    matches: list[dict] = []
     for path_row in paths:
         if expected["type"] == str(NodeType.FILE):
             rows = store.conn.execute(
@@ -260,10 +260,12 @@ def _verify_anchor(store: GraphStore, anchor: dict) -> dict:
         "SELECT id,type,name,qualified_name,path,start_line,end_line FROM nodes WHERE id=?",
         (expected["id"],),
     ).fetchone()
-    resolution = ({"status": "resolved", "provenance": "stable-node-id",
-                   "node": _node_evidence(row)} if row is not None
-                  else _renamed_anchor_target(store, expected))
-    found = resolution.get("node")
+    resolution: dict[str, Any] = (
+        {"status": "resolved", "provenance": "stable-node-id",
+         "node": _node_evidence(row)} if row is not None
+        else _renamed_anchor_target(store, expected)
+    )
+    found: dict | None = resolution.get("node")
     if found is None:
         verdict = "invalidated"
     elif any(found.get(key) != expected.get(key)
