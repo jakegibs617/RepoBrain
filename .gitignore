@@ -6,3 +6,7 @@ __pycache__/
 dist/
 .DS_Store
 graphify-out/
+.claude/
+.mcp.json
+CLAUDE.md
+audit-report*
