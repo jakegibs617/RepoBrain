@@ -5,7 +5,7 @@ import pytest
 
 from repobrain.graph.store import GraphStore
 from repobrain.indexing.indexer import Indexer, RepoRootMismatchError
-from repobrain.indexing.scanner import IgnoreMatcher
+from repobrain.indexing.scanner import IgnoreMatcher, scan
 
 
 def _node_paths(store, type_=None):
@@ -120,6 +120,28 @@ def test_gitignore_is_respected(indexer, store, small_app):
     assert "creds.secret" not in paths
 
 
+def test_dotenv_families_are_excluded_by_default(tmp_path):
+    filenames = (
+        ".env",
+        ".env.local",
+        ".env.example",
+        "service.env",
+        "service.env.local",
+    )
+    for name in filenames:
+        (tmp_path / name).write_text("SECRET=not-indexable\n", encoding="utf-8")
+    nested = tmp_path / "nested"
+    nested.mkdir()
+    (nested / ".env.production").write_text("SECRET=not-indexable\n", encoding="utf-8")
+    (nested / "worker.env.test").write_text("SECRET=not-indexable\n", encoding="utf-8")
+    (tmp_path / "app.py").write_text("SAFE = True\n", encoding="utf-8")
+
+    paths = {item.path for item in scan(tmp_path)}
+
+    assert paths == {"app.py"}
+    assert scan(tmp_path, include_patterns=[".env.local"]) == []
+
+
 def test_anchored_dir_pattern_matches_only_at_root():
     m = IgnoreMatcher(["/dist/"])
     assert m.matches("dist", is_dir=True)
@@ -132,18 +154,26 @@ def test_anchored_dir_pattern_matches_only_at_root():
     assert m2.matches("src/dist/bundle.js")
 
 
-def test_stat_shortcut_skips_hashing_when_mtime_size_match(indexer, small_app):
+def test_stat_shortcut_detects_same_size_change_with_restored_mtime(
+    indexer, store, small_app
+):
     indexer.index(small_app)
     target = Path(small_app) / "app" / "db" / "config.py"
     st = target.stat()
     content = target.read_text()
-    # same-length content change with mtime restored: the shortcut trusts the
-    # stored hash and must report the file unchanged (documented semantics)
+    # Reproduce the adversarial freshness miss: neither size nor reported
+    # mtime changes. ctime_ns must force a hash check and graph replacement.
     target.write_text(content[:-1] + "#")
     os.utime(target, ns=(st.st_atime_ns, st.st_mtime_ns))
 
     stats = indexer.index(small_app)
-    assert stats.files_changed == 0
+    assert stats.files_changed == 1
+    row = store.conn.execute(
+        "SELECT mtime_ns, ctime_ns FROM files WHERE path='app/db/config.py'"
+    ).fetchone()
+    changed_stat = target.stat()
+    assert row["mtime_ns"] == changed_stat.st_mtime_ns
+    assert row["ctime_ns"] == changed_stat.st_ctime_ns
 
 
 def test_mtime_bump_with_same_content_stays_unchanged(indexer, store, small_app):

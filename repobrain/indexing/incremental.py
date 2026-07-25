@@ -1,18 +1,30 @@
 """Incremental diffing: compare scanned files against the stored file table.
 
-Files whose size AND mtime match the stored row are trusted as unchanged
-without being read or re-hashed. Content is read (once) only for files that
-may need parsing; unreadable files are skipped with a warning instead of
-failing the run.
+Files whose size, nanosecond mtime, and nanosecond ctime match the stored row
+are trusted as unchanged without being read or re-hashed. The ctime signal
+closes the same-size/restored-mtime hole on platforms where ctime tracks
+metadata changes. Content is read (once) only for files that may need parsing;
+unreadable files are skipped with a warning instead of failing the run.
 """
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from ..graph.store import GraphStore
 from .hasher import hash_bytes
 from .scanner import ScannedFile
+
+
+def _ctime_tracks_changes() -> bool:
+    """Whether ctime is a usable change signal on this platform.
+
+    POSIX ctime changes when file content or metadata changes. On Windows,
+    Python exposes creation time as ctime, so identical size/mtime cannot be
+    trusted and the conservative fallback is to hash the file.
+    """
+    return os.name != "nt"
 
 
 @dataclass
@@ -56,8 +68,10 @@ def compute_diff(
         if (
             incremental
             and prev is not None
-            and prev["mtime"] == f.mtime
+            and _ctime_tracks_changes()
             and prev["size"] == f.size
+            and prev["mtime_ns"] == f.mtime_ns
+            and prev["ctime_ns"] == f.ctime_ns
         ):
             # stat unchanged: trust the stored hash, skip reading entirely
             diff.unchanged.append(f)
@@ -80,6 +94,11 @@ def compute_diff(
         else:
             # content identical, only the stat moved
             diff.unchanged.append(f)
-            diff.stat_changed.append(f)
+            if (
+                prev["size"] != f.size
+                or prev["mtime_ns"] != f.mtime_ns
+                or prev["ctime_ns"] != f.ctime_ns
+            ):
+                diff.stat_changed.append(f)
     diff.deleted = [p for p in known if p not in seen]
     return diff

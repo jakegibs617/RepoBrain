@@ -59,6 +59,8 @@ CREATE TABLE IF NOT EXISTS files (
     hash TEXT,
     size INTEGER,
     mtime REAL,
+    mtime_ns INTEGER,
+    ctime_ns INTEGER,
     language TEXT,
     last_indexed_at TEXT,
     status TEXT NOT NULL DEFAULT 'active'
@@ -130,11 +132,31 @@ class GraphStore:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self.conn = sqlite3.connect(str(self.db_path))
         self.conn.row_factory = sqlite3.Row
+        # Excluded files may have been indexed by an older RepoBrain version.
+        # Overwrite deleted cells so credentials do not survive in SQLite
+        # freelist pages after the upgrade re-index removes their live rows.
+        self.conn.execute("PRAGMA secure_delete=ON")
         self.conn.execute("PRAGMA journal_mode=WAL")
         self.conn.execute("PRAGMA foreign_keys=ON")
         self.conn.executescript(_SCHEMA)
+        self._migrate_file_stats()
         self._migrate_fts()
         self.conn.commit()
+
+    def _migrate_file_stats(self) -> None:
+        """Add high-resolution freshness signals to pre-upgrade databases.
+
+        Existing rows intentionally remain NULL: the first incremental run
+        hashes each active file once and backfills both columns, after which
+        unchanged runs retain the read-free stat shortcut.
+        """
+        cols = {
+            r[1] for r in self.conn.execute("SELECT * FROM pragma_table_info('files')")
+        }
+        if "mtime_ns" not in cols:
+            self.conn.execute("ALTER TABLE files ADD COLUMN mtime_ns INTEGER")
+        if "ctime_ns" not in cols:
+            self.conn.execute("ALTER TABLE files ADD COLUMN ctime_ns INTEGER")
 
     def _migrate_fts(self) -> None:
         """Rebuild content_fts if it predates the node_id column (pre-release
@@ -354,22 +376,42 @@ class GraphStore:
 
     # -- files -------------------------------------------------------------
 
-    def upsert_file(self, path: str, hash_: str, size: int, mtime: float, language: str | None) -> None:
+    def upsert_file(
+        self,
+        path: str,
+        hash_: str,
+        size: int,
+        mtime: float,
+        mtime_ns: int,
+        ctime_ns: int,
+        language: str | None,
+    ) -> None:
         self.conn.execute(
             """
-            INSERT INTO files (path, hash, size, mtime, language, last_indexed_at, status)
-            VALUES (?, ?, ?, ?, ?, ?, 'active')
+            INSERT INTO files (
+                path, hash, size, mtime, mtime_ns, ctime_ns, language,
+                last_indexed_at, status
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'active')
             ON CONFLICT(path) DO UPDATE SET hash=excluded.hash, size=excluded.size,
-                mtime=excluded.mtime, language=excluded.language,
+                mtime=excluded.mtime, mtime_ns=excluded.mtime_ns,
+                ctime_ns=excluded.ctime_ns, language=excluded.language,
                 last_indexed_at=excluded.last_indexed_at, status='active'
             """,
-            (path, hash_, size, mtime, language, _now()),
+            (path, hash_, size, mtime, mtime_ns, ctime_ns, language, _now()),
         )
 
-    def update_file_stat(self, path: str, size: int, mtime: float) -> None:
+    def update_file_stat(
+        self, path: str, size: int, mtime: float, mtime_ns: int, ctime_ns: int
+    ) -> None:
         """Refresh stat columns for a file whose content hash was unchanged."""
         self.conn.execute(
-            "UPDATE files SET size = ?, mtime = ? WHERE path = ?", (size, mtime, path)
+            """
+            UPDATE files
+            SET size = ?, mtime = ?, mtime_ns = ?, ctime_ns = ?
+            WHERE path = ?
+            """,
+            (size, mtime, mtime_ns, ctime_ns, path),
         )
 
     def mark_files_deleted(self, paths: Iterable[str]) -> None:

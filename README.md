@@ -158,6 +158,10 @@ cat .mcp.json
 uvx --from git+https://github.com/jakegibs617/RepoBrain repobrain uninstall-agent .
 ```
 
+`install-agent` also adds `.repobrain/` to the repository's `.gitignore`
+idempotently. `uninstall-agent` intentionally leaves that safety rule in place
+so an existing local graph database never becomes committable by accident.
+
 Once `repobrain` is published to PyPI, the `--from git+...` prefix becomes
 unnecessary and the plain `uvx repobrain ...` form works as shown further
 below.
