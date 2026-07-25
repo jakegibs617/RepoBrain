@@ -1,3 +1,8 @@
+import sqlite3
+
+import pytest
+
+from repobrain.graph.store import GraphStore
 from repobrain.graph.schema import Edge, Node, NodeType, EdgeType, node_id, edge_id
 
 
@@ -160,3 +165,67 @@ def test_delete_paths_removes_everything(store):
     store.commit()
     assert store.conn.execute("SELECT COUNT(*) FROM nodes").fetchone()[0] == 0
     assert store.conn.execute("SELECT COUNT(*) FROM content_fts").fetchone()[0] == 0
+
+
+def test_fresh_database_records_current_schema_version(tmp_path):
+    with GraphStore(tmp_path / "fresh.sqlite") as store:
+        assert store.conn.execute("PRAGMA user_version").fetchone()[0] == 2
+
+
+def test_legacy_database_applies_ordered_migrations_idempotently(tmp_path):
+    database = tmp_path / "legacy.sqlite"
+    conn = sqlite3.connect(database)
+    conn.execute(
+        """
+        CREATE TABLE files (
+            path TEXT PRIMARY KEY,
+            hash TEXT,
+            size INTEGER,
+            mtime REAL,
+            language TEXT,
+            last_indexed_at TEXT,
+            status TEXT NOT NULL DEFAULT 'active'
+        )
+        """
+    )
+    conn.execute(
+        "CREATE VIRTUAL TABLE content_fts USING fts5(path, name, content)"
+    )
+    conn.execute(
+        "INSERT INTO files (path, hash, status) VALUES ('legacy.py', 'abc', 'active')"
+    )
+    conn.commit()
+    conn.close()
+
+    for _ in range(2):
+        with GraphStore(database) as store:
+            assert store.conn.execute("PRAGMA user_version").fetchone()[0] == 2
+            file_columns = {
+                row["name"]
+                for row in store.conn.execute("PRAGMA table_info(files)")
+            }
+            fts_columns = {
+                row["name"]
+                for row in store.conn.execute("PRAGMA table_info(content_fts)")
+            }
+            assert {"mtime_ns", "ctime_ns"} <= file_columns
+            assert "node_id" in fts_columns
+            assert store.conn.execute(
+                "SELECT hash FROM files WHERE path='legacy.py'"
+            ).fetchone()["hash"] == "abc"
+
+
+def test_database_newer_than_supported_schema_is_rejected(tmp_path):
+    database = tmp_path / "future.sqlite"
+    conn = sqlite3.connect(database)
+    conn.execute("PRAGMA user_version = 999")
+    conn.close()
+
+    with pytest.raises(RuntimeError, match="newer than supported"):
+        GraphStore(database)
+
+    conn = sqlite3.connect(database)
+    assert conn.execute(
+        "SELECT COUNT(*) FROM sqlite_master WHERE name='nodes'"
+    ).fetchone()[0] == 0
+    conn.close()

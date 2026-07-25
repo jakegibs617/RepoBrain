@@ -254,6 +254,7 @@ class MarkdownParser(Parser):
             )
             result.nodes.append(sec.node)
             parent_node = sec.parent.node if sec.parent is not None else doc_node
+            assert parent_node is not None
             result.edges.append(
                 Edge(
                     type=EdgeType.CONTAINS,

@@ -1,7 +1,10 @@
 """Grounded project overview and Markdown/HTML report generation."""
 from __future__ import annotations
-import html, json
+
+import html
+import json
 from pathlib import Path
+
 from .graph.store import GraphStore
 
 def project_overview(store: GraphStore) -> dict:
@@ -12,10 +15,10 @@ def project_overview(store: GraphStore) -> dict:
         return [dict(r) for r in store.conn.execute(f"SELECT type,name,path,start_line,metadata_json FROM nodes WHERE type IN ({marks}) ORDER BY path,start_line LIMIT ?", (*types, limit))]
     return {"root": store.get_meta("root"), "files": store.file_count(), "languages": languages,
             "nodes_by_type": store.counts_by_type("nodes"), "edges_by_type": store.counts_by_type("edges"),
-            "entrypoints": nodes("Route","Endpoint","CLICommand","Script"),
+            "entrypoints": nodes("Route"),
             "config": nodes("ConfigFile","ConfigKey","EnvVar"),
             "workflows": nodes("GitHubWorkflow","GitHubJob","GitHubStep"),
-            "services": nodes("DockerService","KubernetesResource","Worker","Queue"),
+            "services": nodes("DockerService","KubernetesResource"),
             "warnings": json.loads(run["warnings_json"] or "[]") if run else []}
 
 def generate_report(store: GraphStore, root: Path) -> tuple[Path, Path]:
@@ -36,7 +39,7 @@ Generated from `{data['root']}` using deterministic, source-grounded graph facts
 
 {listing([{'type':'language','name':k,'path':str(v)+' files'} for k,v in data['languages'].items()])}
 
-## Top Entrypoints and Routes
+## Detected Routes
 
 {listing(data['entrypoints'])}
 
@@ -67,8 +70,10 @@ Generated from `{data['root']}` using deterministic, source-grounded graph facts
 - Files classified as `unknown` receive generic full-text indexing only.
 - Add a deterministic parser or adapter when an important runtime artifact is missing.
 """
-    out=root/".repobrain"; out.mkdir(parents=True,exist_ok=True)
-    md_path=out/"graph_report.md"; html_path=out/"graph_report.html"
+    out=root/".repobrain"
+    out.mkdir(parents=True,exist_ok=True)
+    md_path=out/"graph_report.md"
+    html_path=out/"graph_report.html"
     md_path.write_text(md,encoding="utf-8")
     html_path.write_text("<!doctype html><html><head><meta charset='utf-8'><title>RepoBrain Report</title><style>body{max-width:900px;margin:40px auto;font:16px/1.5 system-ui;padding:0 20px}pre{white-space:pre-wrap}</style></head><body><pre>"+html.escape(md)+"</pre></body></html>",encoding="utf-8")
     return md_path,html_path

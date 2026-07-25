@@ -12,7 +12,9 @@ from .agent_install import install_agent as run_install_agent
 from .agent_install import uninstall_agent as run_uninstall_agent
 from .briefing import DEFAULT_BUDGET, MINIMUM_BUDGET, project_brief
 from .change_context import GitDiffError, change_context as run_change_context
+from .diagnostics import configure_logging, log_event
 from .graph.queries import explain_file as run_explain_file
+from .graph.queries import CHANGE_TYPES
 from .graph.queries import code_for_docs as run_code_for_docs
 from .graph.queries import docs_for_code as run_docs_for_code
 from .graph.queries import find_symbol as run_find_symbol
@@ -52,11 +54,23 @@ def _open_store(root: Path, *, auto_index: bool = True, gate: bool = True):
         if gate:
             freshness = require_fresh(root, store, auto_index=auto_index)
             store.last_freshness = freshness
+            log_event(
+                "freshness.checked",
+                status=freshness["status"],
+                can_query=freshness["can_query"],
+                auto_index=auto_index,
+            )
             if (freshness["status"] == "reindexed"
                     and not click.get_current_context().params.get("as_json", False)):
                 click.echo(f"Freshness: {freshness['message']}", err=True)
         yield store
     except FreshnessBlockedError as exc:
+        log_event(
+            "freshness.blocked",
+            status=exc.result["status"],
+            can_query=False,
+            auto_index=auto_index,
+        )
         raise click.ClickException(exc.result["message"]) from exc
     finally:
         store.close()
@@ -70,8 +84,18 @@ def _freshness_option(function):
 
 
 @click.group()
-def main() -> None:
+@click.option("--verbose", is_flag=True, help="Emit structured operational logs to stderr.")
+@click.option(
+    "--log-level",
+    type=click.Choice(["DEBUG", "INFO", "WARNING", "ERROR"], case_sensitive=False),
+    default=None,
+    help="Structured stderr log level (or set REPOBRAIN_LOG_LEVEL).",
+)
+@click.pass_context
+def main(ctx: click.Context, verbose: bool, log_level: str | None) -> None:
     """RepoBrain: a local-first second brain for AI coding agents."""
+    configure_logging(log_level or ("INFO" if verbose else None))
+    log_event("cli.command.start", command=ctx.invoked_subcommand or "unknown")
 
 
 @main.command()
@@ -111,8 +135,18 @@ def index(path: str, no_incremental: bool, no_history: bool) -> None:
         try:
             stats = indexer.index(root, incremental=not no_incremental)
         except RepoRootMismatchError as exc:
-            raise click.ClickException(str(exc))
+            raise click.ClickException(str(exc)) from exc
         history = None if no_history else refresh_history(root, store, config=config)
+    log_event(
+        "index.completed",
+        status="ok",
+        incremental=not no_incremental,
+        files_scanned=stats.files_scanned,
+        files_changed=stats.files_changed,
+        files_deleted=stats.files_deleted,
+        nodes_created=stats.nodes_created,
+        edges_created=stats.edges_created,
+    )
     click.echo(f"Indexed {path}")
     click.echo(f"  files scanned : {stats.files_scanned}")
     click.echo(f"  files changed : {stats.files_changed}")
@@ -447,7 +481,8 @@ def explain_project(path: str, as_json: bool, no_auto_index: bool) -> None:
     with _open_store(_resolve_root(path), auto_index=not no_auto_index) as store:
         info = project_overview(store)
     if as_json:
-        click.echo(json.dumps(info, indent=2)); return
+        click.echo(json.dumps(info, indent=2))
+        return
     click.echo(f"Repository: {info['root']}")
     click.echo(f"Files: {info['files']}  Nodes: {sum(info['nodes_by_type'].values())}  Edges: {sum(info['edges_by_type'].values())}")
     click.echo("Languages: " + ", ".join(f"{k}={v}" for k,v in info["languages"].items()))
@@ -637,7 +672,8 @@ def trace_data_flow(start: str, depth: int, direction: str, path: str,
     if result is None:
         raise click.ClickException(f"No unique indexed target found for '{start}'.")
     if as_json:
-        click.echo(json.dumps(result, indent=2)); return
+        click.echo(json.dumps(result, indent=2))
+        return
     click.echo(f"Start: {result['start']['name']} [{result['start']['type']}]")
     by_id = {n["id"]: n for n in result["nodes"]}
     for e in result["edges"]:
@@ -646,7 +682,9 @@ def trace_data_flow(start: str, depth: int, direction: str, path: str,
 
 @main.command("impact")
 @click.argument("target")
-@click.option("--change-type", default="modify")
+@click.option("--change-type", type=click.Choice(CHANGE_TYPES), default="modify",
+              show_default=True,
+              help="Change scenario label used in the impact report.")
 @click.option("--depth", type=click.IntRange(1, 10), default=3)
 @click.option("--path", "path", type=click.Path(exists=True, file_okay=False), default=".")
 @click.option("--json", "as_json", is_flag=True)
@@ -661,11 +699,14 @@ def impact(target: str, change_type: str, depth: int, path: str,
     if result is None:
         raise click.ClickException(f"No unique indexed target found for '{target}'.")
     if as_json:
-        click.echo(json.dumps(result, indent=2)); return
+        click.echo(json.dumps(result, indent=2))
+        return
     for title,key in (("High-confidence impact","high_confidence"),("Medium-confidence impact","medium_confidence"),("Low-confidence possible impact","low_confidence"),("Recommended tests","recommended_tests"),("Docs likely needing updates","docs_likely_needing_updates")):
         click.echo(f"\n{title}")
-        for item in result[key]: click.echo(f"  {item['node']['path']} [{item['node']['type']}] via {item['via']} conf={item['confidence']:.2f}")
-        if not result[key]: click.echo("  none")
+        for item in result[key]:
+            click.echo(f"  {item['node']['path']} [{item['node']['type']}] via {item['via']} conf={item['confidence']:.2f}")
+        if not result[key]:
+            click.echo("  none")
     click.echo("\nHistorical co-change (heuristic)")
     historical = result["historical_evidence"]
     for item in historical["items"]:

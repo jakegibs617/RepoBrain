@@ -1,3 +1,4 @@
+from repobrain.graph.schema import FtsRow, Node
 from repobrain.retrieval.keyword import search
 
 
@@ -36,6 +37,38 @@ def test_search_type_filter(indexer, store, docs_app):
     results = search(store, "users", limit=10, node_type="File")
     assert results
     assert all(r.node_type == "File" for r in results)
+
+
+def test_search_type_filter_applies_before_fts_candidate_limit(store):
+    """High-ranking rows of another type must not starve typed results."""
+    functions = [
+        Node(type="Function", name=f"decoy_{i}", path=f"decoy_{i}.py")
+        for i in range(60)
+    ]
+    target = Node(type="File", name="target.py", path="target.py")
+    store.upsert_nodes([*functions, target])
+    store.add_fts_rows([
+        *[
+            FtsRow(
+                path=node.path,
+                name=node.name,
+                content="needle needle needle",
+                node_id=node.id,
+            )
+            for node in functions
+        ],
+        FtsRow(
+            path=target.path,
+            name=target.name,
+            content="needle",
+            node_id=target.id,
+        ),
+    ])
+    store.commit()
+
+    results = search(store, "needle", limit=1, node_type="File")
+
+    assert [result.path for result in results] == ["target.py"]
 
 
 def test_search_returns_line_ranges_for_sections(indexer, store, docs_app):

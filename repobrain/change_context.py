@@ -194,6 +194,8 @@ def _parse_name_status(raw: bytes) -> list[dict]:
         code = tokens[index]
         index += 1
         kind = code[0]
+        old_path: str | None
+        new_path: str | None
         if kind in {"R", "C"}:
             if index + 1 >= len(tokens):
                 raise GitDiffError("Malformed rename/copy record from git diff")
@@ -228,7 +230,7 @@ def _line_ranges(patch: str) -> dict:
 
 
 def _merge_ranges(ranges: list[dict]) -> list[dict]:
-    merged = []
+    merged: list[dict] = []
     for item in sorted(ranges, key=lambda value: value["start"]):
         if merged and item["start"] <= merged[-1]["end"] + 1:
             merged[-1]["end"] = max(merged[-1]["end"], item["end"])
@@ -240,8 +242,15 @@ def _merge_ranges(ranges: list[dict]) -> list[dict]:
 def _map_change(store: GraphStore, change: dict) -> tuple[dict | None, list[dict]]:
     path = change.get("new_path") or change.get("old_path")
     ranges = change["line_ranges"]["new" if change.get("new_path") else "old"]
-    if change["status"] == "deleted" and change.get("_old_content") is not None:
-        nodes = _parse_deleted_nodes(path, change["_old_content"], change["_old_revision"])
+    old_content = change.get("_old_content")
+    old_revision = change.get("_old_revision")
+    if (
+        change["status"] == "deleted"
+        and isinstance(path, str)
+        and isinstance(old_content, str)
+        and isinstance(old_revision, str)
+    ):
+        nodes = _parse_deleted_nodes(path, old_content, old_revision)
     else:
         nodes = [dict(row) for row in store.conn.execute(
             "SELECT id,type,name,qualified_name,path,start_line,end_line,language "
@@ -380,7 +389,9 @@ def _aggregate_impacts(store: GraphStore, changes: list[dict]) -> tuple[dict, li
                 record = tests.setdefault(path, {**item, "changed_reasons": []})
                 if reason not in record["changed_reasons"]:
                     record["changed_reasons"].append(reason)
-    buckets = {"high_confidence": [], "medium_confidence": [], "low_confidence": []}
+    buckets: dict[str, list[dict]] = {
+        "high_confidence": [], "medium_confidence": [], "low_confidence": [],
+    }
     for item in evidence.values():
         bucket = ("high_confidence" if item["confidence"] >= 0.85 else
                   "medium_confidence" if item["confidence"] >= 0.6 else "low_confidence")
@@ -415,7 +426,7 @@ def _stale_doc_candidates(store: GraphStore, changes: list[dict], changed_paths:
         ORDER BY s.path,e.start_line,t.path,t.start_line
         """, tuple(target_reasons),
     ).fetchall()
-    results = []
+    results: list[dict] = []
     for row in rows:
         if row["doc_path"] in changed_paths:
             continue
@@ -433,7 +444,7 @@ def _stale_doc_candidates(store: GraphStore, changes: list[dict], changed_paths:
             "why": "Potentially stale: this unchanged document mentions changed code.",
         })
     results.extend(_historical_path_doc_candidates(store, changes, changed_paths))
-    deduped = {}
+    deduped: dict[tuple, dict] = {}
     for item in results:
         key = (item["doc_path"], item["evidence_line"], item["target"]["id"])
         deduped.setdefault(key, item)

@@ -2,6 +2,7 @@ import json
 
 import pytest
 
+from repobrain.graph.queries import trace_symbol as query_trace_symbol
 from repobrain.mcp_server import RepoBrainTools, _safe
 
 
@@ -34,6 +35,29 @@ def test_transport_independent_mcp_tools_return_json_safe_results(small_app):
     impact = tools.impact_analysis("app/services/user_service.py")
     assert impact["status"] == "ok"
     assert impact["impact"]["high_confidence"]
+
+
+def test_mcp_trace_symbol_reuses_graph_query_and_preserves_shape(small_app):
+    tools = RepoBrainTools(small_app)
+    tools.index_repo()
+    with tools._store() as store:
+        expected = query_trace_symbol(
+            store, "create_user", depth=1, direction="out"
+        )
+
+    actual = tools.trace_symbol(
+        "create_user", depth=1, direction="out", auto_index=False
+    )
+
+    assert actual["status"] == "ok"
+    assert {key: actual[key] for key in ("start", "nodes", "edges")} == expected
+
+
+def test_mcp_impact_rejects_unknown_change_type(small_app):
+    tools = RepoBrainTools(small_app)
+    tools.index_repo()
+    with pytest.raises(ValueError, match="change_type"):
+        tools.impact_analysis("app/services/user_service.py", change_type="rewrite")
 
 
 def test_mcp_index_is_confined_to_server_root(small_app, tmp_path):

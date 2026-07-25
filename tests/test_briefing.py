@@ -52,6 +52,26 @@ def test_brief_skips_oversized_atomic_fact_but_keeps_useful_context(small_app):
     assert any(section["title"] == "Subsystems" for section in result["sections"])
 
 
+def test_brief_entrypoints_are_grounded_in_produced_route_nodes(small_app):
+    with _indexed(small_app) as store:
+        result = project_brief(small_app, store, budget=2000)
+        produced_types = {
+            row["type"]
+            for row in store.conn.execute("SELECT DISTINCT type FROM nodes")
+        }
+
+    entrypoints = next(
+        section for section in result["sections"]
+        if section["title"] == "Entrypoints"
+    )
+    assert {fact["type"] for fact in entrypoints["facts"]} == {"Route"}
+    assert {fact["text"] for fact in entrypoints["facts"]} == {
+        "POST /api/users",
+        "GET /api/users/<int:user_id>",
+    }
+    assert {"CLICommand", "Script", "Endpoint", "ADR"}.isdisjoint(produced_types)
+
+
 def test_brief_detects_added_changed_and_deleted_files(small_app):
     with _indexed(small_app) as store:
         assert project_brief(small_app, store)["staleness"]["is_stale"] is False

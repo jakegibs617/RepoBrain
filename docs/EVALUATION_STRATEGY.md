@@ -9,6 +9,12 @@ quality bar. Evaluation therefore happens at three levels.
 Each subsystem gets focused fixtures with explicit expected facts and explicit
 non-facts. Every evaluation checks both recall and precision.
 
+`scripts/evaluate_extraction.py <repository> <spec.json>` is the executable
+release-gate harness for labeled corpora. The JSON specification contains
+`expected` and `forbidden` arrays of stable fact keys; the command indexes into
+a temporary database, reports measured precision/recall, and exits non-zero on
+missing expected facts, present forbidden facts, or extraction warnings.
+
 | Capability | Positive examples | Adversarial examples | Primary measures |
 |---|---|---|---|
 | File scanning | tracked source, docs, tests | ignored, binary, oversized, unreadable | coverage, warnings |

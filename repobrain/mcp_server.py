@@ -1,14 +1,15 @@
 """Per-repository MCP server exposing RepoBrain's agent-facing API."""
 from __future__ import annotations
 
-import json
 from pathlib import Path
 from typing import Any
 
 from .config import RepoBrainConfig
+from .diagnostics import configure_logging_from_env, log_event
 from .briefing import DEFAULT_BUDGET, project_brief
 from .change_context import GitDiffError, change_context
 from .graph.queries import (
+    CHANGE_TYPES,
     code_for_docs,
     docs_for_code,
     explain_file,
@@ -16,6 +17,7 @@ from .graph.queries import (
     impact_analysis,
     trace_config,
     trace_data_flow,
+    trace_symbol,
 )
 from .graph.store import GraphStore
 from .freshness import ensure_fresh
@@ -62,11 +64,23 @@ class RepoBrainTools:
         with self._store() as store:
             freshness = ensure_fresh(self.root, store, auto_index=auto_index)
             if not freshness["can_query"]:
+                log_event(
+                    "mcp.query.blocked",
+                    status=freshness["status"],
+                    can_query=False,
+                    auto_index=auto_index,
+                )
                 return {"status": freshness["status"], "freshness": _safe(freshness)}
             store.last_freshness = freshness
             result = callback(store)
         result = _safe(result)
         result["freshness"] = _safe(freshness)
+        log_event(
+            "mcp.query.completed",
+            status=result.get("status", "ok"),
+            can_query=True,
+            auto_index=auto_index,
+        )
         return result
 
     def index_repo(self, path: str = ".", incremental: bool = True,
@@ -85,6 +99,16 @@ class RepoBrainTools:
         with GraphStore(target / config.db_path) as store:
             stats = Indexer(store, config=config).index(target, incremental=incremental)
             history = refresh_history(target, store, config=config)
+        log_event(
+            "mcp.index.completed",
+            status="ok",
+            incremental=incremental,
+            files_scanned=stats.files_scanned,
+            files_changed=stats.files_changed,
+            files_deleted=stats.files_deleted,
+            nodes_created=stats.nodes_created,
+            edges_created=stats.edges_created,
+        )
         return _safe({"status": "ok", "files_scanned": stats.files_scanned,
                       "files_changed": stats.files_changed, "files_deleted": stats.files_deleted,
                       "nodes_created": stats.nodes_created, "edges_created": stats.edges_created,
@@ -155,53 +179,20 @@ class RepoBrainTools:
             return {"status": "ok", "symbols": _safe(result)}
         return self._query(run, auto_index=auto_index)
 
-    def _trace(self, start: str, depth: int, direction: str = "both",
-               auto_index: bool = True) -> dict:
-        depth = max(0, min(depth, 10))
+    def trace_symbol(self, symbol: str, depth: int = 2, auto_index: bool = True,
+                     direction: str = "both") -> dict:
+        """Trace graph edges around SYMBOL; depth counts edges (0-10)."""
         def run(store):
-            starts = store.conn.execute(
-                "SELECT id, type, name, path FROM nodes WHERE lower(name)=lower(?) "
-                "OR lower(qualified_name)=lower(?) OR path=? LIMIT 20", (start, start, start)
-            ).fetchall()
-            frontier = {row["id"] for row in starts}
-            seen = set(frontier)
-            edges = []
-            for _ in range(depth):
-                if not frontier:
-                    break
-                placeholders = ",".join("?" for _ in frontier)
-                clauses, params = [], []
-                if direction in ("out", "both"):
-                    clauses.append(f"source_node_id IN ({placeholders})")
-                    params.extend(frontier)
-                if direction in ("in", "both"):
-                    clauses.append(f"target_node_id IN ({placeholders})")
-                    params.extend(frontier)
-                # CO_CHANGED_WITH is correlation evidence, not a structural
-                # dependency: traces must not present or expand through it
-                found = store.conn.execute(
-                    f"SELECT * FROM edges WHERE type != 'CO_CHANGED_WITH' "
-                    f"AND ({' OR '.join(clauses)})", params
-                ).fetchall()
-                edges.extend(_safe(row) for row in found)
-                adjacent = {value for row in found for value in
-                            (row["source_node_id"], row["target_node_id"])}
-                frontier = adjacent - seen
-                seen.update(frontier)
-            nodes = []
-            if seen:
-                placeholders = ",".join("?" for _ in seen)
-                nodes = store.conn.execute(
-                    f"SELECT id,type,name,qualified_name,path,start_line,end_line FROM nodes "
-                    f"WHERE id IN ({placeholders})", list(seen)
-                ).fetchall()
-            return {"status": "ok", "start": start, "nodes": _safe(nodes), "edges": edges}
+            result = trace_symbol(store, symbol, depth=depth, direction=direction)
+            return {"status": "ok", **result}
         return self._query(run, auto_index=auto_index)
 
-    def trace_symbol(self, symbol: str, depth: int = 2, auto_index: bool = True) -> dict:
-        return self._trace(symbol, depth, auto_index=auto_index)
-
     def trace_config(self, key: str, depth: int = 3, auto_index: bool = True) -> dict:
+        """Find direct config definitions and reads.
+
+        ``depth`` remains accepted for MCP client compatibility, but config
+        tracing is a direct lookup rather than a recursive graph traversal.
+        """
         def run(store):
             result = trace_config(store, key)
             return {"status": "ok", **_safe(result)}
@@ -218,6 +209,10 @@ class RepoBrainTools:
 
     def impact_analysis(self, target: str, change_type: str = "modify",
                         auto_index: bool = True) -> dict:
+        """Estimate impact for a modify/modified, added, deleted, or renamed scenario."""
+        if change_type not in CHANGE_TYPES:
+            choices = ", ".join(CHANGE_TYPES)
+            raise ValueError(f"change_type must be one of: {choices}")
         def run(store):
             history = (getattr(store, "last_freshness", None) or {}).get("history")
             result = impact_analysis(store, target, change_type=change_type,
@@ -282,4 +277,6 @@ def create_server(root: str | Path):
 
 
 def run_server(root: str | Path) -> None:
+    configure_logging_from_env()
+    log_event("mcp.server.start", status="ok", transport="stdio")
     create_server(root).run(transport="stdio")

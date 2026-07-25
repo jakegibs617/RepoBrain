@@ -7,6 +7,9 @@ from dataclasses import dataclass, field
 from ..graph.schema import Edge, EdgeType, FtsRow, Node, NodeType
 
 
+_RAW_FTS_EXCLUDED_LANGUAGES = {"dockerfile", "json", "toml", "yaml"}
+
+
 @dataclass
 class ParseResult:
     nodes: list[Node] = field(default_factory=list)
@@ -59,9 +62,18 @@ class GenericFileParser(Parser):
             extractor=self.name,
         )
         result.nodes.append(file_node)
-        result.fts_rows.append(
-            FtsRow(path=path, name=file_node.name, content=content, node_id=file_node.id)
-        )
+        # Structured configuration parsers emit value-free facts. Persisting
+        # their raw file content here would bypass that boundary and retain
+        # credentials commonly embedded in JSON, TOML, ARG, or ENV values.
+        if language not in _RAW_FTS_EXCLUDED_LANGUAGES:
+            result.fts_rows.append(
+                FtsRow(
+                    path=path,
+                    name=file_node.name,
+                    content=content,
+                    node_id=file_node.id,
+                )
+            )
 
         # Directory chain: a/b/c.py -> Directory(a), Directory(a/b),
         # a CONTAINS a/b (provenance path = child dir), a/b CONTAINS file.
@@ -118,13 +130,18 @@ class ParserRegistry:
 def default_registry() -> ParserRegistry:
     from .code_treesitter import CodeParser
     from .config_parser import EnvFileParser
+    from .dockerfile_parser import DockerfileParser
     from .markdown_parser import MarkdownParser
+    from .structured_config_parser import JsonParser, TomlParser
     from .yaml_parser import YamlParser
     from .route_parser import RouteParser
 
     registry = ParserRegistry()
     registry.register(GenericFileParser())
     registry.register(EnvFileParser())
+    registry.register(JsonParser())
+    registry.register(TomlParser())
+    registry.register(DockerfileParser())
     registry.register(YamlParser())
     registry.register(MarkdownParser())
     registry.register(CodeParser())

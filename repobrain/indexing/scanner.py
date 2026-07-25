@@ -1,20 +1,4 @@
-"""File scanner: walks a repo applying ignore rules and language detection.
-
-Gitignore support is intentionally simple (fnmatch-based). Supported:
-- blank lines and `#` comments are skipped
-- trailing `/` marks a directory pattern (matches the dir and everything in it)
-- leading `/` anchors the pattern to the scan root
-- `*`, `?`, `[...]` globbing via fnmatch, matched against both the full
-  relative POSIX path and the basename / individual path segments
-
-NOT supported (documented limitations):
-- negation (`!pattern`) — such lines are skipped
-- nested .gitignore files in subdirectories (only the scan root's
-  .gitignore / .repobrainignore are read)
-- true gitignore `*` / `**` semantics: fnmatch's `*` crosses `/`, so a
-  pattern like `docs/*` over-matches nested paths such as `docs/a/b.md`
-  (real gitignore would only match direct children)
-"""
+"""File scanner: walks a repo applying gitignore rules and language detection."""
 from __future__ import annotations
 
 import os
@@ -22,20 +6,22 @@ from dataclasses import dataclass
 from fnmatch import fnmatch
 from pathlib import Path
 
-DEFAULT_EXCLUDES = [
+from pathspec import GitIgnoreSpec
+
+
+# These inputs are never indexable. Keep them in a separate, final matcher so
+# repository/user negation rules cannot accidentally re-include secrets or the
+# index database itself.
+MANDATORY_EXCLUDES = [
     ".git/",
     ".repobrain/",
-    # Dotenv files are secret-bearing inputs, not source.  Exclude the full
-    # family even when a repository's .gitignore only names `.env`.
-    #
-    # `.env.example` is deliberately excluded too: templates frequently grow
-    # real credentials by mistake.  The current scanner API only adds ignore
-    # patterns, so it cannot offer a safe per-call override without changing
-    # the meaning of existing include/exclude configuration.
     ".env",
     ".env.*",
     "*.env",
     "*.env.*",
+]
+
+DEFAULT_EXCLUDES = [
     "node_modules/",
     "vendor/",
     "dist/",
@@ -95,53 +81,56 @@ class ScannedFile:
     language: str | None
 
 
-@dataclass
-class _Pattern:
-    pattern: str
-    is_dir: bool
-    anchored: bool
+@dataclass(frozen=True)
+class _IgnoreLayer:
+    base_path: str
+    spec: GitIgnoreSpec
 
 
 class IgnoreMatcher:
-    """fnmatch-based subset of gitignore semantics. See module docstring."""
+    """Ordered gitwildmatch rules, optionally scoped to nested directories."""
 
-    def __init__(self, patterns: list[str]):
-        self.patterns: list[_Pattern] = []
-        for raw in patterns:
-            line = raw.strip()
-            if not line or line.startswith("#") or line.startswith("!"):
-                continue  # negation unsupported; skipped
-            anchored = line.startswith("/")
-            line = line.lstrip("/")
-            is_dir = line.endswith("/")
-            line = line.rstrip("/")
-            if line:
-                self.patterns.append(_Pattern(line, is_dir, anchored))
+    def __init__(
+        self,
+        patterns: list[str],
+        mandatory_patterns: list[str] | None = None,
+    ):
+        self._layers: list[_IgnoreLayer] = []
+        self._mandatory = GitIgnoreSpec.from_lines(mandatory_patterns or [])
+        self.add_patterns(patterns)
+
+    def add_patterns(self, patterns: list[str], base_path: str = "") -> None:
+        """Append rules as if read from ``base_path/.gitignore``."""
+        if not patterns:
+            return
+        base_path = base_path.strip("/")
+        self._layers.append(
+            _IgnoreLayer(base_path, GitIgnoreSpec.from_lines(patterns))
+        )
 
     def matches(self, rel_path: str, is_dir: bool = False) -> bool:
-        segments = rel_path.split("/")
-        basename = segments[-1]
-        for p in self.patterns:
-            if p.is_dir:
-                if p.anchored:
-                    # anchored dir pattern (`/dist/`): only a root-level
-                    # directory (or its contents) may match
-                    if fnmatch(segments[0], p.pattern) and (is_dir or len(segments) > 1):
-                        return True
+        rel_path = rel_path.strip("/")
+        candidate = f"{rel_path}/" if is_dir else rel_path
+        if self._mandatory.check_file(candidate).include is True:
+            return True
+
+        ignored: bool | None = None
+        for layer in self._layers:
+            if layer.base_path:
+                prefix = f"{layer.base_path}/"
+                if rel_path == layer.base_path:
+                    scoped = ""
+                elif rel_path.startswith(prefix):
+                    scoped = rel_path[len(prefix):]
                 else:
-                    # any directory segment on the path may match
-                    dir_segments = segments if is_dir else segments[:-1]
-                    if any(fnmatch(seg, p.pattern) for seg in dir_segments):
-                        return True
-                    if is_dir and fnmatch(rel_path, p.pattern):
-                        return True
+                    continue
             else:
-                if p.anchored:
-                    if fnmatch(rel_path, p.pattern):
-                        return True
-                elif fnmatch(rel_path, p.pattern) or fnmatch(basename, p.pattern):
-                    return True
-        return False
+                scoped = rel_path
+            scoped_candidate = f"{scoped}/" if is_dir and scoped else scoped
+            decision = layer.spec.check_file(scoped_candidate).include
+            if decision is not None:
+                ignored = decision
+        return ignored is True
 
 
 def _load_ignore_file(path: Path) -> list[str]:
@@ -152,11 +141,21 @@ def _load_ignore_file(path: Path) -> list[str]:
 
 def detect_language(path: str) -> str | None:
     name = os.path.basename(path)
-    if name == "Dockerfile":
+    if is_dockerfile_name(name):
         return "dockerfile"
     if name == "Makefile":
         return "makefile"
     return LANGUAGE_BY_EXTENSION.get(os.path.splitext(name)[1].lower())
+
+
+def is_dockerfile_name(name: str) -> bool:
+    """Recognize Dockerfile variants without stealing known source/doc files."""
+    lowered = name.lower()
+    if lowered == "dockerfile":
+        return True
+    if not lowered.startswith("dockerfile."):
+        return False
+    return os.path.splitext(lowered)[1] not in LANGUAGE_BY_EXTENSION
 
 
 def is_binary(data: bytes) -> bool:
@@ -172,7 +171,7 @@ def build_ignore_matcher(
     patterns += _load_ignore_file(root / ".gitignore")
     patterns += _load_ignore_file(root / ".repobrainignore")
     patterns += extra_excludes or []
-    return IgnoreMatcher(patterns)
+    return IgnoreMatcher(patterns, mandatory_patterns=MANDATORY_EXCLUDES)
 
 
 def scan(
@@ -190,6 +189,11 @@ def scan(
         rel_dir = os.path.relpath(dirpath, root).replace(os.sep, "/")
         if rel_dir == ".":
             rel_dir = ""
+        elif ".gitignore" in filenames:
+            matcher.add_patterns(
+                _load_ignore_file(Path(dirpath) / ".gitignore"),
+                base_path=rel_dir,
+            )
         # prune ignored directories in place
         dirnames[:] = sorted(
             d for d in dirnames

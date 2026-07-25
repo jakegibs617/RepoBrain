@@ -1,7 +1,6 @@
 """Token-budgeted, source-grounded project orientation for coding agents."""
 from __future__ import annotations
 
-import json
 import re
 from pathlib import Path
 
@@ -71,7 +70,10 @@ def _memory_sections(root: Path, store: GraphStore, limit: int = 5) -> tuple:
         line = relative + 1
         return f".repobrain/agent_memory.md:{line}"
 
-    alerts, recent, assumptions, questions = [], [], [], []
+    alerts: list[dict] = []
+    recent: list[dict] = []
+    assumptions: list[dict] = []
+    questions: list[dict] = []
     counts = {"invalidated": 0, "drifted": 0}
     current_entries = 0
     for entry in entries:
@@ -152,16 +154,16 @@ def project_brief(
     candidates = [
         ("Memory requiring attention", alerts),
         ("Purpose", _purpose_facts(store)),
-        ("Subsystems", _node_facts(store, ("Directory", "Module", "Package"), 12)),
-        ("Entrypoints", _node_facts(store, ("CLICommand", "Script"), 12)),
-        ("Routes and config", _node_facts(store, ("Route", "Endpoint", "ConfigKey", "EnvVar"), 12)),
+        ("Subsystems", _node_facts(store, ("Directory", "Module"), 12)),
+        ("Entrypoints", _node_facts(store, ("Route",), 12)),
+        ("Configuration", _node_facts(store, ("ConfigFile", "ConfigKey", "EnvVar"), 12)),
         ("Active assumptions", assumptions),
         ("Open questions", questions),
         ("Recent memory", recent),
     ]
     selected: list[dict] = []
     for title, facts in candidates:
-        kept = []
+        kept: list[dict] = []
         for fact in facts:
             trial = selected + [{"title": title, "facts": kept + [fact]}]
             if len(_render(freshness, trial, memory_counts)) <= budget * 4:

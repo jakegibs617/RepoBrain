@@ -35,6 +35,24 @@ def test_project_overview_and_report(indexer, store, node_app):
     overview = project_overview(store)
     assert overview["files"] > 0
     assert any(item["name"] == "POST /api/users" for item in overview["entrypoints"])
+    assert {item["type"] for item in overview["entrypoints"]} == {"Route"}
     markdown, html = generate_report(store, node_app)
-    assert "Detected Config" in markdown.read_text()
+    report = markdown.read_text()
+    assert "## Detected Routes" in report
+    assert "Detected Config" in report
     assert html.read_text().startswith("<!doctype html>")
+
+
+def test_report_honestly_shows_when_no_routes_are_detected(
+    indexer, store, docs_app
+):
+    indexer.index(docs_app)
+
+    overview = project_overview(store)
+    markdown, _ = generate_report(store, docs_app)
+    routes_section = markdown.read_text().split(
+        "## Detected Routes\n", 1
+    )[1].split("\n## ", 1)[0]
+
+    assert overview["entrypoints"] == []
+    assert "- None detected" in routes_section

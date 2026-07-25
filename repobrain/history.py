@@ -286,7 +286,8 @@ def extract_history(
             return False
         return not includes or any(fnmatch(path, pattern) for pattern in includes)
 
-    commit_rows, file_rows = [], []
+    commit_rows: list[tuple] = []
+    file_rows: list[tuple] = []
     filtered: dict[str, dict[str, list]] = {}
     oversized = 0
     for commit in commits:
@@ -456,7 +457,7 @@ def history_status_message(history: dict | None) -> str:
 
 
 def history_serveable(history: dict | None) -> bool:
-    return bool(history) and history.get("status") in {"current", "extracted"}
+    return history is not None and history.get("status") in {"current", "extracted"}
 
 
 def history_provenance(store: GraphStore) -> dict:
