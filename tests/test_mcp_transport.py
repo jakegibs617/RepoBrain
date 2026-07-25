@@ -346,7 +346,7 @@ def test_built_wheel_launches_over_installed_argument_array_when_cached(
         detail = " | ".join(evidence[-3:]) if evidence else "uvx resolution failed"
         if any(marker in detail.lower() for marker in (
             "not found in the cache", "not found in cache", "offline",
-            "network connectivity is disabled",
+            "network connectivity is disabled", "network was disabled",
         )):
             pytest.skip("isolated MCP smoke prerequisites unavailable offline: " + detail)
         pytest.fail("isolated built-wheel MCP launch failed: " + detail)

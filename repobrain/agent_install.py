@@ -58,6 +58,7 @@ MCP_CONFIG = ".mcp.json"
 GIT_MARKER_START = "# repobrain:index:start"
 GIT_MARKER_END = "# repobrain:index:end"
 GIT_RUNNER = "repobrain-index"
+GITIGNORE_ENTRY = ".repobrain/"
 
 
 def mcp_server_entry(root: str | Path) -> dict:
@@ -232,12 +233,28 @@ def _write_json(path: Path, value: dict) -> None:
     path.write_text(json.dumps(value, indent=2) + "\n", encoding="utf-8")
 
 
+def _prepare_gitignore(path: Path) -> tuple[str, bool]:
+    """Return content that safely excludes RepoBrain's local database.
+
+    The line is deliberately not marker-owned: uninstall leaves the safety
+    exclusion in place so an existing database cannot suddenly become
+    committable.
+    """
+    existing = path.read_text(encoding="utf-8") if path.exists() else ""
+    if any(line.strip() == GITIGNORE_ENTRY for line in existing.splitlines()):
+        return existing, False
+    separator = "" if not existing or existing.endswith("\n") else "\n"
+    return f"{existing}{separator}{GITIGNORE_ENTRY}\n", True
+
+
 def install_agent(root: str | Path, *, git_hooks: bool = False) -> dict:
     root = Path(root).resolve()
     settings_path = root / ".claude" / "settings.json"
     mcp_path = root / MCP_CONFIG
+    gitignore_path = root / ".gitignore"
     settings, _, settings_changed = _prepare_settings(settings_path)
     mcp_config, _, mcp_changed = _prepare_mcp(mcp_path, root)
+    gitignore_content, gitignore_changed = _prepare_gitignore(gitignore_path)
     # Validate optional Git integration before any configuration is changed.
     if git_hooks:
         _git_hooks_dir(root)
@@ -275,6 +292,8 @@ def install_agent(root: str | Path, *, git_hooks: bool = False) -> dict:
         _write_json(settings_path, settings)
     if mcp_changed:
         _write_json(mcp_path, mcp_config)
+    if gitignore_changed:
+        gitignore_path.write_text(gitignore_content, encoding="utf-8")
     if claude_changed:
         if MARKER_START in existing:
             claude_path.write_text(replacement.rstrip("\n") + "\n", encoding="utf-8")
@@ -284,8 +303,16 @@ def install_agent(root: str | Path, *, git_hooks: bool = False) -> dict:
     return {"status": "ok", "settings": str(settings_path.relative_to(root)),
             "claude_md": str(claude_path.relative_to(root)),
             "mcp_config": str(mcp_path.relative_to(root)),
+            "gitignore": {
+                "path": str(gitignore_path.relative_to(root)),
+                "installed": True,
+                "changed": gitignore_changed,
+            },
             "git_hooks": git_result,
-            "changed": settings_changed or mcp_changed or claude_changed or git_result["changed"]}
+            "changed": (
+                settings_changed or mcp_changed or gitignore_changed
+                or claude_changed or git_result["changed"]
+            )}
 
 
 def uninstall_agent(root: str | Path) -> dict:

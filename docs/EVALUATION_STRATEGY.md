@@ -36,6 +36,9 @@ Important adversarial cases include:
 - A unique symbol becomes ambiguous, then unique again.
 - A documented target is renamed while its documentation remains unchanged.
 - A config value is overridden at several deployment layers.
+- A dotenv canary remains unreachable through CLI/MCP reads and raw SQLite
+  bytes, including after upgrading a database that previously indexed it
+  (`tests/test_secret_safety.py`).
 - A route and a queue consumer share similarly named handlers.
 - A source file is syntactically broken during an intermediate commit.
 - A decision is superseded but remains present in repository history.
