@@ -97,6 +97,8 @@ uv --version</span></code></pre>
               <pre><code><span class="prompt">$</span> <span class="command-text">repobrain install-agent .</span></code></pre>
             </div>
             <div class="note"><span>i</span><p>Add <code>--git-hooks</code> to also keep the index fresh after every commit and merge. Restart your agent client afterward, then confirm the tools are registered with <code>cat .mcp.json</code>. Run the same command with <code>uninstall-agent .</code> any time to remove only RepoBrain-owned entries.</p></div>
+            <div class="note"><span>i</span><p><code>install-agent</code> also adds <code>.repobrain/</code> to <code>.gitignore</code>. Uninstall intentionally leaves that safety rule in place so the local graph database cannot become committable by accident.</p></div>
+            <div class="note"><span>i</span><p><strong>Native Windows:</strong> SessionStart commands and git-hook dispatchers require a POSIX-compatible shell. Use the MCP integration without <code>--git-hooks</code>, or run RepoBrain under WSL.</p></div>
             <button class="complete-btn"><span>✓</span> Mark complete</button>
           </article>
 

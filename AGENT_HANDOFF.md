@@ -650,6 +650,8 @@ milestone — see `docs/NEXT_SESSION_PROMPT.md`.
   confidence, DATABASE_URL env read, `tests/test_users.py` via imports).
   Same for `node_api_app` with `createUser` / `src/config.js` (PORT,
   DATABASE_URL, LOG_LEVEL env reads; TestCases calling the service).
-- 272/272 pytest tests pass (`.venv/bin/pytest -q`; run with `PYTHONPATH`
+- 289 tests are collected; 288 pass and the isolated offline `uvx` smoke
+  skips when its external cache prerequisites are unavailable
+  (`.venv/bin/pytest -q`; run with `PYTHONPATH`
   pointed at the checkout under test — see Known Pitfalls above about the
   primary repo's `.venv` being an editable install pinned to its own path).

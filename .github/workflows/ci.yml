@@ -1,0 +1,33 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Python ${{ matrix.python-version }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12", "3.13"]
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+      - name: Install locked development and MCP dependencies
+        run: uv sync --locked --extra dev --extra mcp
+      - name: Run tests
+        run: uv run --no-sync pytest
+      - name: Verify published quality metrics
+        if: matrix.python-version == '3.11'
+        run: uv run --no-sync python scripts/verify_setup_metrics.py

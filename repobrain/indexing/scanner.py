@@ -25,6 +25,17 @@ from pathlib import Path
 DEFAULT_EXCLUDES = [
     ".git/",
     ".repobrain/",
+    # Dotenv files are secret-bearing inputs, not source.  Exclude the full
+    # family even when a repository's .gitignore only names `.env`.
+    #
+    # `.env.example` is deliberately excluded too: templates frequently grow
+    # real credentials by mistake.  The current scanner API only adds ignore
+    # patterns, so it cannot offer a safe per-call override without changing
+    # the meaning of existing include/exclude configuration.
+    ".env",
+    ".env.*",
+    "*.env",
+    "*.env.*",
     "node_modules/",
     "vendor/",
     "dist/",
@@ -79,6 +90,8 @@ class ScannedFile:
     abs_path: str
     size: int
     mtime: float
+    mtime_ns: int
+    ctime_ns: int
     language: str | None
 
 
@@ -208,6 +221,8 @@ def scan(
                     abs_path=abs_path,
                     size=st.st_size,
                     mtime=st.st_mtime,
+                    mtime_ns=st.st_mtime_ns,
+                    ctime_ns=st.st_ctime_ns,
                     language=detect_language(rel),
                 )
             )

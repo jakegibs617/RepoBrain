@@ -115,9 +115,19 @@ class Indexer:
             self.store.upsert_edges(combined.edges)
             self.store.add_fts_rows(combined.fts_rows)
             for f in diff.to_parse:
-                self.store.upsert_file(f.path, diff.hashes[f.path], f.size, f.mtime, f.language)
+                self.store.upsert_file(
+                    f.path,
+                    diff.hashes[f.path],
+                    f.size,
+                    f.mtime,
+                    f.mtime_ns,
+                    f.ctime_ns,
+                    f.language,
+                )
             for f in diff.stat_changed:
-                self.store.update_file_stat(f.path, f.size, f.mtime)
+                self.store.update_file_stat(
+                    f.path, f.size, f.mtime, f.mtime_ns, f.ctime_ns
+                )
             self.store.touch_paths([f.path for f in diff.unchanged])
             # Reconciliation pass: parsers may resolve cross-file relationships
             # (e.g. name-only CALLS) now that this run's nodes are stored.

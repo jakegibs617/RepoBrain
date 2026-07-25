@@ -5,7 +5,7 @@ import posixpath
 import re
 
 from .base import ParseResult, Parser
-from ..graph.schema import Edge, EdgeType, FtsRow, Node, NodeType
+from ..graph.schema import Edge, EdgeType, Node, NodeType
 
 
 _ENV_FILE_RE = re.compile(r"(^|/)(\.env(?:\.[^/]+)?|[^/]*\.env(?:\.[^/]+)?)$")
@@ -13,7 +13,13 @@ _ASSIGNMENT_RE = re.compile(r"^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(
 
 
 class EnvFileParser(Parser):
-    """Extract definitions from .env, .env.example, and similarly named files."""
+    """Extract dotenv key provenance without retaining assigned values.
+
+    Dotenv files are excluded by the default scanner, including
+    ``.env.example``.  This parser remains defensive for direct/custom-parser
+    use: it records key names and line numbers only, never raw content or
+    assignment values.
+    """
 
     name = "env_file_parser"
 
@@ -33,7 +39,6 @@ class EnvFileParser(Parser):
             extractor=self.name,
         )
         result.nodes.append(config)
-        result.fts_rows.append(FtsRow(path=path, name=config.name, content=content, node_id=config.id))
         for line_no, line in enumerate(content.splitlines(), 1):
             if not line.strip() or line.lstrip().startswith("#"):
                 continue
@@ -41,8 +46,7 @@ class EnvFileParser(Parser):
             if not match:
                 result.warnings.append(f"{path}:{line_no}: ignored invalid environment assignment")
                 continue
-            name, raw_value = match.groups()
-            value = raw_value.strip()
+            name = match.group(1)
             key = Node(
                 type=NodeType.CONFIG_KEY,
                 name=name,
@@ -50,7 +54,7 @@ class EnvFileParser(Parser):
                 path=path,
                 start_line=line_no,
                 end_line=line_no,
-                metadata={"value": value, "format": "dotenv"},
+                metadata={"format": "dotenv"},
                 extractor=self.name,
             )
             env = Node(type=NodeType.ENV_VAR, name=name, qualified_name=name, path="", extractor=self.name)
@@ -59,6 +63,6 @@ class EnvFileParser(Parser):
                 Edge(type=EdgeType.DECLARES_CONFIG, source_node_id=config.id, target_node_id=key.id,
                      path=path, start_line=line_no, extractor=self.name),
                 Edge(type=EdgeType.SETS_ENV, source_node_id=key.id, target_node_id=env.id,
-                     path=path, start_line=line_no, metadata={"value": value}, extractor=self.name),
+                     path=path, start_line=line_no, extractor=self.name),
             ))
         return result
