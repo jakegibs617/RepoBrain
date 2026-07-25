@@ -146,7 +146,8 @@ uvx --from git+https://github.com/jakegibs617/RepoBrain repobrain index .
 # open assumptions, recent memory — grounded in the graph you just built
 uvx --from git+https://github.com/jakegibs617/RepoBrain repobrain brief --budget 2000
 
-# install the MCP server entry and Claude session context in this repository
+# installs an MCP server entry in .mcp.json, a SessionStart hook in
+# .claude/settings.json, and a marker-delimited section in CLAUDE.md
 # add --git-hooks to also keep the index fresh after commits and merges
 uvx --from git+https://github.com/jakegibs617/RepoBrain repobrain install-agent .
 
@@ -207,6 +208,21 @@ wheel and editable installs retain their direct artifact/source URL. The JSON
 stores every token as a separate argument, so repository paths containing
 spaces do not depend on shell quoting. The `mcp` extra is optional for normal
 CLI use and installed automatically by that MCP launch command.
+
+`install-agent` also appends a marker-delimited section to `CLAUDE.md` so the
+agent knows the session brief exists and how to refresh it:
+
+```
+<!-- repobrain:brief:start -->
+## RepoBrain session context
+
+RepoBrain injects a source-grounded project brief at session start. If it reports a stale index, run `repobrain index`.
+<!-- repobrain:brief:end -->
+```
+
+Reruns of `install-agent` update this block (and the `.mcp.json`/
+`.claude/settings.json` entries) in place rather than duplicating them, and
+`uninstall-agent .` removes only what's between the markers.
 
 ### MCP client and transport contract
 

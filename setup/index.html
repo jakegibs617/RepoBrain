@@ -91,12 +91,20 @@ uv --version</span></code></pre>
 
           <article class="step-card" id="step-4" data-step="4">
             <div class="step-heading"><span>04</span><div><p>Connect</p><h2>Give your agent MCP tools</h2></div></div>
-            <p class="step-copy">This is the actual point of RepoBrain: your AI coding agent gets first-class access to the graph you just built. One command writes a repository-scoped <code>.mcp.json</code> entry, a marker-owned <code>CLAUDE.md</code> section, and (for Claude Code) an idempotent SessionStart hook.</p>
+            <p class="step-copy">This is the actual point of RepoBrain: your AI coding agent gets first-class access to the graph you just built. One command touches three files, all idempotently: an <code>mcpServers.repobrain</code> entry in <code>.mcp.json</code> (registers the MCP tools your agent can call), a <code>hooks.SessionStart</code> entry in <code>.claude/settings.json</code> (runs <code>repobrain brief</code> at the start of every session), and a marker-delimited section appended to <code>CLAUDE.md</code>:</p>
             <div class="command" data-command-unix="repobrain install-agent ." data-command-windows="repobrain install-agent .">
               <div class="command-top"><span>Terminal · project root</span><button class="copy-btn" aria-label="Copy install-agent command">Copy</button></div>
               <pre><code><span class="prompt">$</span> <span class="command-text">repobrain install-agent .</span></code></pre>
             </div>
-            <div class="note"><span>i</span><p>Add <code>--git-hooks</code> to also keep the index fresh after every commit and merge. Restart your agent client afterward, then confirm the tools are registered with <code>cat .mcp.json</code>. Run the same command with <code>uninstall-agent .</code> any time to remove only RepoBrain-owned entries.</p></div>
+            <div class="command" data-command-unix="" data-command-windows="">
+              <div class="command-top"><span>CLAUDE.md — appended section</span></div>
+              <pre><code>&lt;!-- repobrain:brief:start --&gt;
+## RepoBrain session context
+
+RepoBrain injects a source-grounded project brief at session start. If it reports a stale index, run `repobrain index`.
+&lt;!-- repobrain:brief:end --&gt;</code></pre>
+            </div>
+            <div class="note"><span>i</span><p>Reruns update these three blocks in place rather than duplicating them. Add <code>--git-hooks</code> to also keep the index fresh after every commit and merge. Restart your agent client afterward, then confirm the tools are registered with <code>cat .mcp.json</code>. Run the same command with <code>uninstall-agent .</code> any time to remove only RepoBrain-owned entries.</p></div>
             <div class="note"><span>i</span><p><code>install-agent</code> also adds <code>.repobrain/</code> to <code>.gitignore</code>. Uninstall intentionally leaves that safety rule in place so the local graph database cannot become committable by accident.</p></div>
             <div class="note"><span>i</span><p><strong>Native Windows:</strong> SessionStart commands and git-hook dispatchers require a POSIX-compatible shell. Use the MCP integration without <code>--git-hooks</code>, or run RepoBrain under WSL.</p></div>
             <button class="complete-btn"><span>✓</span> Mark complete</button>
@@ -176,6 +184,18 @@ repobrain explain file repobrain/cli.py</span></code></pre>
             <summary>Will it modify my source code?</summary>
             <div class="faq-answer">
               <p>No. RepoBrain only reads your files and writes to its own <code>.repobrain/</code> directory (plus an optional <code>.mcp.json</code> entry and <code>CLAUDE.md</code> section if you run <code>install-agent</code>). It never edits your source.</p>
+            </div>
+          </details>
+          <details class="faq-item">
+            <summary>How do I ask how two things relate?</summary>
+            <div class="faq-answer">
+              <p>There's no single <code>relate A B</code> command — if you're chatting with an agent that has RepoBrain's MCP tools connected (see <a href="#step-4">step 4</a>), just ask it in plain English; it'll call the right tools itself. To do it by hand: locate each side with <code>repobrain search "…"</code> or <code>repobrain find-symbol &lt;name&gt;</code>, then trace the connection with <code>repobrain trace data-flow &lt;start&gt; --depth 3 --direction both</code> or <code>repobrain explain file &lt;path&gt;</code>. For docs-to-code, use <code>docs-for-code</code>/<code>code-for-docs</code>; for env vars, use <code>trace config &lt;NAME&gt;</code>.</p>
+            </div>
+          </details>
+          <details class="faq-item">
+            <summary>How does my agent know to use RepoBrain without me typing a command?</summary>
+            <div class="faq-answer">
+              <p><code>install-agent</code> wires up two things (see <a href="#step-4">step 4</a>): a SessionStart hook that runs <code>repobrain brief</code> automatically at the start of every session, and an MCP server registration that lets the agent call RepoBrain's tools (search, explain, trace, impact analysis, and more) on its own mid-conversation whenever a question needs grounded repo facts. Nothing runs unless one of those two triggers fires.</p>
             </div>
           </details>
         </div>
