@@ -109,8 +109,8 @@ def _manifest(tmp_path, entries):
 
 
 def test_corpus_mode_scores_every_entry_and_aggregates_totals(tmp_path):
-    first = _repo(tmp_path, "one", "def alpha():\n    return 1\n")
-    second = _repo(tmp_path, "two", "def beta():\n    return 2\n")
+    _repo(tmp_path, "one", "def alpha():\n    return 1\n")
+    _repo(tmp_path, "two", "def beta():\n    return 2\n")
     manifest = _manifest(tmp_path, [
         {
             "name": "one",

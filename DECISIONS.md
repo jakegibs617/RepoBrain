@@ -1107,3 +1107,17 @@ disagree with the graph it labels.
 **Regenerating indexes into a temporary database**, never the developer's
 `.repobrain/`, so the published artifact is a function of the tree alone and
 not of whatever local state happened to be lying around.
+
+**The remedy is one command, deliberately.** An exact gate is only defensible
+if closing it is cheap; a check that costs a scavenger hunt gets weakened the
+first time it is inconvenient. The published figures were duplicated by hand in
+three places — the machine-readable `data-value`, the `<strong>` a reader sees,
+and one line of `AGENT_HANDOFF.md` — which is precisely where the drift the
+audit found got in. `verify_setup_metrics.py` now owns the edit as well as the
+check (`sync_metrics`, exposed as `--write`), and `refresh_snapshot.py` calls
+it, so a failing gate costs `refresh_snapshot.py` and a commit. Writer and
+checker are pinned to each other by a test that syncs a page and then reads the
+values back through `_published_metric`: if they ever disagree, the gate could
+never go green, and that test fails first. The handoff's unverified "N pass"
+count was dropped in the same change rather than synced — nothing measured it,
+so it was a published number with no gate behind it.

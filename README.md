@@ -450,7 +450,8 @@ open setup/graph.html
 
 Regenerate the published self-index snapshot that page ships with. CI fails
 when the committed snapshot no longer matches the tree, so run this after
-changes that add or remove indexed files:
+changes that add or remove indexed files. It also resyncs the numbers the
+quality page and `AGENT_HANDOFF.md` publish, so one command closes the gate:
 
 ```bash
 .venv/bin/python scripts/refresh_snapshot.py
