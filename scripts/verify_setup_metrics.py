@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 import re
 import subprocess
 import sys
+
+from repobrain.testing.snapshot import read_snapshot, snapshot_drift, structural_counts
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -25,14 +26,6 @@ def _published_metric(page: str, name: str) -> int:
     return int(match.group(1))
 
 
-def _graph() -> dict[str, object]:
-    source = GRAPH_DATA.read_text(encoding="utf-8")
-    prefix = "window.REPOBRAIN_GRAPH = "
-    if not source.startswith(prefix) or not source.rstrip().endswith(";"):
-        raise ValueError(f"unexpected graph-data.js format: {GRAPH_DATA}")
-    return json.loads(source[len(prefix) :].strip().removesuffix(";"))
-
-
 def _collected_tests() -> int:
     result = subprocess.run(
         [sys.executable, "-m", "pytest", "--collect-only", "-q"],
@@ -47,18 +40,34 @@ def _collected_tests() -> int:
     return int(match.group(1))
 
 
+def _verify_snapshot_freshness(snapshot: dict) -> bool:
+    """Fail when the committed self-index no longer matches the working tree."""
+    drift = snapshot_drift(ROOT, snapshot)
+    if not drift:
+        return True
+    for metric, (shown, measured) in drift.items():
+        print(
+            f"{metric}: setup/graph-data.js publishes {shown}, "
+            f"indexing this tree measures {measured}",
+            file=sys.stderr,
+        )
+    print(
+        "setup/graph-data.js is stale: run scripts/refresh_snapshot.py and "
+        "commit the regenerated snapshot.",
+        file=sys.stderr,
+    )
+    return False
+
+
 def main() -> int:
     page = QUALITY_PAGE.read_text(encoding="utf-8")
     handoff = HANDOFF.read_text(encoding="utf-8")
-    graph = _graph()
-    nodes = graph.get("nodes")
-    edges = graph.get("edges")
-    if not isinstance(nodes, list) or not isinstance(edges, list):
-        raise ValueError("graph-data.js must contain node and edge lists")
+    graph = read_snapshot(GRAPH_DATA)
+    nodes, edges = graph["nodes"], graph["edges"]
 
     actual = {
         "tests": _collected_tests(),
-        "files": sum(node.get("type") == "File" for node in nodes),
+        "files": structural_counts(graph)["files"],
         "graph": len(nodes) + len(edges),
     }
     published = {name: _published_metric(page, name) for name in actual}
@@ -72,12 +81,14 @@ def main() -> int:
         for name, value in actual.items()
         if published[name] != value
     }
-    if mismatches:
-        for name, (shown, measured) in mismatches.items():
-            print(
-                f"{name}: setup/evaluation.html publishes {shown}, measured {measured}",
-                file=sys.stderr,
-            )
+    for name, (shown, measured) in mismatches.items():
+        print(
+            f"{name}: setup/evaluation.html publishes {shown}, measured {measured}",
+            file=sys.stderr,
+        )
+    # Both checks always run: a stale snapshot also skews the published metrics,
+    # and reporting only the first failure would hide half the work to do.
+    if not _verify_snapshot_freshness(graph) or mismatches:
         return 1
 
     print(

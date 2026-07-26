@@ -448,6 +448,14 @@ Export the current local graph for the interactive companion page:
 open setup/graph.html
 ```
 
+Regenerate the published self-index snapshot that page ships with. CI fails
+when the committed snapshot no longer matches the tree, so run this after
+changes that add or remove indexed files:
+
+```bash
+.venv/bin/python scripts/refresh_snapshot.py
+```
+
 ## Limitations
 
 - Gitignore matching follows gitwildmatch rules, including negation and nested

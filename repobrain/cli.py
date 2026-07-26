@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Iterable
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -157,6 +158,28 @@ def index(path: str, no_incremental: bool, no_history: bool) -> None:
         click.echo(f"  history       : {_history_summary(history)}")
     for warning in stats.warnings:
         click.echo(f"  warning: {warning}")
+
+
+def _impact_subject(item: dict) -> str:
+    """Identify an impacted node well enough to act on it.
+
+    Path alone collapses distinct symbols in the same file into rows that look
+    like duplicates, so lead with the symbol and keep the location alongside it.
+    """
+    node = item["node"]
+    name = node.get("qualified_name") or node.get("name") or node.get("path") or "?"
+    return f"{name} [{node['type']}] ({node.get('path') or '?'}:{node.get('start_line') or '?'})"
+
+
+def _dedupe(rows: Iterable[str]) -> list[str]:
+    """Drop repeats while preserving rank order; distinct rows all survive."""
+    seen: set[str] = set()
+    unique = []
+    for row in rows:
+        if row not in seen:
+            seen.add(row)
+            unique.append(row)
+    return unique
 
 
 def _history_summary(history: dict) -> str:
@@ -703,16 +726,18 @@ def impact(target: str, change_type: str, depth: int, path: str,
         return
     for title,key in (("High-confidence impact","high_confidence"),("Medium-confidence impact","medium_confidence"),("Low-confidence possible impact","low_confidence"),("Recommended tests","recommended_tests"),("Docs likely needing updates","docs_likely_needing_updates")):
         click.echo(f"\n{title}")
-        for item in result[key]:
-            click.echo(f"  {item['node']['path']} [{item['node']['type']}] via {item['via']} conf={item['confidence']:.2f}")
+        for row in _dedupe(f"{_impact_subject(item)} via {item['via']} "
+                           f"conf={item['confidence']:.2f}" for item in result[key]):
+            click.echo(f"  {row}")
         if not result[key]:
             click.echo("  none")
     click.echo("\nHistorical co-change (heuristic)")
     historical = result["historical_evidence"]
-    for item in historical["items"]:
-        click.echo(f"  {item['node']['path']} via {item['via']} "
-                   f"support={item['support']} score={item['score']:.2f} "
-                   f"conf={item['confidence']:.2f}")
+    for row in _dedupe(f"{_impact_subject(item)} via {item['via']} "
+                       f"support={item['support']} score={item['score']:.2f} "
+                       f"conf={item['confidence']:.2f}"
+                       for item in historical["items"]):
+        click.echo(f"  {row}")
     if not historical["items"]:
         detail = f" ({historical['explanation']})" if historical.get("status") else ""
         click.echo(f"  none{detail}")

@@ -949,3 +949,161 @@ findings were fixed by factoring `_resolve_method_in_class` out of
 `_resolve_java_qualified_call` is a genuinely different target shape from
 `_resolve_plain_call`'s own symbol_aliases tier (Method-nested-in-class vs
 top-level Function/Class), not accidental duplication.
+
+## 2026-07-25 — Release hardening (audit remediation)
+
+These five records are a backfill. The 2026-07-25 morning audit found a
+Critical secret-exfiltration defect and two structural absences, and the fix
+wave that closed them (PRs #10/#11, 2,339 insertions) landed without ADRs —
+which the afternoon re-audit correctly called out as a lapse exactly where
+future maintainers most need rationale. D35–D38 reconstruct decisions already
+implemented; D39 records a decision made while closing the re-audit's
+remaining items.
+
+### D35: Dotenv files are excluded by a mandatory matcher that no repository rule can negate, and the dotenv parser is value-free by construction — defense in depth, not one gate
+
+The morning audit planted canary secrets in `.env`/`.env.local` and retrieved
+them through `repobrain search`, `trace config --json`, the MCP
+`search_project` tool, and `strings` over the SQLite file. The values were in
+the index because the file was scanned and its assignments stored.
+
+One fix would have sufficed to close the probe: stop scanning dotenv files.
+That is not what was built, because the failure mode here is asymmetric — a
+secret in a user's index is unrecoverable once it leaks into a shared
+database, an agent transcript, or a git history, while an over-exclusion costs
+only a missing config key. Two independent layers now have to fail before a
+value is stored.
+
+**Layer one — exclusion that cannot be argued with.** `MANDATORY_EXCLUDES`
+(`repobrain/indexing/scanner.py:15-22`) lists `.env`, `.env.*`, `*.env`,
+`*.env.*` alongside `.git/` and `.repobrain/`, and is compiled into a
+*separate*, final `GitIgnoreSpec` (`scanner.py:99`) rather than being
+prepended to the repository's own patterns. This is the load-bearing detail:
+gitignore semantics are last-match-wins, so a pattern list is negotiable — a
+repository's `!.env.local` or a user's `.repobrainignore` negation would
+otherwise re-include the file and silently re-open the vulnerability. A
+separate matcher consulted after the layered ones has no negation path at all.
+`.env.example` is deliberately inside the exclusion, not carved out: a file
+that *should* contain only placeholder keys frequently does not, and the
+declarative-key benefit does not justify reasoning about which dotenv files
+are safe.
+
+**Layer two — a parser that has nothing to leak.** `EnvFileParser`
+(`repobrain/parsers/config_parser.py:15-22`) is now unreachable through normal
+scanning, and is kept anyway, rewritten to record key names and line numbers
+only. Custom parser wiring and direct invocation are real surfaces, and a
+parser that never holds a value cannot be made to disclose one by a future
+caller who forgets why the scanner rule exists.
+
+**Pinned, not trusted.** `tests/test_secret_safety.py` re-runs the original
+attack — canaries planted, index built, then every retrieval surface plus raw
+`strings` over the database asserted clean. The regression test is the reason
+this record can be short: the policy is executable.
+
+### D36: Ignore matching moved to `pathspec`'s `GitIgnoreSpec`, retiring D3's fnmatch subset
+
+D3 chose "a small fnmatch-based subset" of gitignore semantics for the MVP,
+which was the right call while the graph was the risk and ignore rules were
+cosmetic. D35 changed the stakes: once exclusion is a security boundary, an
+approximation of gitignore semantics is a liability, because the gap between
+"what the user believes is ignored" and "what RepoBrain actually skips" is
+where a secret gets indexed.
+
+`pathspec>=0.12,<2` (`pyproject.toml`) is a dependency added deliberately
+against this project's local-first, thin-dependency instinct. The trade
+accepted: one well-maintained, pure-Python library versus hand-maintaining
+directory-only patterns (`build/`), anchoring rules (`/dist` vs `dist`),
+`**` semantics, and last-match-wins negation — each a place where a
+hand-rolled subset silently under-matches. `IgnoreMatcher` keeps per-directory
+layers (`_IgnoreLayer`, `scanner.py:108`) so nested `.gitignore` files resolve
+relative to their own base path, matching git's actual behavior rather than
+flattening every pattern to the repository root.
+
+### D37: CI is an independent adversarial runner, not a convenience — it re-derives every published number rather than trusting the repository's claims about itself
+
+Before this milestone the project had 300+ tests and no CI. The audit's
+finding was not "tests might break"; it was that *every* quality claim on the
+setup site and in the docs rested on the author having run something locally
+and reported the result honestly. A CI job that only runs `pytest` would have
+fixed the smaller problem.
+
+`.github/workflows/ci.yml` therefore has four kinds of step, and the last two
+are the point:
+
+1. **A 3.11/3.12/3.13 matrix** on `uv sync --locked`, so the floor of
+   `requires-python` and the current release are both exercised and the
+   committed `uv.lock` is the thing being tested. Dependencies gained upper
+   bounds in the same change (`pathspec<2`, `mcp<2`,
+   `tree-sitter-language-pack<1.14`) — an unbounded range means a green CI run
+   today says nothing about an install tomorrow.
+2. **Lint and types on 3.11 only.** `ruff` and `mypy` results do not vary
+   usefully across the matrix; running them three times buys nothing and slows
+   the signal.
+3. **A coverage floor of 88%**, enforced with `--cov-fail-under` rather than
+   reported. A reported number drifts down one uncovered branch at a time; a
+   gate makes the drift a conversation.
+4. **Scripts that recompute published claims.**
+   `scripts/verify_setup_metrics.py` re-derives the test count, file count,
+   and graph-fact total and fails if the site disagrees;
+   `scripts/evaluate_extraction.py` re-measures extraction against labeled
+   ground truth. This is the adversarial part: documentation is verified by
+   execution, so the site cannot overstate the project without turning the
+   build red.
+
+### D38: The extraction harness is a labeled-corpus regression gate; it is never described as a general accuracy measurement
+
+`scripts/evaluate_extraction.py` indexes a fixture into a throwaway database
+and scores the result against a JSON specification of `expected` and
+`forbidden` fact keys, exiting non-zero on a missing expected fact, a present
+forbidden fact, *or* any extraction warning. The `forbidden` array is the
+design decision: an extractor can trivially maximize recall by inventing
+edges, so a harness that only checks expected facts measures the wrong half.
+Pinning facts that must *not* appear — an unresolvable `someVar.method()`
+(D34), a call that does not exist — is what makes the gate meaningful.
+
+The scope limit is recorded here because the number the harness prints invites
+misuse. Precision and recall computed over a committed corpus are properties
+*of that corpus*, not of the extractor in general; a `1.0/1.0` result on a
+handful of fixtures says the extractor has not regressed, and says nothing
+about an unseen repository. `docs/EVALUATION_STRATEGY.md` and every other
+description of this gate must therefore state the corpus scope alongside any
+figure. Publishing a bare accuracy number sourced from this harness would be
+the same category of overclaim the audit already found on the setup site.
+
+### D39: Snapshot freshness is enforced by re-indexing and comparing exact structural counts, with history-derived edges excluded — a drift budget was rejected
+
+`setup/graph-data.js` is RepoBrain's index of itself, rendered by the graph
+page. It is generated by hand, so it decays silently; the re-audit found it
+~10% behind HEAD, and noted that nothing in CI could catch further decay. The
+morning fix had made the label honest (a dated snapshot pill instead of a
+"Live" badge), which converted a misleading claim into ordinary staleness —
+worth fixing properly rather than re-labeling again.
+
+**Exact, not bounded.** The rejected alternative was a drift budget: fail only
+when the snapshot trails by more than ~2% of nodes and edges. It is friendlier
+— most pull requests would not need to regenerate — but it licenses permanent
+rot just under the threshold, and a gate that tolerates being slightly wrong
+forever is a gate that has to be re-audited. `snapshot_drift`
+(`repobrain/testing/snapshot.py`) re-indexes the working tree from scratch and
+compares file count, node count, and structural edge count for exact equality.
+When it fails, `scripts/refresh_snapshot.py` regenerates the artifact; the
+cost is one command and one commit, and the audit's failure mode becomes
+impossible rather than merely bounded.
+
+**Why history edges are excluded.** `CO_CHANGED_WITH` is derived from git
+history, not from the working tree, so it changes on every commit. Including
+it would make a correct snapshot fail one commit after it was generated,
+which trains maintainers to regenerate mechanically or to weaken the gate —
+the two ways checks like this die. Excluding the history layer keeps the
+comparison over exactly the part of the graph the snapshot claims to be a
+function of.
+
+**Provenance moved into the data.** The date and commit were hardcoded in
+`setup/graph.html` in two places, a second drift source the freshness check
+could not see. The exporter now writes `commit` and `generated_at` into the
+payload and `setup/graph.js` renders both from it, so the label cannot
+disagree with the graph it labels.
+
+**Regenerating indexes into a temporary database**, never the developer's
+`.repobrain/`, so the published artifact is a function of the tree alone and
+not of whatever local state happened to be lying around.

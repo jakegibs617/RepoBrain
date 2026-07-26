@@ -31,6 +31,42 @@ def test_impact_analysis_includes_importers_docs_and_tests(indexer, store, small
     assert "README.md" in paths
 
 
+def test_impact_rows_name_the_impacted_symbol(small_app):
+    # Distinct callers in one file must not render as identical rows: an agent
+    # reading this surface has to be able to tell them apart and count them.
+    runner = CliRunner()
+    assert runner.invoke(main, ["index", str(small_app)]).exit_code == 0
+    result = runner.invoke(
+        main, ["impact", "app/services/user_service.py", "--path", str(small_app)]
+    )
+
+    assert result.exit_code == 0, result.output
+    section = result.output.split("High-confidence impact")[1].split("\n\n")[0]
+    rows = [line.strip() for line in section.strip().splitlines() if line.strip()]
+    assert len(rows) == len(set(rows)), f"duplicate impact rows: {rows}"
+    assert any(
+        "app.handlers.user_handler.handle_create_user" in row
+        and "(app/handlers/user_handler.py:5)" in row
+        and "via CALLS" in row
+        for row in rows
+    ), rows
+    assert any("app.handlers.user_handler.handle_get_user" in row for row in rows), rows
+
+
+def test_impact_rows_fall_back_to_the_path_when_a_node_is_unnamed(small_app):
+    runner = CliRunner()
+    assert runner.invoke(main, ["index", str(small_app)]).exit_code == 0
+    result = runner.invoke(
+        main, ["impact", "app/services/user_service.py", "--path", str(small_app)]
+    )
+
+    assert result.exit_code == 0, result.output
+    assert " [] " not in result.output
+    for line in result.output.splitlines():
+        if " via " in line:
+            assert line.strip().split(" [")[0], f"row lost its identity: {line}"
+
+
 def test_project_overview_and_report(indexer, store, small_app):
     indexer.index(small_app)
     overview = project_overview(store)

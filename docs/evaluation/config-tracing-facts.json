@@ -1,0 +1,24 @@
+{
+  "expected": [
+    "node|EnvVar:DATABASE_URL@",
+    "node|DockerService:docker-compose.yml:api@docker-compose.yml",
+    "node|KubernetesResource:Deployment/api@k8s/deployment.yml",
+    "node|GitHubJob:.github/workflows/test.yml:test@.github/workflows/test.yml",
+    "node|SecretRef:database@k8s/deployment.yml",
+    "edge|READS_ENV|Module:app@app.py|EnvVar:DATABASE_URL@|app.py",
+    "edge|SETS_ENV|DockerService:docker-compose.yml:api@docker-compose.yml|EnvVar:DATABASE_URL@|docker-compose.yml",
+    "edge|SETS_ENV|KubernetesResource:Deployment/api@k8s/deployment.yml|EnvVar:DATABASE_URL@|k8s/deployment.yml",
+    "edge|SETS_ENV|GitHubJob:.github/workflows/test.yml:test@.github/workflows/test.yml|EnvVar:DATABASE_URL@|.github/workflows/test.yml",
+    "edge|DEPENDS_ON|DockerService:docker-compose.yml:api@docker-compose.yml|DockerService:docker-compose.yml:database@docker-compose.yml|docker-compose.yml",
+    "edge|USES_IMAGE|DockerService:docker-compose.yml:database@docker-compose.yml|DockerImage:postgres:16@|docker-compose.yml",
+    "edge|REFERENCES|KubernetesResource:Deployment/api@k8s/deployment.yml|SecretRef:database@k8s/deployment.yml|k8s/deployment.yml"
+  ],
+  "forbidden": [
+    "node|File:.env.example@.env.example",
+    "node|ConfigFile:.env.example@.env.example",
+    "node|ConfigKey:DATABASE_URL@.env.example",
+    "edge|SETS_ENV|ConfigFile:.env.example@.env.example|EnvVar:DATABASE_URL@|.env.example",
+    "node|ConfigKey:services.api.environment.LOG_LEVEL@docker-compose.yml",
+    "edge|DEPENDS_ON|DockerService:docker-compose.yml:database@docker-compose.yml|DockerService:docker-compose.yml:api@docker-compose.yml|docker-compose.yml"
+  ]
+}

@@ -1,0 +1,13 @@
+{
+  "expected": [
+    "node|Class:services/user_service.UserService@services/user_service.rb",
+    "node|Method:services/user_service.UserService.create_user@services/user_service.rb",
+    "edge|INSTANTIATES|Function:handlers/user_handler.build_service@handlers/user_handler.rb|Class:services/user_service.UserService@services/user_service.rb|handlers/user_handler.rb",
+    "edge|CALLS|Function:handlers/user_handler.handle_create_user@handlers/user_handler.rb|Function:handlers/user_handler.build_service@handlers/user_handler.rb|handlers/user_handler.rb",
+    "edge|IMPORTS|Module:handlers/user_handler@handlers/user_handler.rb|Module:services/user_service@services/user_service.rb|handlers/user_handler.rb"
+  ],
+  "forbidden": [
+    "edge|CALLS|Function:handlers/user_handler.handle_create_user@handlers/user_handler.rb|Method:services/user_service.UserService.create_user@services/user_service.rb|handlers/user_handler.rb",
+    "edge|CALLS|Function:handlers/user_handler.handle_create_user@handlers/user_handler.rb|Method:services/user_service.UserService.delete_user@services/user_service.rb|handlers/user_handler.rb"
+  ]
+}

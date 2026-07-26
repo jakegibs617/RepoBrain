@@ -1,0 +1,20 @@
+{
+  "expected": [
+    "node|Route:POST /api/users@src/routes/users.js",
+    "node|Function:src/services/userService.createUser@src/services/userService.js",
+    "node|TestCase:src/services/userService.test#test:creates a user with a name@src/services/userService.test.js",
+    "node|ConfigKey:scripts.start@package.json",
+    "edge|HANDLES_ROUTE|Route:GET /api/users/:id@src/routes/users.js|Function:src/routes/users.getUserRoute@src/routes/users.js|src/routes/users.js",
+    "edge|CALLS|Function:src/routes/users.getUserRoute@src/routes/users.js|Function:src/services/userService.getUser@src/services/userService.js|src/routes/users.js",
+    "edge|CALLS|TestCase:src/services/userService.test#test:creates a user with a name@src/services/userService.test.js|Function:src/services/userService.createUser@src/services/userService.js|src/services/userService.test.js",
+    "edge|READS_ENV|Module:src/config@src/config.js|EnvVar:DATABASE_URL@|src/config.js",
+    "edge|IMPORTS|Module:src/services/userService@src/services/userService.js|Module:src/config@src/config.js|src/services/userService.js",
+    "edge|MENTIONS|MarkdownSection:README.md#Node API App@README.md|Route:POST /api/users@src/routes/users.js|README.md"
+  ],
+  "forbidden": [
+    "node|File:.env.example@.env.example",
+    "node|ConfigFile:.env.example@.env.example",
+    "edge|READS_ENV|Function:src/services/userService.createUser@src/services/userService.js|EnvVar:DATABASE_URL@|src/services/userService.js",
+    "edge|CALLS|Function:src/routes/users.getUserRoute@src/routes/users.js|Function:src/services/userService.createUser@src/services/userService.js|src/routes/users.js"
+  ]
+}

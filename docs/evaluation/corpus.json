@@ -1,0 +1,59 @@
+{
+  "description": "Labeled ground truth for the extraction regression gate. Scores computed over these entries describe this corpus, not repositories in general (D38).",
+  "entries": [
+    {
+      "name": "small-python",
+      "languages": ["python", "markdown"],
+      "repository": "../../tests/fixtures/small_python_app",
+      "spec": "small-python-facts.json"
+    },
+    {
+      "name": "node-api",
+      "languages": ["javascript", "json", "markdown"],
+      "repository": "../../tests/fixtures/node_api_app",
+      "spec": "node-api-facts.json"
+    },
+    {
+      "name": "typescript-api",
+      "languages": ["typescript", "markdown"],
+      "repository": "../../tests/fixtures/typescript_api_app",
+      "spec": "typescript-api-facts.json"
+    },
+    {
+      "name": "go-service",
+      "languages": ["go"],
+      "repository": "../../tests/fixtures/go_service_app",
+      "spec": "go-service-facts.json"
+    },
+    {
+      "name": "java-service",
+      "languages": ["java"],
+      "repository": "../../tests/fixtures/java_service_app",
+      "spec": "java-service-facts.json"
+    },
+    {
+      "name": "ruby-service",
+      "languages": ["ruby"],
+      "repository": "../../tests/fixtures/ruby_service_app",
+      "spec": "ruby-service-facts.json"
+    },
+    {
+      "name": "php-service",
+      "languages": ["php"],
+      "repository": "../../tests/fixtures/php_service_app",
+      "spec": "php-service-facts.json"
+    },
+    {
+      "name": "config-tracing",
+      "languages": ["yaml", "python", "dotenv"],
+      "repository": "../../tests/fixtures/config_app",
+      "spec": "config-tracing-facts.json"
+    },
+    {
+      "name": "markdown-docs",
+      "languages": ["markdown"],
+      "repository": "../../tests/fixtures/markdown_docs_app",
+      "spec": "markdown-docs-facts.json"
+    }
+  ]
+}

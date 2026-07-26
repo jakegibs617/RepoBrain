@@ -1,14 +1,22 @@
 {
   "expected": [
     "node|Function:app.services.user_service.create_user@app/services/user_service.py",
+    "node|Route:POST /api/users@app/api/routes.py",
     "node|EnvVar:DATABASE_URL@",
+    "node|TestCase:tests.test_users.test_create_user@tests/test_users.py",
     "edge|CALLS|Function:app.handlers.user_handler.handle_create_user@app/handlers/user_handler.py|Function:app.services.user_service.create_user@app/services/user_service.py|app/handlers/user_handler.py",
+    "edge|CALLS|Method:app.repositories.user_repository.UserRepository.__init__@app/repositories/user_repository.py|Function:app.db.config.get_database_url@app/db/config.py|app/repositories/user_repository.py",
+    "edge|CALLS|TestCase:tests.test_users.test_create_user@tests/test_users.py|Function:app.services.user_service.create_user@app/services/user_service.py|tests/test_users.py",
     "edge|HANDLES_ROUTE|Route:POST /api/users@app/api/routes.py|Function:app.api.routes.register_routes.create_user_route@app/api/routes.py|app/api/routes.py",
-    "edge|READS_ENV|Function:app.db.config.get_database_url@app/db/config.py|EnvVar:DATABASE_URL@|app/db/config.py"
+    "edge|IMPORTS|Module:app.handlers.user_handler@app/handlers/user_handler.py|Module:app.services.user_service@app/services/user_service.py|app/handlers/user_handler.py",
+    "edge|READS_ENV|Function:app.db.config.get_database_url@app/db/config.py|EnvVar:DATABASE_URL@|app/db/config.py",
+    "edge|MENTIONS|MarkdownSection:README.md#Small Python App/Database@README.md|EnvVar:DATABASE_URL@|README.md",
+    "edge|MENTIONS|MarkdownSection:README.md#Small Python App/Architecture@README.md|Function:app.services.user_service.create_user@app/services/user_service.py|README.md"
   ],
   "forbidden": [
     "node|Function:app.services.user_service.delete_user@app/services/user_service.py",
     "edge|CALLS|Function:app.handlers.user_handler.handle_create_user@app/handlers/user_handler.py|Function:app.services.user_service.get_user@app/services/user_service.py|app/handlers/user_handler.py",
-    "edge|READS_ENV|Function:app.services.user_service.create_user@app/services/user_service.py|EnvVar:DATABASE_URL@|app/services/user_service.py"
+    "edge|READS_ENV|Function:app.services.user_service.create_user@app/services/user_service.py|EnvVar:DATABASE_URL@|app/services/user_service.py",
+    "edge|CALLS|Function:app.api.routes.register_routes.create_user_route@app/api/routes.py|Function:app.services.user_service.create_user@app/services/user_service.py|app/api/routes.py"
   ]
 }
