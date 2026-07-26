@@ -232,6 +232,63 @@ def test_git_hooks_coexist_are_idempotent_and_uninstall_exactly(tmp_path):
     assert json.loads(settings.read_text()) == {"permissions": {"allow": ["Read"]}}
 
 
+def test_freshness_reports_a_stale_index_without_indexing_or_failing(small_app):
+    """`freshness` is the one read surface that neither repairs nor refuses.
+
+    Every gated command either auto-indexes a small diff or exits non-zero on
+    a large one. A status display polling on a timer can afford neither, so
+    this command reports the diff and leaves the database exactly as it found
+    it, whatever the size of the diff.
+    """
+    with _store(small_app) as store:
+        before_run = store.last_index_run()["id"]
+    for index in range(12):
+        (small_app / f"added_{index}.py").write_text(f"VALUE = {index}\n")
+
+    result = CliRunner().invoke(
+        main, ["freshness", "--json", "--path", str(small_app)],
+    )
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert payload["status"] == "ok"
+    assert payload["is_stale"] is True
+    assert payload["out_of_date_count"] == 12
+
+    # The same diff through a gated command is refused outright.
+    gated = CliRunner().invoke(main, ["status", "--path", str(small_app)])
+    assert gated.exit_code == 1
+
+    with GraphStore(small_app / ".repobrain" / "repobrain.sqlite") as store:
+        assert store.last_index_run()["id"] == before_run
+
+
+def test_freshness_reports_current_and_missing_indexes_as_ordinary_states(small_app, tmp_path):
+    """Both ends of the range exit zero, so the caller never parses an error."""
+    with _store(small_app):
+        pass
+    current = CliRunner().invoke(
+        main, ["freshness", "--json", "--path", str(small_app)],
+    )
+
+    assert current.exit_code == 0, current.output
+    payload = json.loads(current.output)
+    assert payload["status"] == "ok"
+    assert payload["is_stale"] is False
+    assert payload["out_of_date_count"] == 0
+    assert payload["files"] > 0
+    assert payload["last_indexed_at"]
+
+    # A directory that was never indexed is a state to display, not a crash.
+    never_indexed = CliRunner().invoke(
+        main, ["freshness", "--json", "--path", str(tmp_path)],
+    )
+
+    assert never_indexed.exit_code == 0, never_indexed.output
+    assert json.loads(never_indexed.output)["status"] == "unavailable"
+    assert not (tmp_path / ".repobrain").exists()
+
+
 def test_self_hosted_query_auto_repairs_a_small_diff(tmp_path):
     project_root = Path(__file__).resolve().parents[1]
     with GraphStore(tmp_path / "self.sqlite") as store:

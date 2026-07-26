@@ -129,11 +129,15 @@ def _chunked(items: list[str], size: int):
 class GraphStore:
     """Thin wrapper around a SQLite database holding the project graph."""
 
-    def __init__(self, db_path: str | Path):
+    def __init__(self, db_path: str | Path, *, read_only: bool = False):
         self.db_path = Path(db_path)
         #: the last freshness-gate result for this store, set by gated
         #: surfaces so downstream queries can honor history serveability
         self.last_freshness: dict | None = None
+        self.read_only = read_only
+        if read_only:
+            self._connect_read_only()
+            return
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self.conn = sqlite3.connect(str(self.db_path))
         self.conn.row_factory = sqlite3.Row
@@ -153,6 +157,32 @@ class GraphStore:
         self.conn.executescript(_SCHEMA)
         self._migrate_schema(current_version)
         self.conn.commit()
+
+    def _connect_read_only(self) -> None:
+        """Open an existing database without writing to it.
+
+        Display surfaces poll the graph far more often than anything indexes
+        it, and the ordinary open path writes every time: it creates the
+        directory, sets ``journal_mode``, replays ``_SCHEMA``, runs pending
+        migrations and commits. None of that is safe to repeat on a timer
+        beside a live indexing run, so read-only callers skip all of it.
+
+        ``mode=ro`` deliberately does *not* set ``immutable=1``: immutable
+        tells SQLite no other process can be writing and lets it ignore the
+        WAL, which would serve a torn pre-WAL snapshot mid-index.
+        """
+        if not self.db_path.exists():
+            raise FileNotFoundError(f"No RepoBrain database at {self.db_path}")
+        self.conn = sqlite3.connect(f"file:{self.db_path}?mode=ro", uri=True)
+        self.conn.row_factory = sqlite3.Row
+        current_version = self.conn.execute("PRAGMA user_version").fetchone()[0]
+        if current_version != _SCHEMA_VERSION:
+            self.conn.close()
+            raise RuntimeError(
+                "RepoBrain database schema version "
+                f"{current_version} cannot be read read-only; supported version is "
+                f"{_SCHEMA_VERSION}. Run `repobrain index` to migrate it."
+            )
 
     def _migrate_schema(self, current: int) -> None:
         """Apply pending schema migrations in order.

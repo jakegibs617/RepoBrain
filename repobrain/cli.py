@@ -23,7 +23,7 @@ from .graph.queries import impact_analysis as run_impact_analysis
 from .graph.queries import trace_data_flow as run_trace_data_flow
 from .graph.queries import trace_config as run_trace_config
 from .graph.store import GraphStore
-from .freshness import FreshnessBlockedError, require_fresh
+from .freshness import FreshnessBlockedError, check_freshness, require_fresh
 from .history import (
     co_change_report,
     churn_report,
@@ -236,6 +236,51 @@ def status(path: str, as_json: bool, no_auto_index: bool) -> None:
     click.echo("\nEdges by type")
     for type_, count in edge_counts.items():
         click.echo(f"  {type_:<20} {count}")
+
+
+@main.command()
+@click.option("--path", "path", type=click.Path(exists=True, file_okay=False), default=".",
+              show_default=True, help="Repository root whose index to check.")
+@click.option("--json", "as_json", is_flag=True, help="Machine-readable output.")
+def freshness(path: str, as_json: bool) -> None:
+    """Report whether the index is current, without indexing or refusing.
+
+    Every other read surface runs the freshness gate, which repairs a small
+    stale diff and refuses a large one. Both are wrong for a status display
+    polling on a timer: one writes to the database on someone else's schedule,
+    the other exits non-zero exactly when it has something to say. This
+    command opens the graph read-only, never mutates it, and always exits
+    zero — an unreadable index is a reportable state, not an error.
+    """
+    root = _resolve_root(path)
+    try:
+        config = RepoBrainConfig.load(root)
+        with GraphStore(root / config.db_path, read_only=True) as store:
+            staleness = check_freshness(root, store, config=config)
+            run = store.last_index_run()
+            result = {
+                "status": "ok",
+                "is_stale": staleness["is_stale"],
+                "out_of_date_count": staleness["out_of_date_count"],
+                "changed_bytes": staleness["changed_bytes"],
+                "files": store.file_count(),
+                "last_indexed_at": run["finished_at"] if run else None,
+            }
+    except Exception as exc:  # noqa: BLE001 - a display surface must never crash
+        result = {"status": "unavailable", "reason": str(exc)}
+
+    if as_json:
+        click.echo(json.dumps(result, indent=2))
+        return
+    if result["status"] != "ok":
+        click.echo(f"Index freshness: unavailable ({result['reason']})")
+    elif result["is_stale"]:
+        click.echo(
+            f"STALE INDEX: {result['out_of_date_count']} file(s) are out of date; "
+            "run `repobrain index`."
+        )
+    else:
+        click.echo("Index freshness: current.")
 
 
 @main.command("brief")

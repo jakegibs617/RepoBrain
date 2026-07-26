@@ -229,3 +229,60 @@ def test_database_newer_than_supported_schema_is_rejected(tmp_path):
         "SELECT COUNT(*) FROM sqlite_master WHERE name='nodes'"
     ).fetchone()[0] == 0
     conn.close()
+
+
+def test_read_only_store_reads_without_touching_the_database(tmp_path):
+    """A display surface must be able to poll the graph without taking a write lock.
+
+    Opening a normal store applies the schema and commits, so a statusline
+    polling every few seconds would rewrite the database forever. The
+    read-only open must leave the file, and its WAL sidecars, alone.
+    """
+    database = tmp_path / "ro.sqlite"
+    with GraphStore(database) as store:
+        store.upsert_nodes([_sample_node()])
+        store.commit()
+
+    # The WAL sidecars are left behind by the read-write close above. The
+    # database and the log must come through the read-only open untouched;
+    # -shm is deliberately excluded, because mapping the shared-memory index
+    # is how a reader finds the WAL at all, and skipping it would mean
+    # immutable=1 and a torn snapshot mid-index.
+    def _state() -> dict[str, tuple[int, int]]:
+        return {
+            path.name: (path.stat().st_size, path.stat().st_mtime_ns)
+            for path in tmp_path.iterdir()
+            if not path.name.endswith("-shm")
+        }
+
+    before = _state()
+    contents = database.read_bytes()
+
+    with GraphStore(database, read_only=True) as store:
+        assert store.conn.execute("SELECT COUNT(*) FROM nodes").fetchone()[0] == 1
+        with pytest.raises(sqlite3.OperationalError, match="readonly"):
+            store.upsert_nodes([_sample_node()])
+
+    assert _state() == before
+    assert database.read_bytes() == contents
+
+
+def test_read_only_store_refuses_a_database_it_cannot_migrate(tmp_path):
+    """Migrations need a write lock, so an off-version database is refused.
+
+    The ordinary open path upgrades a legacy database in place. A read-only
+    store cannot, and reading a pre-migration schema as though it were
+    current would hand back wrong answers rather than an error.
+    """
+    database = tmp_path / "legacy.sqlite"
+    conn = sqlite3.connect(database)
+    conn.execute("PRAGMA user_version = 1")
+    conn.close()
+
+    with pytest.raises(RuntimeError, match="cannot be read read-only"):
+        GraphStore(database, read_only=True)
+
+    with pytest.raises(FileNotFoundError):
+        GraphStore(tmp_path / "absent.sqlite", read_only=True)
+
+    assert not (tmp_path / "absent.sqlite").exists()

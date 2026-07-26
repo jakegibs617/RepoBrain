@@ -1121,3 +1121,57 @@ values back through `_published_metric`: if they ever disagree, the gate could
 never go green, and that test fails first. The handoff's unverified "N pass"
 count was dropped in the same change rather than synced — nothing measured it,
 so it was a published number with no gate behind it.
+
+## 2026-07-25 — Index freshness as a display surface
+
+### D40: `freshness` is ungated and read-only, the one read command that neither repairs nor refuses
+
+Every other read path in RepoBrain runs through `require_fresh`
+(`repobrain/freshness.py:141`), which enforces the invariant that stale facts
+are never served: a small diff is auto-indexed, a large one raises and the
+query is refused. That is right for a fact-serving surface and wrong for a
+status display. A statusline widget polls every few seconds; under the gate it
+would either write to the database on a timer that has nothing to do with the
+user's work, or exit non-zero — printing `[Exit: 1]` — precisely when it has
+something worth saying. Before this change there was no way to ask "is the
+index current?" without doing one or the other, so the answer only ever
+reached the user once, in the SessionStart brief.
+
+**Reporting staleness is not reading through it.** The invariant `freshness.py`
+protects is about facts extracted from the graph: symbols, edges, call sites,
+anything whose truth depends on the index matching the tree. `freshness`
+returns none of that. Its entire output is a description of the gap between
+index and working tree, which is *more* accurate the staler things get. So the
+gate does not apply — not as an exception carved out of it, but because the
+command is not the kind of surface the gate governs.
+
+**Always exit zero.** Missing database, off-version schema, unreadable file,
+scan error: all render as `{"status": "unavailable", "reason": ...}`. A
+display's caller cannot tell a crash from a report if both arrive as a
+non-zero exit, and the failure mode of guessing wrong is a statusline that
+shows an error string forever. The bare `except Exception` here is deliberate
+and is the only one in the CLI.
+
+**Read-only opens needed a new path in the store.** `GraphStore.__init__`
+writes on every open — `mkdir`, `PRAGMA journal_mode=WAL`, an `executescript`
+of the whole schema, pending migrations, `commit`. Repeating that on a timer
+next to a live `repobrain index` is exactly the contention the WAL is there to
+avoid, so `read_only=True` skips all of it and connects via
+`file:...?mode=ro`. Writes then fail loudly with SQLite's `readonly database`
+error rather than silently no-opping.
+
+**`mode=ro` without `immutable=1`.** `immutable` is the faster flag and was
+rejected: it asserts no other process can be writing and lets SQLite ignore
+the WAL entirely, which would serve a torn pre-WAL snapshot in the middle of
+an indexing run — the display would report a freshness number computed against
+a database state that never existed. The cost of correctness is that a
+read-only open still maps the `-shm` file, and creates `-shm` and a zero-length
+`-wal` when they are absent. Those live inside the gitignored `.repobrain/`
+and the database file itself is never modified, which the store test asserts
+by hashing it across an open.
+
+**Off-version schemas are refused rather than read.** The ordinary open path
+migrates a legacy database in place; a read-only store cannot. Reading a
+pre-migration schema as though it were current would return wrong answers
+instead of an error, so a version mismatch in either direction raises and
+surfaces as `unavailable`.

@@ -288,6 +288,12 @@ uv run --isolated --no-project \
 .venv/bin/repobrain status
 .venv/bin/repobrain status --path tests/fixtures/small_python_app
 
+# is the index current? opens the graph read-only, never indexes, and always
+# exits 0 -- an unreadable index reports {"status": "unavailable"} rather than
+# failing, so status displays polling on a timer can call it safely
+.venv/bin/repobrain freshness
+.venv/bin/repobrain freshness --json
+
 # source-grounded session orientation (plain text or JSON)
 # --budget uses the deterministic ceil(characters / 4) token estimate
 .venv/bin/repobrain brief --budget 2000
