@@ -1175,3 +1175,55 @@ migrates a legacy database in place; a read-only store cannot. Reading a
 pre-migration schema as though it were current would return wrong answers
 instead of an error, so a version mismatch in either direction raises and
 surfaces as `unavailable`.
+
+### D41: The agent skill ships in the wheel and is installed as a marked, adoptable file
+
+`install-agent` already wrote everything an agent needs to *receive* RepoBrain
+facts — a SessionStart hook, an MCP entry, a `CLAUDE.md` block — and nothing
+that told it what to *do* with them. The brief orients; it does not teach. The
+observed consequence, reproduced against this repository with the hook
+installed and no skill present, was that agents answered graph-shaped
+questions with grep fan-outs of 21 to 28 tool calls and 49k to 62k tokens,
+never called `impact` before proposing a change to shared code, and recorded
+session handoffs by hand-editing `AGENT_HANDOFF.md` — which is a rendered
+mirror of the memory graph, so those notes gained no anchors and never came
+back from `memory read`. Two of the three runs stated the same reasoning
+verbatim: no `repobrain` binary was visible in the checkout, so they used grep
+instead. None had checked whether one was installed.
+
+**The skill ships with the tool rather than living in user configuration.**
+The failure is a property of the tool's surface, not of any one user's setup,
+and a fix that every adopter must first hear about and then hand-copy is not a
+fix. Shipping it as package data under `repobrain/agent_skill/` puts it in the
+wheel, in CI, and in the same install command that already earns the user's
+consent to write agent configuration.
+
+**CLI-first, MCP when connected.** The MCP server is an optional extra behind
+a `.mcp.json` entry that a client may have disabled — this repository's own
+checkout has it disabled — whereas the CLI is present wherever the package is.
+Teaching MCP as the primary surface would make the skill's first instruction
+fail in exactly the environments that most need it. The skill names the MCP
+tools as a preferred alternative when that server is live.
+
+**Binary discovery is delegated to the installed hook, not guessed.** An early
+draft told agents to fall back to `uvx --from repobrain repobrain`, which
+would fail: RepoBrain is not on PyPI, and `install-agent` resolves a PEP 610
+direct URL per installation. The skill instead points at the SessionStart hook
+command in `.claude/settings.json`, which by construction contains a working
+invocation for that project.
+
+**Ownership is a marker in the file, not a content hash.** Hashing would
+require shipping a registry of every previously released version to tell "the
+user edited this" from "this is last release's copy". A
+`<!-- repobrain:skill:owned -->` marker collapses that to one rule readable by
+the person it constrains: RepoBrain overwrites the file while the marker is
+present, and deleting the marker adopts it permanently.
+
+**An adopted skill is not a conflict.** `_prepare_mcp` refuses to proceed on a
+foreign `mcpServers.repobrain` entry, because a wrong MCP entry is a broken
+server. A customized skill is a *working* skill, so `_prepare_skill` returns
+`{"installed": false, "reason": "user_owned"}` and lets the rest of the
+installation land. Refusing the hook and the MCP entry because someone edited
+their documentation would be a worse failure than the one it prevents.
+Uninstall stays per-file: it removes every marker-bearing file it still owns
+even if a sibling was adopted, and prunes only directories it emptied.

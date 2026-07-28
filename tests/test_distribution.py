@@ -338,6 +338,9 @@ def test_wheel_and_sdist_contain_runtime_and_console_entry(tmp_path):
         names = archive.namelist()
         assert "repobrain/cli.py" in names
         assert "repobrain/mcp_server.py" in names
+        # The agent skill is installed from the wheel, not the source tree.
+        assert "repobrain/agent_skill/SKILL.md" in names
+        assert "repobrain/agent_skill/reference.md" in names
         assert not any("__pycache__" in name for name in names)
         entry_points = archive.read(next(
             name for name in names if name.endswith(".dist-info/entry_points.txt")
@@ -355,4 +358,6 @@ def test_wheel_and_sdist_contain_runtime_and_console_entry(tmp_path):
     assert any(name.endswith("/README.md") for name in names)
     assert any(name.endswith("/repobrain/cli.py") for name in names)
     assert any(name.endswith("/repobrain/mcp_server.py") for name in names)
+    assert any(name.endswith("/repobrain/agent_skill/SKILL.md") for name in names)
+    assert any(name.endswith("/repobrain/agent_skill/reference.md") for name in names)
     assert not any("__pycache__" in name for name in names)

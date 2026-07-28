@@ -157,7 +157,8 @@ uvx --from git+https://github.com/jakegibs617/RepoBrain repobrain index .
 uvx --from git+https://github.com/jakegibs617/RepoBrain repobrain brief --budget 2000
 
 # installs an MCP server entry in .mcp.json, a SessionStart hook in
-# .claude/settings.json, and a marker-delimited section in CLAUDE.md
+# .claude/settings.json, an agent skill in .claude/skills/repobrain/, and a
+# marker-delimited section in CLAUDE.md
 # add --git-hooks to also keep the index fresh after commits and merges
 uvx --from git+https://github.com/jakegibs617/RepoBrain repobrain install-agent .
 
@@ -172,6 +173,15 @@ uvx --from git+https://github.com/jakegibs617/RepoBrain repobrain uninstall-agen
 `install-agent` also adds `.repobrain/` to the repository's `.gitignore`
 idempotently. `uninstall-agent` intentionally leaves that safety rule in place
 so an existing local graph database never becomes committable by accident.
+
+**The agent skill.** `install-agent` writes `.claude/skills/repobrain/`, which
+teaches an agent to query the graph instead of grepping the tree, to check
+`impact` before editing shared code, and to tell a stale index apart from a
+missing one. Both files carry a `<!-- repobrain:skill:owned -->` marker.
+RepoBrain upgrades a file only while that marker is present, so **delete the
+marker line to adopt the skill as your own** — later installs then leave the
+whole directory alone and report `"reason": "user_owned"` rather than failing.
+`uninstall-agent` removes only marker-bearing files.
 
 Once `repobrain` is published to PyPI, the `--from git+...` prefix becomes
 unnecessary and the plain `uvx repobrain ...` form works as shown further
