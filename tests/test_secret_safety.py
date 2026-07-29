@@ -113,6 +113,50 @@ def test_dotenv_canary_never_reaches_database_cli_or_mcp_reads(tmp_path):
     assert CANARY in (repo / ".env.local").read_text(encoding="utf-8")
 
 
+def test_out_of_root_symlink_target_never_reaches_database_cli_or_mcp_reads(tmp_path):
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "id_rsa").write_text(
+        "-----BEGIN OPENSSH PRIVATE KEY-----\n"
+        f"{CANARY}\n"
+        "-----END OPENSSH PRIVATE KEY-----\n",
+        encoding="utf-8",
+    )
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "app.py").write_text("SAFE = True\n", encoding="utf-8")
+    # Names chosen so no mandatory exclude and no extension heuristic applies:
+    # only resolving the link can keep these out.
+    (repo / "notes.md").symlink_to(outside / "id_rsa")
+    (repo / "deploy_key.txt").symlink_to(outside / "id_rsa")
+
+    tools = RepoBrainTools(repo)
+    assert tools.index_repo()["status"] == "ok"
+
+    search_result = tools.search_project(CANARY, auto_index=False)
+    assert search_result["status"] == "ok"
+    assert search_result["results"] == []
+    trace_result = tools.trace_config(CONFIG_KEY, auto_index=False)
+
+    runner = CliRunner()
+    cli_results = [
+        runner.invoke(main, ["search", CANARY, "--path", str(repo), "--no-auto-index"]),
+        runner.invoke(main, ["explain", "file", "notes.md", "--path", str(repo),
+                             "--no-auto-index"]),
+    ]
+
+    read_results = _every_mcp_read(tools, search_result, trace_result)
+    exposed = _serialized(read_results + [result.output for result in cli_results])
+    assert CANARY not in exposed
+
+    db_bytes = _database_bytes(repo / ".repobrain" / "repobrain.sqlite")
+    assert CANARY.encode() not in db_bytes
+
+    # The canary source remains present, proving the absence checks are not
+    # accidentally testing a fixture that never contained the secret.
+    assert CANARY in (outside / "id_rsa").read_text(encoding="utf-8")
+
+
 def test_upgrade_reindex_scrubs_legacy_dotenv_canary_from_sqlite(tmp_path):
     repo = tmp_path / "legacy-repo"
     repo.mkdir()

@@ -142,6 +142,51 @@ def test_dotenv_families_are_excluded_by_default(tmp_path):
     assert scan(tmp_path, include_patterns=[".env.local"]) == []
 
 
+def test_file_symlink_pointing_outside_the_root_is_not_scanned(tmp_path):
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "credentials").write_text("SECRET=out-of-root\n", encoding="utf-8")
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "app.py").write_text("SAFE = True\n", encoding="utf-8")
+    # A name the mandatory dotenv excludes cannot catch: the boundary has to be
+    # the resolved target, not the file name.
+    (repo / "notes.md").symlink_to(outside / "credentials")
+
+    paths = {item.path for item in scan(repo)}
+
+    assert paths == {"app.py"}
+
+
+def test_in_root_symlinks_stay_indexable_and_degenerate_links_are_skipped(tmp_path):
+    repo = tmp_path / "repo"
+    (repo / "pkg").mkdir(parents=True)
+    (repo / "pkg" / "real.py").write_text("VALUE = 1\n", encoding="utf-8")
+    # Resolves inside the root: no boundary is crossed, so it stays indexable.
+    (repo / "alias.py").symlink_to(repo / "pkg" / "real.py")
+    (repo / "dangling.py").symlink_to(repo / "pkg" / "missing.py")
+    (repo / "loop_a").symlink_to(repo / "loop_b")
+    (repo / "loop_b").symlink_to(repo / "loop_a")
+
+    paths = {item.path for item in scan(repo)}
+
+    assert paths == {"pkg/real.py", "alias.py"}
+
+
+def test_directory_symlink_to_an_outside_tree_contributes_nothing(tmp_path):
+    outside = tmp_path / "outside"
+    (outside / "src").mkdir(parents=True)
+    (outside / "src" / "secret.py").write_text("TOKEN = 'out'\n", encoding="utf-8")
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "app.py").write_text("SAFE = True\n", encoding="utf-8")
+    (repo / "linked").symlink_to(outside, target_is_directory=True)
+
+    paths = {item.path for item in scan(repo)}
+
+    assert paths == {"app.py"}
+
+
 def test_anchored_dir_pattern_matches_only_at_root():
     m = IgnoreMatcher(["/dist/"])
     assert m.matches("dist", is_dir=True)

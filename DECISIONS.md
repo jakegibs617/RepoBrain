@@ -1836,3 +1836,60 @@ item warned that over-filtering would silently empty `Purpose` for a terse
 README, and that an absent section is a worse outcome than a thin one. Verified
 against all four fixture READMEs plus a README whose entire body is the fragment
 `A tiny indexer`: every one still yields a populated `Purpose`.
+
+## 2026-07-29 — The trust boundary is the resolved object, not the name
+
+### D51: Scanning contains every candidate to the realpath of the indexed root; the mandatory excludes stop being the only secret barrier
+
+The 2026-07-29 audit planted a symlink named `notes.md` pointing at a file of
+AWS credentials outside the repository, ran `repobrain index`, and retrieved the
+key material verbatim through `repobrain search`. A second link named
+`deploy_key.txt` did the same for an SSH private key. Both bypassed the
+mandatory dotenv excludes completely, and neither produced a warning.
+
+**The defect was a category error, not a missing pattern.** `MANDATORY_EXCLUDES`
+matches *names* — `.env`, `.env.*`, `*.env`, `*.env.*` — and the comment above it
+promises that "repository/user negation rules cannot accidentally re-include
+secrets." That promise holds for every file reached by its own name. A symlink is
+reached by one name and read from another, so `scan()` checked `notes.md` against
+the excludes and then `open()`ed a file in `~/.aws`. Adding more name patterns
+could never close this: the attacker picks the name.
+
+**So the check moved to the object.** `resolves_within_root()` requires
+`os.path.realpath(candidate)` to equal the resolved root or sit beneath it, and
+`scan()` applies it before `os.stat`. Anything else is skipped. This is the same
+shape as the existing `except OSError: continue` guard — a candidate that cannot
+be justified simply does not become a `ScannedFile`.
+
+**Directory symlinks were already safe, which is precisely why this survived.**
+`os.walk` defaults to `followlinks=False`, so a link to an outside *directory*
+contributed nothing and the boundary looked intact under casual testing. Only
+file symlinks were read through. Half a working defense is the hardest kind of
+hole to notice, and it is why this shipped through two prior audits.
+
+**In-root symlinks stay indexable, deliberately.** A link resolving inside the
+root crosses no boundary, and repositories legitimately symlink files into place.
+Matching git's semantics instead — record the link, never the target — was
+considered and rejected for this change: it is a behavior change to what a
+correct repository yields, it would drop real content that users currently get
+indexed, and it has nothing to do with the vulnerability. The security fix should
+not be the vehicle for it. Degenerate links (dangling, mutually recursive) were
+already handled by the `OSError` guard and now also fail containment; both are
+covered by tests so the robustness is pinned rather than incidental.
+
+**`EXTRACTOR_VERSION` moves to `2`.** D44 demoted the constant to the axis the
+parser-source digest cannot see, and named
+`repobrain.indexing.scanner.detect_language` as the concrete example: code that
+decides which files are extracted at all. Containment is exactly that. Without
+the bump an index built before this fix keeps serving the out-of-root nodes it
+already captured, because none of the *files* it tracks have changed. With it,
+the next run re-extracts and the tombstoned path drops its nodes, edges and
+full-text rows — verified by indexing a symlinked credential file with the old
+code, re-indexing with the new, and confirming the canary is absent from the
+database bytes while the `files` row survives as a `status='deleted'` tombstone.
+
+**A hash of out-of-root bytes survives in that tombstone, and that is
+acceptable.** The `files` row retains sha256 and size for a path that is no
+longer scanned. A one-way digest of a file the user already had on disk is not
+the secret, and purging tombstones is a storage-layer concern with its own
+correctness questions about deletion detection.

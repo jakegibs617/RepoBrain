@@ -16,7 +16,7 @@ _RAW_FTS_EXCLUDED_LANGUAGES = {"dockerfile", "json", "toml", "yaml"}
 #: parsers run at all. Changes to the parsers themselves need no bump:
 #: :meth:`ParserRegistry.fingerprint` hashes registry composition and the
 #: parser sources, so both are detected without anyone remembering.
-EXTRACTOR_VERSION = "1"
+EXTRACTOR_VERSION = "2"
 
 
 def parser_source_digest() -> str:

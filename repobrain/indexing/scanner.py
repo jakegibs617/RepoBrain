@@ -162,6 +162,21 @@ def is_binary(data: bytes) -> bool:
     return b"\x00" in data[:_SNIFF_BYTES]
 
 
+def resolves_within_root(abs_path: str, resolved_root: str) -> bool:
+    """True when `abs_path` still lands inside the indexed root once symlinks resolve.
+
+    The ignore rules match path *names*, so they cannot see where a symlink
+    actually points: a link named `notes.md` would sail past the mandatory
+    dotenv excludes and pull in whatever it targets. The trust boundary has to
+    be the resolved object, not the name used to reach it.
+    """
+    try:
+        real = os.path.realpath(abs_path)
+    except OSError:
+        return False
+    return real == resolved_root or real.startswith(resolved_root + os.sep)
+
+
 def build_ignore_matcher(
     root: str | Path, extra_excludes: list[str] | None = None
 ) -> IgnoreMatcher:
@@ -183,6 +198,7 @@ def scan(
     """Walk `root` and return indexable text files, applying ignore rules."""
     root = Path(root).resolve()
     matcher = build_ignore_matcher(root, extra_excludes)
+    resolved_root = os.path.realpath(root)
 
     results: list[ScannedFile] = []
     for dirpath, dirnames, filenames in os.walk(root):
@@ -206,6 +222,8 @@ def scan(
             if include_patterns and not any(fnmatch(rel, p) for p in include_patterns):
                 continue
             abs_path = os.path.join(dirpath, fname)
+            if not resolves_within_root(abs_path, resolved_root):
+                continue
             try:
                 st = os.stat(abs_path)
             except OSError:
