@@ -143,7 +143,8 @@ class RepoBrainTools:
         try:
             with self._store() as store:
                 return _safe(change_context(self.root, store, base=base,
-                                            auto_index=auto_index))
+                                            auto_index=auto_index,
+                                            include_text=False))
         except GitDiffError as exc:
             return {"status": "error", "error": str(exc), "changes": []}
 

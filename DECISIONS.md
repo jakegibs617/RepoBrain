@@ -1407,3 +1407,85 @@ indexing*; RepoBrain reading its own installed sources is a different act. The
 patch is now scoped to the indexed root. That the narrowed guard still catches
 the original regression was verified by mutation — forcing `compute_diff` to
 read each scanned file's bytes, and confirming the test fails.
+
+## 2026-07-29 — Change context sized for the session that reads it
+
+### D45: `change-context` pays for facts, not for restating them; the budget trims lowest-priority evidence and always reports it
+
+`change-context --json` exists so an agent can understand a diff, and on this
+repository's own two-commit diff it emitted 1,845,848 characters — about
+461,000 tokens. That is not "large"; it is unusable by an order of magnitude.
+
+**The suspected cause was measured and cleared first.** `setup/graph-data.js`
+is a generated, minified, single-line ~2 MB artifact that is nonetheless a
+first-class graph citizen, and it entered the diff in exactly that range. A
+generated snapshot of the graph inflating the graph's own impact analysis would
+have been a more interesting bug than the token count. It is not what happened:
+it contributes **0 impact items and 278 characters**. Recorded so nobody
+re-investigates it.
+
+**The cost was attribution, and it was quadratic in the wrong thing.**
+
+| key | chars | shape |
+| --- | ---: | --- |
+| `impact` | 834,715 | 958 rows over **497 distinct nodes** |
+| — `changed_reasons` | 441,930 | 3,175 fully re-serialized dicts |
+| `tests_to_run` | 94,704 | 82,878 of it reason dicts, for 32 tests |
+| `text` | 157,802 | the structured payload again, in prose |
+| `changes` | 225,410 | incl. 33,745 of per-symbol `changed_because` |
+
+Four lossless changes, in the order they were found:
+
+- **Reasons are interned.** A top-level `reasons` table; items cite it through
+  `reason_ids`. The table is bounded by the diff rather than by how many nodes
+  cite it.
+- **Impact is one row per node.** Each row carries an `evidence` list of the
+  edges that put it in the blast radius. A node reached at two traversal depths
+  was two rows under the old key, because the depth-decayed confidence differed;
+  it is now one node holding its strongest edge. A node also no longer appears
+  in two confidence buckets at once.
+- **`text` is rendered for the human surface only.** `--json` and MCP pass
+  `include_text=False`.
+- **`changed_because` is gone from symbol records.** It restated the enclosing
+  change record's `status`/`old_path`/`new_path` on every one of 395 symbols.
+
+Together: **461,000 → 142,848 tokens, with nothing removed.**
+
+**Then a budget, because 142,848 is still not a session.** `--budget` copies
+`brief`'s shape — the deterministic `ceil(chars / 4)` estimate, a minimum, and
+a default. Trimming runs lowest-priority first: historical co-change, docs,
+impact by ascending confidence, tests, and the diff itself last.
+
+**Truncation is reported, never silent.** A caller that cannot distinguish a
+trimmed impact set from a complete one will treat it as complete — the
+confidently-wrong answer the freshness gate exists to prevent. Two honesty
+details the implementation forced:
+
+- Trimming an item takes its citations with it, so `reasons` is pruned to what
+  survivors cite and renumbered. Otherwise a budgeted payload spends its
+  allowance on attribution for facts it no longer carries.
+- Every trimmable list can be emptied and the payload still costs what its own
+  scaffolding costs, around 430 tokens. A budget under that floor is unmeetable,
+  so `truncation.within_budget` says so rather than implying it was met.
+
+**The trim estimate must resynchronise.** Decrementing a running total by each
+popped item is what keeps trimming linear, but it cannot see that dropping an
+item also releases the reasons only it cited. Against a 60,000-character limit
+and a 65,302-character reason table, the estimate never converged and every
+list was emptied — including the diff — while reporting itself within budget at
+451 tokens. It now re-measures exactly every 25 pops and whenever a container is
+exhausted. The existing fixture is two orders of magnitude too small to have
+caught this; the regression test builds a diff wide enough for the table to be a
+large share of the payload, and was mutation-checked against the un-resynced
+version.
+
+**Known consequence: on a very wide diff the default budget buys the diff and
+nothing derived from it.** `changes` is now the dominant key — about 59,000
+tokens for 84 files — so at the 15,000 default this diff yields 27 changed
+files and zero impact, and needs `--budget 60000` before impact and tests
+reappear. That follows from ranking the diff above evidence derived from it,
+which is the right default for a working diff of a handful of files and
+arguably the wrong one at this width. It is left as-is deliberately: the
+truncation report names exactly what went, so the failure is legible and the
+remedy is one flag. Whether wide diffs should instead degrade `changes` to
+paths-only and keep the impact set is a real question and is not answered here.

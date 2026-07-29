@@ -5,7 +5,12 @@ from pathlib import Path
 import pytest
 from click.testing import CliRunner
 
-from repobrain.change_context import GitDiffError, capture_git_changes, change_context
+from repobrain.change_context import (
+    MINIMUM_CHANGE_BUDGET,
+    GitDiffError,
+    capture_git_changes,
+    change_context,
+)
 from repobrain.cli import main
 from repobrain.graph.store import GraphStore
 from repobrain.indexing.indexer import Indexer
@@ -97,7 +102,8 @@ def test_sqlalchemy_table_change_uses_shared_change_context_impact(small_app):
                for item in change["symbols"])
     impacted = [item for bucket in result["impact"].values() for item in bucket]
     assert {item["node"]["name"] for item in impacted} >= {"load_by_id", "persist"}
-    assert {item["via"] for item in impacted} >= {"READS_TABLE", "WRITES_TABLE"}
+    assert {proof["via"] for item in impacted
+            for proof in item["evidence"]} >= {"READS_TABLE", "WRITES_TABLE"}
 
 
 def test_changed_document_is_not_flagged_as_stale(small_app):
@@ -188,10 +194,100 @@ def test_multiple_changed_targets_deduplicate_impact_but_keep_reasons(small_app)
         repo.write_text(repo.read_text() + "\n# repository change\n")
         result = change_context(small_app, store)
     records = [item for bucket in result["impact"].values() for item in bucket]
-    keys = [(item["node"]["id"], item["via"], item["evidence_path"], item["evidence_line"])
-            for item in records]
+    keys = [(item["node"]["id"], evidence["via"], evidence["path"], evidence["line"])
+            for item in records for evidence in item["evidence"]]
     assert len(keys) == len(set(keys))
-    assert any(len(item["changed_reasons"]) > 1 for item in records)
+    assert any(len(item["reason_ids"]) > 1 for item in records)
+    # Every id resolves; the table is the only place a reason is spelled out.
+    for item in records:
+        assert all(result["reasons"][index] for index in item["reason_ids"])
+
+
+def _repo_with_a_shared_dependent(root: Path) -> None:
+    """Two modules a downstream module imports, so one node has two edges in."""
+    (root / "alpha.py").write_text("def alpha():\n    return 1\n")
+    (root / "beta.py").write_text("def beta():\n    return 2\n")
+    (root / "downstream.py").write_text(
+        "from alpha import alpha\nfrom beta import beta\n\n\n"
+        "def combined():\n    return alpha() + beta()\n"
+    )
+
+
+def test_one_node_reached_by_two_edges_is_one_item_carrying_both(tmp_path):
+    """A node is a fact about the blast radius; an edge is why it is in it.
+
+    Emitting the same node once per incoming edge made the payload grow with
+    the graph's edge count rather than with the size of the impacted set —
+    958 rows for 497 nodes on this repository's own two-commit diff.
+    """
+    root = tmp_path / "repo"
+    root.mkdir()
+    _repo_with_a_shared_dependent(root)
+    _init_repo(root)
+    with _indexed(root) as store:
+        for name in ("alpha.py", "beta.py"):
+            target = root / name
+            target.write_text(target.read_text() + "\n# changed\n")
+        result = change_context(root, store)
+
+    records = [item for bucket in result["impact"].values() for item in bucket]
+    ids = [item["node"]["id"] for item in records]
+    assert len(ids) == len(set(ids)), "a node must appear at most once in the impact set"
+    downstream = next(item for item in records
+                      if item["node"]["path"] == "downstream.py"
+                      and item["node"]["type"] == "Module")
+    assert len(downstream["evidence"]) == 2
+    assert {evidence["line"] for evidence in downstream["evidence"]} == {1, 2}
+    assert downstream["confidence"] == max(
+        evidence["confidence"] for evidence in downstream["evidence"]
+    )
+
+
+def test_reasons_are_spelled_out_once_however_many_items_cite_them(tmp_path):
+    """The dominant cost was attribution, not facts.
+
+    3,175 reason dicts across 958 impact items and 599 across 32 test items —
+    441,930 and 82,878 characters respectively, for a set of reasons no larger
+    than the diff itself.
+    """
+    root = tmp_path / "repo"
+    root.mkdir()
+    _repo_with_a_shared_dependent(root)
+    _init_repo(root)
+    with _indexed(root) as store:
+        for name in ("alpha.py", "beta.py"):
+            target = root / name
+            target.write_text(target.read_text() + "\n# changed\n")
+        result = change_context(root, store)
+
+    serialized = [json.dumps(reason, sort_keys=True) for reason in result["reasons"]]
+    assert len(serialized) == len(set(serialized)), "the table must not repeat a reason"
+    cited = {index for bucket in result["impact"].values()
+             for item in bucket for index in item["reason_ids"]}
+    cited |= {index for item in result["tests_to_run"] for index in item["reason_ids"]}
+    assert cited, "items must cite the table rather than inline their reasons"
+    assert cited <= set(range(len(result["reasons"])))
+
+
+def test_json_output_omits_the_rendered_text_it_would_duplicate(small_app):
+    """`text` is the same payload again in prose — 157,802 characters of it on
+    the diff that motivated this. A caller parsing JSON has the structure."""
+    _init_repo(small_app)
+    tools = RepoBrainTools(small_app)
+    tools.index_repo()
+    _change_create_user(small_app)
+
+    machine = CliRunner().invoke(
+        main, ["change-context", "--path", str(small_app), "--json"],
+    )
+    assert machine.exit_code == 0, machine.output
+    assert "text" not in json.loads(machine.output)
+    assert "text" not in tools.change_context()
+
+    human = CliRunner().invoke(main, ["change-context", "--path", str(small_app)])
+    assert human.exit_code == 0, human.output
+    assert "RepoBrain change context" in human.output
+    assert "Tests to run" in human.output
 
 
 def test_ambiguous_names_do_not_cross_map_changed_line_symbols(small_app):
@@ -227,8 +323,137 @@ def test_cli_and_mcp_change_context_have_matching_grounded_sections(small_app):
     assert {(item["doc_path"], item["section"]) for item in cli_data["docs_to_review"]} == {
         (item["doc_path"], item["section"]) for item in mcp_data["docs_to_review"]
     }
-    assert "Tests to run" in cli_data["text"]
-    assert "Docs to review" in cli_data["text"]
+    assert cli_data["reasons"] == mcp_data["reasons"]
+    human = CliRunner().invoke(main, ["change-context", "--path", str(small_app)])
+    assert human.exit_code == 0, human.output
+    assert "Tests to run" in human.output
+    assert "Docs to review" in human.output
+
+
+def test_a_budget_trims_from_the_bottom_and_says_so(small_app):
+    """Silent truncation is the confidently-wrong answer the gate exists to stop.
+
+    A caller that cannot tell a complete impact set from a trimmed one will
+    treat the trimmed one as complete, which is worse than being told the
+    payload was too large.
+    """
+    _init_repo(small_app)
+    with _indexed(small_app) as store:
+        _change_create_user(small_app)
+        full = change_context(small_app, store, include_text=False)
+        trimmed = change_context(small_app, store, budget=1200, include_text=False)
+
+    assert trimmed["truncation"]["applied"] is True
+    assert trimmed["truncation"]["within_budget"] is True
+    assert trimmed["token_estimate"] <= 1200
+    assert trimmed["truncation"]["budget"] == 1200
+    assert sum(trimmed["truncation"]["dropped"].values()) > 0
+    # The diff itself outranks everything derived from it.
+    assert len(trimmed["changes"]) == len(full["changes"])
+    assert len(trimmed["docs_to_review"]) < len(full["docs_to_review"])
+    # A trimmed payload must not carry attribution nothing left in it cites.
+    cited = {index for bucket in trimmed["impact"].values()
+             for item in bucket for index in item["reason_ids"]}
+    cited |= {index for item in trimmed["tests_to_run"] for index in item["reason_ids"]}
+    assert cited <= set(range(len(trimmed["reasons"])))
+    assert len(trimmed["reasons"]) == len(cited)
+
+
+def test_a_wide_diff_keeps_the_content_its_budget_can_afford(tmp_path):
+    """Trimming must stop when the payload fits, not when the lists run out.
+
+    The reason table shrinks as the items citing it are dropped, which a
+    running per-item estimate cannot see. Without periodic resynchronisation
+    the estimate never falls below the table's own size, so a budget with room
+    to spare empties every list — including the diff. Only a diff wide enough
+    for the table to be a large share of the payload exposes it.
+    """
+    root = tmp_path / "repo"
+    root.mkdir()
+    # Eight changed cores, each with several symbols, so the reason table is
+    # large relative to the payload; thirty dependents so the impact set citing
+    # it is large too. Eight stays inside the auto-index threshold.
+    for core in range(8):
+        (root / f"configuration_core_{core}.py").write_text("\n\n".join(
+            f"def read_configuration_value_{core}_{slot}():\n    return {slot}\n"
+            for slot in range(4)
+        ))
+    imports = "\n".join(
+        f"from configuration_core_{core} import read_configuration_value_{core}_0"
+        for core in range(8)
+    )
+    for index in range(30):
+        (root / f"app_{index:02d}.py").write_text(
+            f"{imports}\n\n\ndef use_{index:02d}():\n    return "
+            + " + ".join(f"read_configuration_value_{core}_0()" for core in range(8))
+            + "\n"
+        )
+    _init_repo(root)
+    with _indexed(root) as store:
+        for core in range(8):
+            # Rewrite every line so all four functions fall inside the diff
+            # range and each becomes its own changed target.
+            (root / f"configuration_core_{core}.py").write_text("\n\n".join(
+                f"def read_configuration_value_{core}_{slot}():\n"
+                f"    return {slot} + 1\n"
+                for slot in range(4)
+            ))
+        full = change_context(root, store, include_text=False)
+        reason_tokens = (len(json.dumps(full["reasons"])) + 3) // 4
+        # Below the untrimmed reason table, above the payload's own floor: the
+        # band in which the unresynchronised estimate could never converge.
+        budget = max(MINIMUM_CHANGE_BUDGET, reason_tokens - 1)
+        trimmed = change_context(root, store, budget=budget, include_text=False)
+
+    assert reason_tokens > MINIMUM_CHANGE_BUDGET, "fixture too small to test this"
+    assert trimmed["truncation"]["applied"] is True
+    assert trimmed["changes"], "trimming emptied the diff a smaller payload could hold"
+    # Whatever attribution survives must belong to something still present.
+    cited = {index for bucket in trimmed["impact"].values()
+             for item in bucket for index in item["reason_ids"]}
+    cited |= {index for item in trimmed["tests_to_run"] for index in item["reason_ids"]}
+    assert len(trimmed["reasons"]) == len(cited)
+
+
+def test_a_budget_below_the_payload_floor_reports_that_it_was_not_met(small_app):
+    """Trimming everything still leaves the scaffolding, and that is reportable.
+
+    Claiming a budget was met when it was not is the same class of quiet lie as
+    truncating without saying so.
+    """
+    _init_repo(small_app)
+    with _indexed(small_app) as store:
+        _change_create_user(small_app)
+        result = change_context(small_app, store, budget=MINIMUM_CHANGE_BUDGET,
+                                include_text=True)
+
+    assert result["truncation"]["applied"] is True
+    assert result["truncation"]["within_budget"] is False
+    assert result["token_estimate"] > MINIMUM_CHANGE_BUDGET
+    assert "nothing further can be dropped" in result["text"]
+
+
+def test_a_budget_under_the_minimum_is_refused_rather_than_guessed(small_app):
+    _init_repo(small_app)
+    with _indexed(small_app) as store:
+        with pytest.raises(ValueError, match="at least"):
+            change_context(small_app, store, budget=MINIMUM_CHANGE_BUDGET - 1)
+
+
+def test_a_payload_inside_its_budget_is_left_exactly_alone(small_app):
+    _init_repo(small_app)
+    with _indexed(small_app) as store:
+        _change_create_user(small_app)
+        unbudgeted = change_context(small_app, store, include_text=False)
+        budgeted = change_context(small_app, store, budget=100_000, include_text=False)
+
+    assert budgeted["truncation"]["applied"] is False
+    assert budgeted["truncation"]["dropped"] == {}
+    # `freshness` describes the gate pass, not the payload, and the first call
+    # is the one that repaired the index.
+    metadata = {"truncation", "token_estimate", "token_heuristic", "budget", "freshness"}
+    assert ({key: value for key, value in budgeted.items() if key not in metadata}
+            == {key: value for key, value in unbudgeted.items() if key not in metadata})
 
 
 def test_freshness_failure_returns_no_change_facts(small_app):

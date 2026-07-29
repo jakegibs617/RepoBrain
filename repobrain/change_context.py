@@ -17,6 +17,30 @@ from .indexing.doc_references import MarkdownMentionReconciler
 from .indexing.scanner import detect_language
 from .parsers.base import default_registry
 
+#: Approximate token ceiling for a change context, on ``brief``'s deterministic
+#: ceil(chars / 4) heuristic. Chosen so an ordinary working diff is never
+#: touched while the pathological case stays inside what a session can spend:
+#: the two-commit diff that motivated this emitted ~461,000 tokens.
+DEFAULT_CHANGE_BUDGET = 15_000
+MINIMUM_CHANGE_BUDGET = 256
+
+#: Lowest-priority first. Trimming starts at the top of this list, so the diff
+#: itself is the last thing to go and the evidence derived from it goes first.
+_TRIM_ORDER: tuple[tuple[str, str | None], ...] = (
+    ("historical_impact", "items"),
+    ("docs_to_review", None),
+    ("impact", "low_confidence"),
+    ("impact", "medium_confidence"),
+    ("impact", "high_confidence"),
+    ("tests_to_run", None),
+    ("changes", None),
+)
+
+#: Pops between exact re-measurements while trimming. Small enough that the
+#: running estimate never drifts far, large enough to keep the number of full
+#: serializations proportional to the overshoot rather than to the item count.
+_RESYNC_EVERY = 25
+
 _HUNK = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@", re.MULTILINE)
 _SYMBOL_TYPES = {
     "Function", "Method", "Class", "Variable", "TestCase", "Route", "Endpoint",
@@ -35,8 +59,21 @@ def change_context(
     *,
     base: str | None = None,
     auto_index: bool = True,
+    include_text: bool = True,
+    budget: int | None = None,
 ) -> dict:
-    """Capture a Git change set, repair freshness, then resolve grounded context."""
+    """Capture a Git change set, repair freshness, then resolve grounded context.
+
+    ``include_text`` renders the human report into the payload. Machine-readable
+    surfaces turn it off: it restates the whole structured result in prose, so a
+    caller that parses the structure pays for it twice.
+
+    ``budget`` caps the approximate token count on ``brief``'s deterministic
+    ceil(chars / 4) heuristic, trimming lowest-priority evidence first and
+    always reporting what it removed. ``None`` emits everything.
+    """
+    if budget is not None and budget < MINIMUM_CHANGE_BUDGET:
+        raise ValueError(f"budget must be at least {MINIMUM_CHANGE_BUDGET} tokens")
     root = Path(root).resolve()
     captured = capture_git_changes(root, base=base)
     freshness = ensure_fresh(root, store, auto_index=auto_index)
@@ -68,7 +105,8 @@ def change_context(
             public["mapping_status"] = f"{item['special_file']}_unparsed"
         changes.append(public)
 
-    impacts, tests, impact_unknowns = _aggregate_impacts(store, changes)
+    reasons = _ReasonTable()
+    impacts, tests, impact_unknowns = _aggregate_impacts(store, changes, reasons)
     docs = _stale_doc_candidates(store, changes, changed_paths)
     result = {
         "status": "ok",
@@ -77,6 +115,7 @@ def change_context(
         "head": captured["head"],
         "freshness": freshness,
         "changes": changes,
+        "reasons": reasons.reasons,
         "impact": impacts,
         "historical_impact": _historical_impact(
             store, freshness, changes, mode=captured["mode"],
@@ -85,7 +124,10 @@ def change_context(
         "docs_to_review": docs,
         "unknowns": impact_unknowns,
     }
-    result["text"] = render_change_context(result)
+    if budget is not None:
+        _apply_budget(result, budget)
+    if include_text:
+        result["text"] = render_change_context(result)
     return result
 
 
@@ -256,7 +298,7 @@ def _map_change(store: GraphStore, change: dict) -> tuple[dict | None, list[dict
             "SELECT id,type,name,qualified_name,path,start_line,end_line,language "
             "FROM nodes WHERE path=? ORDER BY start_line,type,name", (path,),
         ).fetchall()]
-    file_node = next((_node_record(node, change) for node in nodes if node["type"] == "File"), None)
+    file_node = next((_node_record(node) for node in nodes if node["type"] == "File"), None)
     symbols = []
     for node in nodes:
         if node["type"] not in _SYMBOL_TYPES or node.get("start_line") is None:
@@ -267,7 +309,7 @@ def _map_change(store: GraphStore, change: dict) -> tuple[dict | None, list[dict
             for span in ranges
         ):
             continue
-        symbols.append(_node_record(node, change))
+        symbols.append(_node_record(node))
     return file_node, symbols
 
 
@@ -293,7 +335,14 @@ def _parse_deleted_nodes(path: str, content: str, revision: str) -> list[dict]:
     ]
 
 
-def _node_record(node: dict, change: dict) -> dict:
+def _node_record(node: dict) -> dict:
+    """A symbol inside a change record.
+
+    It carries no copy of why it changed: it is nested in the change that
+    explains that, and repeating `status`/`old_path`/`new_path` on all 395
+    symbols of a wide diff cost 33,745 characters to say what the enclosing
+    record already said.
+    """
     return {
         "id": node["id"], "type": node["type"], "name": node["name"],
         "qualified_name": node.get("qualified_name") or "", "path": node["path"],
@@ -303,10 +352,6 @@ def _node_record(node: dict, change: dict) -> dict:
             f"git:{node['source_revision']}:{node['path']}:{node.get('start_line') or 1}"
             if node.get("source_revision") else f"{node['path']}:{node.get('start_line') or 1}"
         ),
-        "changed_because": {
-            "status": change["status"], "old_path": change.get("old_path"),
-            "new_path": change.get("new_path"),
-        },
     }
 
 
@@ -348,8 +393,32 @@ def _historical_impact(
             "provenance": evidence["provenance"]}
 
 
-def _aggregate_impacts(store: GraphStore, changes: list[dict]) -> tuple[dict, list[dict], list[str]]:
-    evidence: dict[tuple, dict] = {}
+class _ReasonTable:
+    """Intern the "why is this in the blast radius" records.
+
+    A reason is drawn from the diff, so there are at most a few per changed
+    path — but before this they were re-serialized in full at every citing
+    item, which on this repository's own two-commit diff meant 3,175 copies
+    across the impact set and 599 across the tests, for 525k characters. Items
+    now carry indices into one table.
+    """
+
+    def __init__(self) -> None:
+        self._ids: dict[tuple, int] = {}
+        self.reasons: list[dict] = []
+
+    def id_for(self, reason: dict) -> int:
+        key = tuple(sorted(reason.items()))
+        if key not in self._ids:
+            self._ids[key] = len(self.reasons)
+            self.reasons.append(reason)
+        return self._ids[key]
+
+
+def _aggregate_impacts(
+    store: GraphStore, changes: list[dict], reasons: _ReasonTable,
+) -> tuple[dict, list[dict], list[str]]:
+    evidence: dict[str, dict] = {}
     tests: dict[str, dict] = {}
     unknowns = []
     for change in changes:
@@ -372,27 +441,43 @@ def _aggregate_impacts(store: GraphStore, changes: list[dict]) -> tuple[dict, li
                                      include_history=False)
             if result is None:
                 continue
-            reason = {
+            reason_id = reasons.id_for({
                 "changed_path": change.get("new_path") or change.get("old_path"),
                 "status": change["status"], "target": target, "target_kind": target_kind,
-            }
+            })
             for bucket in ("high_confidence", "medium_confidence", "low_confidence"):
                 for item in result[bucket]:
-                    key = (item["node"]["id"], item["via"], item["evidence_path"],
-                           item["evidence_line"])
-                    record = evidence.setdefault(key, {**item, "changed_reasons": []})
+                    # One row per node, not per edge: the node is the fact about
+                    # the blast radius and each edge is only evidence for it.
+                    record = evidence.setdefault(item["node"]["id"], {
+                        "node": item["node"], "confidence": item["confidence"],
+                        "evidence": {}, "reason_ids": [],
+                    })
                     record["confidence"] = max(record["confidence"], item["confidence"])
-                    if reason not in record["changed_reasons"]:
-                        record["changed_reasons"].append(reason)
+                    # One edge reached at two traversal depths is one edge; its
+                    # confidence decays with depth, so keep the shortest path's.
+                    key = (item["via"], item["evidence_path"], item["evidence_line"])
+                    proof = record["evidence"].setdefault(key, {
+                        "via": item["via"], "path": item["evidence_path"],
+                        "line": item["evidence_line"], "confidence": item["confidence"],
+                    })
+                    proof["confidence"] = max(proof["confidence"], item["confidence"])
+                    if reason_id not in record["reason_ids"]:
+                        record["reason_ids"].append(reason_id)
             for item in result["recommended_tests"]:
                 path = item["node"]["path"]
-                record = tests.setdefault(path, {**item, "changed_reasons": []})
-                if reason not in record["changed_reasons"]:
-                    record["changed_reasons"].append(reason)
+                record = tests.setdefault(path, {**item, "reason_ids": []})
+                if reason_id not in record["reason_ids"]:
+                    record["reason_ids"].append(reason_id)
     buckets: dict[str, list[dict]] = {
         "high_confidence": [], "medium_confidence": [], "low_confidence": [],
     }
     for item in evidence.values():
+        item["evidence"] = sorted(
+            item["evidence"].values(),
+            key=lambda proof: (-proof["confidence"], proof["path"],
+                               proof["line"] or 0, proof["via"]),
+        )
         bucket = ("high_confidence" if item["confidence"] >= 0.85 else
                   "medium_confidence" if item["confidence"] >= 0.6 else "low_confidence")
         buckets[bucket].append(item)
@@ -518,6 +603,84 @@ def _historical_path_doc_candidates(
     return results
 
 
+def _payload_chars(result: dict) -> int:
+    return len(json.dumps(result))
+
+
+def _prune_reasons(result: dict) -> None:
+    """Drop reasons nothing cites and renumber what is left.
+
+    Trimming an item takes its citations with it, so without this a budgeted
+    payload spends its allowance on attribution for facts it no longer carries.
+    """
+    cited = sorted(
+        {index for bucket in result["impact"].values()
+         for item in bucket for index in item["reason_ids"]}
+        | {index for item in result["tests_to_run"] for index in item["reason_ids"]}
+    )
+    renumbered = {old: new for new, old in enumerate(cited)}
+    result["reasons"] = [result["reasons"][index] for index in cited]
+    for bucket in result["impact"].values():
+        for item in bucket:
+            item["reason_ids"] = [renumbered[index] for index in item["reason_ids"]]
+    for item in result["tests_to_run"]:
+        item["reason_ids"] = [renumbered[index] for index in item["reason_ids"]]
+
+
+def _apply_budget(result: dict, budget: int) -> None:
+    """Trim lowest-priority evidence until the payload fits, and report it.
+
+    Truncation is reported rather than silent: a caller that cannot tell a
+    trimmed impact set from a complete one will treat it as complete, which is
+    the confidently-wrong answer the freshness gate exists to prevent.
+    """
+    limit = budget * 4
+    dropped: dict[str, int] = {}
+    # Installed before measuring so the report of the trimming is itself inside
+    # the budget rather than pushing the payload back over it.
+    result["budget"] = budget
+    result["token_heuristic"] = "ceil(characters / 4)"
+    result["token_estimate"] = budget
+    result["truncation"] = {"applied": False, "budget": budget,
+                            "within_budget": True, "dropped": dropped}
+
+    remaining = _payload_chars(result)
+    for key, sub in _TRIM_ORDER:
+        if remaining <= limit:
+            break
+        container = result[key] if sub is None else result[key][sub]
+        label = key if sub is None else f"{key}.{sub}"
+        while container and remaining > limit:
+            # Decrement by the removed item rather than re-serializing the whole
+            # payload per pop, resynchronising periodically: dropping an item
+            # also releases the reasons only it cited, which this estimate
+            # cannot see and which is large enough to matter.
+            remaining -= len(json.dumps(container.pop())) + 1
+            dropped[label] = dropped.get(label, 0) + 1
+            if dropped[label] % _RESYNC_EVERY == 0:
+                _prune_reasons(result)
+                remaining = _payload_chars(result)
+        _prune_reasons(result)
+        remaining = _payload_chars(result)
+    while _payload_chars(result) > limit:
+        for key, sub in _TRIM_ORDER:
+            container = result[key] if sub is None else result[key][sub]
+            if container:
+                container.pop()
+                label = key if sub is None else f"{key}.{sub}"
+                dropped[label] = dropped.get(label, 0) + 1
+                break
+        else:
+            break
+        _prune_reasons(result)
+    result["truncation"]["applied"] = bool(dropped)
+    result["token_estimate"] = (_payload_chars(result) + 3) // 4
+    # Every trimmable list can be emptied and the payload still costs what its
+    # own scaffolding costs — status, head, the freshness envelope. A budget
+    # under that floor is unmeetable, and saying so beats implying it was met.
+    result["truncation"]["within_budget"] = result["token_estimate"] <= budget
+
+
 def render_change_context(result: dict) -> str:
     lines = ["RepoBrain change context", f"Mode: {result['mode']}"]
     if result.get("base"):
@@ -534,9 +697,10 @@ def render_change_context(result: dict) -> str:
     for bucket in ("high_confidence", "medium_confidence", "low_confidence"):
         for item in result["impact"][bucket]:
             node = item["node"]
-            lines.append(f"- {bucket}: {node['name']} via {item['via']} "
-                         f"({item['evidence_path']}:{item['evidence_line'] or 1}, "
-                         f"confidence={item['confidence']:.2f})")
+            for proof in item["evidence"]:
+                lines.append(f"- {bucket}: {node['name']} via {proof['via']} "
+                             f"({proof['path']}:{proof['line'] or 1}, "
+                             f"confidence={proof['confidence']:.2f})")
     lines.append("\nHistorical co-change (heuristic)")
     historical = result["historical_impact"]
     if historical["status"] != "ok":
@@ -565,4 +729,12 @@ def render_change_context(result: dict) -> str:
     if result["unknowns"]:
         lines.append("\nUnknowns")
         lines.extend(f"- {item}" for item in result["unknowns"])
+    truncation = result.get("truncation") or {}
+    if truncation.get("applied"):
+        lines.append(f"\nTruncated to fit {truncation['budget']} tokens")
+        lines.extend(f"- {label}: {count} item(s) not shown"
+                     for label, count in sorted(truncation["dropped"].items()))
+        if not truncation.get("within_budget", True):
+            lines.append(f"- Still over budget at {result['token_estimate']} tokens; "
+                         "nothing further can be dropped.")
     return "\n".join(lines) + "\n"
