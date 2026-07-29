@@ -1,108 +1,124 @@
 # Next Session Prompt
 
-The three items the previous version queued — M1, M2, M3 — shipped as PRs #13,
-#14, and #15 (D43, D44, D45). Each was found by RepoBrain failing at its own
-job on its own repository, and each of the three below was found the same way,
-two of them while fixing the first three.
+The three items the previous version queued — M4, M5, M6 — shipped as PRs #17
+and #18 (D46, D47). M5 and M6 turned out to be one decision and went together.
+Each of the three below was found the same way the last six were: by running
+RepoBrain against its own repository and reading the output as an agent would.
 
-One thing worth carrying forward about method: M1's queued hypothesis was
-wrong. The prompt suspected `setup/graph-data.js` was inflating the impact
-analysis and asked for that to be established *before* designing a fix. It
-contributes 0 impact items and 278 characters. Measuring first cost one command
-and redirected the entire piece of work. Keep doing that.
+On method, the same lesson landed twice more. **Both** queued hypotheses were
+wrong, and one command each was enough to establish it:
+
+- M5 asked whether D43's existing `TestFile` predicate was the whole fix for
+  `Subsystems`. It is not. With test modules removed the twelve promoted
+  subsystems were still the twelve shortest paths, still missing `graph.store`,
+  `graph.queries`, `indexing.indexer`, `parsers.base`, and `change_context`.
+- M4 asked whether a second lossless pass over symbol records would move enough
+  that no priority change was needed. It saves 9,680 tokens and still yields
+  zero impact and zero tests at the default budget. So does discarding every
+  symbol record.
+
+Measure first. It has now redirected three of the last four pieces of work.
 
 ## Where things stand
 
-- **D43** — `brief` withholds entrypoint promotion from paths carrying a
-  `TestFile` node. All four promoted routes were fixtures.
-- **D44** — the extractor fingerprint hashes `repobrain/parsers/*.py`, so a
-  parser changing its output can no longer depend on someone remembering to
-  bump `EXTRACTOR_VERSION`. Full re-index of this repo measured at 0.59 s,
-  against the ~25 s the prompt assumed.
-- **D45** — `change-context --json` went from ~461,000 tokens to 142,848
-  losslessly, then to a reported, budgeted ~14,600 by default.
+- **D46** — brief promotion ranks `Subsystems` by edge degree, not path length,
+  and withholds promotion from `examples/`-style paths through a predicate
+  local to `briefing.py` rather than by widening the parser's `_TEST_DIRS`.
+  Measured cost at scale: 1.0 ms → 3.2 ms inside a 42 ms brief.
+- **D47** — `changes` sheds fidelity in three reported stages
+  (`changes.symbols`, `changes.file_node`, `changes.line_ranges`) before the
+  evidence derived from the diff is given up. On this repository's own 87-file
+  diff at the default budget: 27/87 changes, 0 impact, 0 tests → 87/87 changes,
+  18 impact, 32 tests.
 
-Read D43, D44, and D45 before touching anything below; all three items sit on
+Read D46 and D47 before touching anything below; M7 and M8 sit directly on
 them.
 
-## M4: the default budget buys the diff and nothing derived from it
+## M7: the MCP `change_context` tool has no budget at all
 
-D45 names this as unanswered, which makes it the most load-bearing loose end
-this session leaves.
-
-`changes` is now the dominant key — about 59,000 tokens for the 84-file diff
-that motivated D45. Priority ranks the diff above evidence derived from it, so:
-
-```
-budget  15000:  14593 tokens | changes 27/86 | impact  0 | tests  0
-budget  60000:  59472 tokens | changes 86/86 | impact 26 | tests 32
-```
-
-At the default, a wide diff yields no impact and no tests — which is the part
-an agent cannot get from `git diff --stat`. The command degrades into a worse
-version of a tool the agent already has.
-
-The ordering is right for a working diff of a handful of files and the question
-is whether it should hold at this width. The candidate D45 names is degrading
-`changes` to paths-only past some width and spending the difference on impact.
-Before building that, establish what the 59,000 tokens is actually made of:
-`symbols` was 171,354 of the 237,155 characters, and a symbol record still
-carries `path` (the parent change has it) and `provenance` (derivable from
-`path` and `start_line`). A second lossless pass may move this enough that no
-priority change is needed. Measure before designing, as above.
-
-## M5: `Subsystems` has M2's bug, ranked by path length
-
-`repobrain brief` on this repository, right now:
+D45 built the budget, D47 fixed what it spends on — and neither reaches the
+surface an agent is most likely to call. `RepoBrainTools.change_context`
+(`repobrain/mcp_server.py:142`) passes `base` and `auto_index` and nothing
+else, so `budget` defaults to `None` and the tool emits everything:
 
 ```
-Subsystems
-- setup/graph      [Module] (setup/graph.js:1)
-- setup/script     [Module] (setup/script.js:1)
-- repobrain.cli    [Module] (repobrain/cli.py:1)
-- tests.conftest   [Module] (tests/conftest.py:1)     <-
-- repobrain.config [Module] (repobrain/config.py:1)
-- ...
-- tests.test_scale [Module] (tests/test_scale.py:1)   <-
-- tests.test_memory  [Module] (tests/test_memory.py:1)  <-
-- tests.test_search  [Module] (tests/test_search.py:1)  <-
+CLI  `change-context --base HEAD~8 --json`  →  14,922 tokens, truncation reported
+MCP  change_context(base="HEAD~8")          →  96,064 tokens, no `truncation` key
 ```
 
-Four of twelve slots are test modules, and `repobrain.briefing`,
-`repobrain.freshness`, and `repobrain.indexing` are absent. This is milder than
-M2 — tests are genuinely part of the project, so this is "ranked too highly"
-rather than "categorically wrong" — but the cause is worse: `_node_facts`
-orders by `length(path),path`, so the twelve subsystems an agent is shown are
-the ones with the shortest paths. That is not a relevance ranking at all.
+Same repository, same diff, same minute. The MCP payload is not merely larger:
+it carries no `budget`, no `token_estimate`, and no `truncation`, so a caller
+has nothing to read to discover it was complete — the one honesty property D45
+and D47 both treat as non-negotiable.
 
-Two questions to settle in order:
+This is the highest-value item here and probably the smallest. The obvious fix
+is to give the tool the CLI's default and expose the parameter, and it is
+likely correct. Two things to settle before writing it:
 
-1. Does the D43 `TestFile` predicate simply apply here too? It is already
-   written and already tested. If demoting test modules is the whole fix, do
-   only that.
-2. Only if it is not: what *should* order subsystems? Edge degree is the
-   obvious source already in the graph and needs no new extraction. Do not
-   invent a config key for this.
+1. `project_brief` is the other budgeted surface — check whether its MCP tool
+   has the same gap rather than fixing one and leaving its twin.
+2. Whether the MCP default should equal the CLI's 15,000. An MCP caller is
+   inside a live session, so its budget is arguably tighter, not equal. Do not
+   invent a config key for this; pick one and record why.
 
-## M6: `examples/` and `fixtures/` are still promoted
+## M8: `Configuration` cannot show an environment variable, and shows packaging boilerplate instead
 
-D43's own named limitation. `is_test_file` matches the path segments
-`{tests, test, __tests__, spec}`, so this repository was fixed only because its
-fixtures happen to live under `tests/`. A user whose sample application sits in
-a top-level `examples/` directory still gets its routes promoted as their
-project's entrypoints — the exact bug D43 fixed, for the more common layout.
+`repobrain brief` on this repository, right now, after D46:
 
-D43 deliberately did not widen `_TEST_DIRS`: that set feeds `TestFile`
-classification globally, including `recommended_tests` in `impact_analysis`
-(`repobrain/graph/queries.py`), and changing it is an extraction change that
-now moves the extractor fingerprint under D44 and forces a re-index for every
-user on upgrade. That is a real cost, and D44 makes it visible rather than
-silent, which is why this is worth doing deliberately rather than as a
-one-line edit.
+```
+Configuration
+- pyproject.toml [ConfigFile] (pyproject.toml:1)
+- build-system.requires [ConfigKey] (pyproject.toml:2)
+- build-system.build-backend [ConfigKey] (pyproject.toml:3)
+- project.name / .version / .description / .readme / .requires-python
+- project.license / project.authors ...
+```
 
-The question is whether "not representative" and "is a test" should be the same
-predicate at all. They were the same thing for RepoBrain and are not in
-general: an `examples/` directory is not tests. Decide that before writing code.
+Twelve slots, every one of them `pyproject.toml` packaging metadata. Nothing an
+agent needs in order to run or configure anything. This is M5's bug in the
+section D46 deliberately left alone — the ordering there is still
+`length(path),path`, and I declined to change it on the grounds that it had no
+*measured* defect. It has one now.
+
+The sharper half is not ranking but eligibility. `_node_facts` requires
+`start_line IS NOT NULL`, and this repository's three `EnvVar` nodes —
+`DATABASE_URL`, `LOG_LEVEL`, `PORT` — carry `path=''` and `start_line=NULL`:
+
+```
+EnvVar nodes eligible for the brief: 0 of 3
+```
+
+So `EnvVar` is named as one of the section's three node types and can never
+appear in it. Establish which of the two is true before designing anything:
+whether `EnvVar` nodes are *supposed* to carry a location (their `READS_ENV`
+edges do — check what `explain file` reports for a file that reads one), or
+whether the brief's eligibility rule is what is wrong. Those lead to different
+fixes, one of them an extraction change that moves D44's fingerprint. The same
+`start_line IS NOT NULL` filter is why `Directory` nodes have never been
+brief-eligible either (D46 records this); that may be the same question asked a
+third time.
+
+## M9: `Purpose` promotes a heading fragment as a fact
+
+```
+Purpose
+- RepoBrain is a **local-first "second brain" for AI coding agents**. It indexes … [Purpose] (README.md:1)
+- Implemented: [Purpose] (README.md:11)
+```
+
+The second fact is the word `Implemented:` and nothing else. `_purpose_facts`
+(`repobrain/briefing.py`) takes the first non-heading paragraph of each
+matching section, and a section whose body opens with a bare list lead-in
+yields the lead-in. It costs an agent little, which is why this is third — but
+the brief is the one surface whose whole claim is that everything in it is a
+source-grounded fact, and `Implemented:` is not one.
+
+Cheapest defensible fix is a minimum-substance test on the candidate paragraph
+before promoting it. Resist anything that needs a word list or a heuristic
+about English; a paragraph that is one short colon-terminated fragment is
+recognisable without either. Confirm against the other fixture READMEs that
+the rule does not silently empty the section for a project whose README is
+terse — an absent `Purpose` is a worse outcome than a thin one.
 
 ## Housekeeping
 
@@ -118,11 +134,14 @@ general: an `examples/` directory is not tests. Decide that before writing code.
 - Merge policy is unchanged: auto-merge when green, full suite plus review with
   confirmed findings fixed. Stop the loop rather than merge anything
   questionable.
-- Two of this session's three fixes were only provable by mutation — narrowing
-  `test_no_change_fast_path_does_not_read_file_bodies` (D44) and the budget
-  resync (D45) both had tests that passed against the broken code first. When a
-  test is written to catch a specific defect, break the code and confirm it
-  fails.
+- Mutation-check every test written to catch a specific defect, and check that
+  the mutation you chose is the *behavioural* one: reverting D46's ordering by
+  deleting a SQL fragment broke thirteen tests through a parameter-count
+  mismatch and proved nothing. Reverting it at the call site failed exactly one
+  test, which is the signal you want.
+- `--base HEAD~N` is how to reach a wide diff without tripping the ten-file
+  auto-index threshold: commit the changes, leave the tree clean, and diff
+  against an earlier commit. Both D47 regression tests are built this way.
 
 ## Still needs a human, still not blocking
 
