@@ -1348,3 +1348,62 @@ set feeds `TestFile` classification globally, including `recommended_tests` in
 extraction change that would have to move the extractor fingerprint. Widening
 what counts as non-representative is its own decision and should not ride along
 inside a brief-ranking fix.
+
+## 2026-07-29 — Extractor identity, made automatic
+
+### D44: The extractor fingerprint hashes the parser sources; `EXTRACTOR_VERSION` is demoted to the axis the sources cannot see
+
+D42 built the second freshness axis and named its own weakness.
+`ParserRegistry.fingerprint()` hashed `EXTRACTOR_VERSION` with the sorted
+parser names, which detects composition — a parser added or removed —
+automatically, and detects the case D42 was written for only if a human
+remembers to bump the constant. So the shipped design caught the class of bug
+that has never bitten this project and relied on memory for the one that has:
+the stale index D42 diagnoses was produced by exactly that discipline failing.
+
+**Hash the sources.** `parser_source_digest()` folds a sha256 over the bytes of
+every module in `repobrain/parsers/`, sorted by name, with the names hashed
+alongside the bytes so a rename counts even when the corpus is identical. No
+discipline required, and it needed no new plumbing: `freshness.py` and
+`indexer.py` already compare `fingerprint()` against `meta`, so drift arrives
+through D42's existing two-axis reporting.
+
+**The rejected objection was cost, and the cost was measured.** A comment-only
+or refactor-only parser edit now forces a full re-extraction that gains
+nothing. The prompt that queued this work estimated that at ~25 s. Measured on
+this repository — `git archive HEAD` into a clean tree, fresh `repobrain index`
+— it is **0.59 s** for 153 files, 2,095 nodes, 4,541 edges. Fourteen of this
+project's sixty-one commits touched `repobrain/parsers/**`, and nearly all of
+them genuinely changed extraction, so the false-positive rate is low as well as
+cheap.
+
+**CI enforcement was the alternative and was rejected.** Failing a build when
+`repobrain/parsers/**` moves without `EXTRACTOR_VERSION` moving keeps
+re-indexing precise, but it binds only contributors who go through CI — an
+editable local install is the environment where a stale index actually hurts —
+and it puts CI in a process-policing role D37 explicitly rejects in favour of
+re-deriving facts. Correctness that depends on a gate the affected user never
+passes through is not correctness.
+
+**No cache, deliberately.** `fingerprint()` runs on every `check_freshness`,
+including a statusline polling `freshness` on a timer under D40. Caching the
+digest for the process lifetime would hold a stale answer across exactly the
+edit this exists to notice, which is the failure mode being fixed rather than a
+smaller version of it. At 0.27 ms per digest the cache buys nothing worth that.
+
+**`EXTRACTOR_VERSION` stays, demoted.** The sources are the automatic axis;
+the constant is now for extraction changes that live *outside* the parsers
+package. The concrete one is `repobrain.indexing.scanner.detect_language`,
+which decides which parsers run at all and can therefore change every
+extraction result without a single byte moving under `parsers/`. Deleting the
+constant would have left that ungated; leaving its docstring describing the old
+contract would have been worse than deleting it.
+
+**One test was narrowed rather than deleted.**
+`test_no_change_fast_path_does_not_read_file_bodies` patched `Path.read_bytes`
+globally, so fingerprinting tripped it. The invariant it protects is that an
+unchanged incremental run does not read the bodies of *the files it is
+indexing*; RepoBrain reading its own installed sources is a different act. The
+patch is now scoped to the indexed root. That the narrowed guard still catches
+the original regression was verified by mutation — forcing `compute_diff` to
+read each scanned file's bytes, and confirming the test fails.

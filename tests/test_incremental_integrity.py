@@ -84,8 +84,16 @@ def test_no_change_fast_path_does_not_read_file_bodies(tmp_path, monkeypatch):
         indexer = Indexer(store)
         indexer.index(root)
 
-        def unexpected_read(_self):
-            raise AssertionError("unchanged incremental run read a file body")
+        # Scoped to the indexed tree on purpose. The invariant is that the fast
+        # path does not read the bodies of the files it is indexing; RepoBrain
+        # reading its own installed sources to fingerprint its extractor is a
+        # different thing, and a blanket patch would conflate the two.
+        real_read_bytes = Path.read_bytes
+
+        def unexpected_read(self):
+            if self.resolve().is_relative_to(root.resolve()):
+                raise AssertionError("unchanged incremental run read a file body")
+            return real_read_bytes(self)
 
         monkeypatch.setattr(Path, "read_bytes", unexpected_read)
         stats = indexer.index(root)
