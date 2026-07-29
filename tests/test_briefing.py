@@ -142,6 +142,49 @@ def test_brief_omits_entrypoints_found_only_under_example_paths(small_app, tmp_p
     assert all(section["title"] != "Entrypoints" for section in result["sections"])
 
 
+def test_brief_promotes_an_env_var_the_project_actually_reads(small_app):
+    """`EnvVar` was named as a Configuration type and could never appear there.
+
+    `_node_facts` required `start_line IS NOT NULL`, but D17 keys `EnvVar` nodes
+    on `("EnvVar", name, "")` so that many readers converge on one repo-global
+    node — pathless and lineless by design. The eligibility rule, not the
+    extractor, was what excluded them. Their location lives in
+    `metadata.observation`, which is where the citation must come from.
+    """
+    with _indexed(small_app) as store:
+        result = project_brief(small_app, store, budget=2000)
+
+    configuration = next(section for section in result["sections"]
+                         if section["title"] == "Configuration")
+    env_vars = [fact for fact in configuration["facts"] if fact["type"] == "EnvVar"]
+    assert [fact["text"] for fact in env_vars] == ["DATABASE_URL"]
+    # A citation an agent can open, not a bare name and not a fabricated one.
+    # `app/db/config.py:11` is the `os.environ.get("DATABASE_URL", ...)` line
+    # itself, not the enclosing `def` on line 10.
+    assert env_vars[0]["source"] == "app/db/config.py:11"
+
+
+def test_brief_withholds_promotion_from_env_vars_only_fixtures_read(small_app, tmp_path):
+    """The D43 defect, reachable again through a node type that has no path.
+
+    The unrepresentative-path predicate keys on `nodes.path`, which is `''` for
+    every `EnvVar`. Relaxing eligibility without carrying the predicate onto the
+    observation path would promote fixture config as the project's own.
+    """
+    root = tmp_path / "project"
+    (root / "tests" / "fixtures").mkdir(parents=True)
+    shutil.move(str(small_app), str(root / "tests" / "fixtures" / "small_python_app"))
+    with _indexed(root) as store:
+        result = project_brief(root, store, budget=2000)
+        env_vars = [row["name"] for row
+                    in store.conn.execute("SELECT name FROM nodes WHERE type='EnvVar'")]
+
+    assert env_vars, "the fixture's env vars must still be extracted into the graph"
+    promoted = [fact for section in result["sections"] for fact in section["facts"]
+                if fact["type"] == "EnvVar"]
+    assert promoted == []
+
+
 def test_brief_detects_added_changed_and_deleted_files(small_app):
     with _indexed(small_app) as store:
         assert project_brief(small_app, store)["staleness"]["is_stale"] is False

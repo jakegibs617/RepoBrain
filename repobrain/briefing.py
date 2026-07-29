@@ -21,6 +21,13 @@ _UNREPRESENTATIVE_DIRS = ("examples", "example", "fixtures", "fixture",
 
 
 def _source(row) -> str:
+    keys = row.keys()
+    if not row["path"] and "observed_path" in keys and row["observed_path"]:
+        # D17 keys `EnvVar` on ``("EnvVar", name, "")`` so every reader converges
+        # on one repo-global node. Pathless is not unlocatable: extraction
+        # records where the node was observed, and that is the honest citation.
+        line = row["observed_line"]
+        return f"{row['observed_path']}:{line}" if line else row["observed_path"]
     path = row["path"] or ".repobrain/agent_memory.md"
     return f"{path}:{row['start_line']}" if row["start_line"] else path
 
@@ -39,6 +46,17 @@ _DEGREE = (
     f" AND e.type NOT IN ({','.join('?' for _ in _STRUCTURAL_EDGES)}))"
 )
 
+#: Where extraction saw a repo-global node. `EnvVar` and `DockerImage` are keyed
+#: on an empty path by D17 so that every reader converges on one node; the
+#: observation is the only place their location survives.
+_OBSERVED_PATH = "json_extract(metadata_json,'$.observation.path')"
+
+#: The path a fact would be cited from — the node's own, or the observation's.
+#: Every promotion predicate keys on this rather than on `nodes.path`, so that
+#: withholding promotion from unrepresentative paths (D43, D46) reaches nodes
+#: whose path lives one level down.
+_LOCATION = f"COALESCE(NULLIF(nodes.path,''),{_OBSERVED_PATH})"
+
 
 def _node_facts(store: GraphStore, types: tuple[str, ...], limit: int,
                 *, by_degree: bool = False) -> list[dict]:
@@ -48,7 +66,7 @@ def _node_facts(store: GraphStore, types: tuple[str, ...], limit: int,
     # mechanism to express. "Not representative" is the wider question and is
     # answered here, at promotion time, by path segment.
     globs = " OR ".join(
-        "nodes.path GLOB ? OR nodes.path GLOB ?" for _ in _UNREPRESENTATIVE_DIRS
+        f"{_LOCATION} GLOB ? OR {_LOCATION} GLOB ?" for _ in _UNREPRESENTATIVE_DIRS
     )
     patterns = [pattern for segment in _UNREPRESENTATIVE_DIRS
                 for pattern in (f"{segment}/*", f"*/{segment}/*")]
@@ -57,11 +75,17 @@ def _node_facts(store: GraphStore, types: tuple[str, ...], limit: int,
     # modules happen to sit nearest the repository root.
     degree = f"{_DEGREE} DESC," if by_degree else ""
     rows = store.conn.execute(
-        f"SELECT type,name,qualified_name,path,start_line,metadata_json FROM nodes "
-        f"WHERE type IN ({marks}) AND start_line IS NOT NULL "
-        f"AND NOT EXISTS (SELECT 1 FROM nodes t WHERE t.type='TestFile' AND t.path=nodes.path) "
+        f"SELECT type,name,qualified_name,path,start_line,metadata_json,"
+        f"       {_OBSERVED_PATH} AS observed_path,"
+        f"       json_extract(metadata_json,'$.observation.line') AS observed_line "
+        f"FROM nodes "
+        # Eligibility asks whether the brief can cite a source, which is not the
+        # same question as whether the node has a line. A repo-global node has
+        # neither path nor line and is still perfectly citable (D49).
+        f"WHERE type IN ({marks}) AND {_LOCATION} IS NOT NULL "
+        f"AND NOT EXISTS (SELECT 1 FROM nodes t WHERE t.type='TestFile' AND t.path={_LOCATION}) "
         f"AND NOT ({globs}) "
-        f"ORDER BY {degree} length(path),path,start_line,name LIMIT ?",
+        f"ORDER BY {degree} length({_LOCATION}),{_LOCATION},start_line,name LIMIT ?",
         (*types, *patterns, *(_STRUCTURAL_EDGES if by_degree else ()), limit),
     ).fetchall()
     return [
