@@ -42,7 +42,7 @@ Both default to `.`.
 | `brief` | `--budget INT` (2000, min 64), `--path`, `--json` | Token-budgeted orientation pack. What the SessionStart hook runs. |
 | `status` | `--path`, `--json` | Last index run, node/edge counts by type, active file count. |
 | `explain project` | `--path`, `--json` | Root, counts, languages, entrypoints. |
-| `change-context` | `--base REF`, `--path`, `--json` | Explains the working-tree diff, or `merge-base(BASE,HEAD)..HEAD`. Impact, tests, docs. |
+| `change-context` | `--base REF`, `--budget INT` (15000, min 256), `--path`, `--json` | Explains the working-tree diff, or `merge-base(BASE,HEAD)..HEAD`. Impact, tests, docs. |
 
 ### Locating
 
@@ -103,6 +103,19 @@ JSON **array**. Everything else emits an object.
 When a small stale diff is auto-repaired, `Freshness: Automatically reindexed
 N changed file(s).` goes to **stderr** in text mode. Under `--json` the same
 fact appears in the payload's `freshness` key instead.
+
+`change-context --json` omits `text` — that key is the same payload rendered as
+prose, which a caller parsing the structure does not need. It carries a
+top-level `reasons` table instead of repeating the reason on every item;
+`impact` and `tests_to_run` entries cite it by index through `reason_ids`. Each
+`impact` entry is one **node**, with an `evidence` list of the edges that put it
+in the blast radius.
+
+**Always read `truncation` before treating a change context as complete.**
+`applied` means lowest-priority evidence was dropped to fit `--budget`, and
+`dropped` names what went. `within_budget: false` means even an empty payload
+exceeds the budget requested. Re-run with a larger `--budget` rather than
+concluding the impact set was empty.
 
 ## Exit codes
 
