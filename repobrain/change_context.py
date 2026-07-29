@@ -298,7 +298,7 @@ def _map_change(store: GraphStore, change: dict) -> tuple[dict | None, list[dict
             "SELECT id,type,name,qualified_name,path,start_line,end_line,language "
             "FROM nodes WHERE path=? ORDER BY start_line,type,name", (path,),
         ).fetchall()]
-    file_node = next((_node_record(node, change) for node in nodes if node["type"] == "File"), None)
+    file_node = next((_node_record(node) for node in nodes if node["type"] == "File"), None)
     symbols = []
     for node in nodes:
         if node["type"] not in _SYMBOL_TYPES or node.get("start_line") is None:
@@ -309,7 +309,7 @@ def _map_change(store: GraphStore, change: dict) -> tuple[dict | None, list[dict
             for span in ranges
         ):
             continue
-        symbols.append(_node_record(node, change))
+        symbols.append(_node_record(node))
     return file_node, symbols
 
 
@@ -335,7 +335,14 @@ def _parse_deleted_nodes(path: str, content: str, revision: str) -> list[dict]:
     ]
 
 
-def _node_record(node: dict, change: dict) -> dict:
+def _node_record(node: dict) -> dict:
+    """A symbol inside a change record.
+
+    It carries no copy of why it changed: it is nested in the change that
+    explains that, and repeating `status`/`old_path`/`new_path` on all 395
+    symbols of a wide diff cost 33,745 characters to say what the enclosing
+    record already said.
+    """
     return {
         "id": node["id"], "type": node["type"], "name": node["name"],
         "qualified_name": node.get("qualified_name") or "", "path": node["path"],
@@ -345,10 +352,6 @@ def _node_record(node: dict, change: dict) -> dict:
             f"git:{node['source_revision']}:{node['path']}:{node.get('start_line') or 1}"
             if node.get("source_revision") else f"{node['path']}:{node.get('start_line') or 1}"
         ),
-        "changed_because": {
-            "status": change["status"], "old_path": change.get("old_path"),
-            "new_path": change.get("new_path"),
-        },
     }
 
 
