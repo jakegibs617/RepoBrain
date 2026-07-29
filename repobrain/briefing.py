@@ -17,11 +17,19 @@ def _source(row) -> str:
     return f"{path}:{row['start_line']}" if row["start_line"] else path
 
 
-def _node_facts(store: GraphStore, types: tuple[str, ...], limit: int) -> list[dict]:
+def _node_facts(store: GraphStore, types: tuple[str, ...], limit: int,
+                *, exclude_test_paths: bool = False) -> list[dict]:
     marks = ",".join("?" for _ in types)
+    # A file the code parser classified as a test carries a TestFile node at the
+    # same path. That is already in the graph, so "indexed but not
+    # representative" needs no second mechanism to express.
+    test_path_clause = (
+        "AND NOT EXISTS (SELECT 1 FROM nodes t WHERE t.type='TestFile' AND t.path=nodes.path) "
+        if exclude_test_paths else ""
+    )
     rows = store.conn.execute(
         f"SELECT type,name,qualified_name,path,start_line,metadata_json FROM nodes "
-        f"WHERE type IN ({marks}) AND start_line IS NOT NULL "
+        f"WHERE type IN ({marks}) AND start_line IS NOT NULL {test_path_clause}"
         f"ORDER BY length(path),path,start_line,name LIMIT ?",
         (*types, limit),
     ).fetchall()
@@ -155,7 +163,7 @@ def project_brief(
         ("Memory requiring attention", alerts),
         ("Purpose", _purpose_facts(store)),
         ("Subsystems", _node_facts(store, ("Directory", "Module"), 12)),
-        ("Entrypoints", _node_facts(store, ("Route",), 12)),
+        ("Entrypoints", _node_facts(store, ("Route",), 12, exclude_test_paths=True)),
         ("Configuration", _node_facts(store, ("ConfigFile", "ConfigKey", "EnvVar"), 12)),
         ("Active assumptions", assumptions),
         ("Open questions", questions),

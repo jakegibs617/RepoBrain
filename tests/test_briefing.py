@@ -1,4 +1,5 @@
 import json
+import shutil
 from pathlib import Path
 
 from click.testing import CliRunner
@@ -70,6 +71,27 @@ def test_brief_entrypoints_are_grounded_in_produced_route_nodes(small_app):
         "GET /api/users/<int:user_id>",
     }
     assert {"CLICommand", "Script", "Endpoint", "ADR"}.isdisjoint(produced_types)
+
+
+def test_brief_omits_entrypoints_found_only_under_test_paths(small_app, tmp_path):
+    """Routes that exist only in fixtures do not describe the project.
+
+    The brief is the first thing an agent reads; promoting a test fixture's
+    routes as this repository's entrypoints actively misdescribes it. They stay
+    in the graph and stay queryable — they only lose promotion.
+    """
+    root = tmp_path / "project"
+    (root / "tests" / "fixtures").mkdir(parents=True)
+    shutil.move(str(small_app), str(root / "tests" / "fixtures" / "small_python_app"))
+    with _indexed(root) as store:
+        result = project_brief(root, store, budget=2000)
+        routes = [
+            row["path"]
+            for row in store.conn.execute("SELECT path FROM nodes WHERE type='Route'")
+        ]
+
+    assert routes, "the fixture's routes must still be extracted into the graph"
+    assert all(section["title"] != "Entrypoints" for section in result["sections"])
 
 
 def test_brief_detects_added_changed_and_deleted_files(small_app):
