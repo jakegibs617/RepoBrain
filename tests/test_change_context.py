@@ -547,6 +547,60 @@ def test_a_payload_inside_its_budget_is_left_exactly_alone(small_app):
             == {key: value for key, value in unbudgeted.items() if key not in metadata})
 
 
+def test_the_mcp_tool_is_budgeted_and_reports_it_like_the_cli(small_app):
+    """The surface an agent is most likely to call had no budget at all.
+
+    D45 built the budget and D47 fixed what it spends on, but both stopped at
+    the CLI. An MCP caller received everything with no `budget`, no
+    `token_estimate` and no `truncation` — nothing to read to discover the
+    payload was complete, which is the one honesty property both decisions
+    treat as non-negotiable.
+    """
+    _init_repo(small_app)
+    tools = RepoBrainTools(small_app)
+    tools.index_repo()
+    _change_create_user(small_app)
+
+    result = tools.change_context()
+
+    assert result["budget"] == DEFAULT_CHANGE_BUDGET
+    assert result["truncation"]["applied"] is False
+    assert result["token_estimate"] <= DEFAULT_CHANGE_BUDGET
+
+
+def test_the_mcp_caller_can_ask_for_a_tighter_budget_than_the_default(small_app):
+    """A default is only defensible if the caller can override it.
+
+    An MCP caller sits inside a live session whose context it knows more about
+    than RepoBrain does, so the budget is exposed rather than fixed.
+    """
+    _init_repo(small_app)
+    tools = RepoBrainTools(small_app)
+    tools.index_repo()
+    _change_create_user(small_app)
+
+    trimmed = tools.change_context(budget=1200)
+
+    assert trimmed["truncation"]["applied"] is True
+    assert trimmed["truncation"]["budget"] == 1200
+    assert trimmed["token_estimate"] <= 1200
+    assert sum(trimmed["truncation"]["dropped"].values()) > 0
+
+
+def test_an_mcp_budget_under_the_minimum_is_refused_not_silently_raised(small_app):
+    """The wrapper catches `GitDiffError` only; a bad budget must not land there.
+
+    Reporting an impossible budget as a Git failure would send the caller to
+    debug its repository instead of its argument.
+    """
+    _init_repo(small_app)
+    tools = RepoBrainTools(small_app)
+    tools.index_repo()
+
+    with pytest.raises(ValueError, match="at least"):
+        tools.change_context(budget=MINIMUM_CHANGE_BUDGET - 1)
+
+
 def test_freshness_failure_returns_no_change_facts(small_app):
     _init_repo(small_app)
     with _indexed(small_app) as store:

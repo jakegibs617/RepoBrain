@@ -7,7 +7,7 @@ from typing import Any
 from .config import RepoBrainConfig
 from .diagnostics import configure_logging_from_env, log_event
 from .briefing import DEFAULT_BUDGET, project_brief
-from .change_context import GitDiffError, change_context
+from .change_context import DEFAULT_CHANGE_BUDGET, GitDiffError, change_context
 from .graph.queries import (
     CHANGE_TYPES,
     code_for_docs,
@@ -139,12 +139,15 @@ class RepoBrainTools:
             auto_index=auto_index,
         )
 
-    def change_context(self, base: str | None = None, auto_index: bool = True) -> dict:
+    def change_context(self, base: str | None = None, auto_index: bool = True,
+                       budget: int = DEFAULT_CHANGE_BUDGET) -> dict:
+        """Grounded context for the current diff, budgeted as the CLI is (D48)."""
         try:
             with self._store() as store:
                 return _safe(change_context(self.root, store, base=base,
                                             auto_index=auto_index,
-                                            include_text=False))
+                                            include_text=False,
+                                            budget=budget))
         except GitDiffError as exc:
             return {"status": "error", "error": str(exc), "changes": []}
 
