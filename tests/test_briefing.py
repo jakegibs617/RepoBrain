@@ -185,6 +185,81 @@ def test_brief_withholds_promotion_from_env_vars_only_fixtures_read(small_app, t
     assert promoted == []
 
 
+def _configuration_project(root: Path) -> None:
+    (root / ".github" / "workflows").mkdir(parents=True)
+    (root / ".github" / "workflows" / "ci.yml").write_text(
+        "name: CI\non: [push]\njobs:\n  test:\n    runs-on: ubuntu-latest\n"
+        "    steps:\n      - run: pytest\n"
+    )
+    (root / "pyproject.toml").write_text(
+        "[build-system]\nrequires = [\"hatchling\"]\nbuild-backend = \"hatchling.build\"\n\n"
+        "[project]\nname = \"demo\"\nversion = \"0.1.0\"\ndescription = \"d\"\n"
+        "readme = \"README.md\"\nrequires-python = \">=3.11\"\nlicense = \"MIT\"\n"
+        "authors = []\nkeywords = []\nclassifiers = []\ndependencies = []\n\n"
+        # A nested table implies parent keys that no line declares.
+        "[tool.hatch.build.targets.wheel]\npackages = [\"demo\"]\n"
+    )
+
+
+def test_brief_names_the_files_that_configure_a_project_before_their_keys(tmp_path):
+    """Twelve slots of packaging metadata is not a description of configuration.
+
+    `pyproject.toml` declares more keys than the section has slots, so ordering
+    by path length spent every one of them on the first file it met and never
+    reached the workflow that decides how the project is built and tested. What
+    an agent needs first is which files configure this project at all.
+    """
+    root = tmp_path / "project"
+    root.mkdir()
+    _configuration_project(root)
+    with _indexed(root) as store:
+        result = project_brief(root, store, budget=2000)
+
+    configuration = next(section for section in result["sections"]
+                         if section["title"] == "Configuration")
+    assert [fact["type"] for fact in configuration["facts"][:2]] == ["ConfigFile"] * 2
+    assert {fact["text"] for fact in configuration["facts"][:2]} == {
+        "pyproject.toml", ".github/workflows/ci.yml",
+    }
+    # The keys still follow; they are demoted, not withheld.
+    assert any(fact["type"] == "ConfigKey" for fact in configuration["facts"])
+    # A fact that can cite a line outranks one that can only cite a file.
+    # SQLite sorts NULLs first, which handed the tie-break to the implied
+    # parent tables of `[tool.hatch.build.targets.wheel]` — the least useful
+    # keys in the file winning on a technicality.
+    assert all(":" in fact["source"] for fact in configuration["facts"]), [
+        fact["source"] for fact in configuration["facts"]
+    ]
+
+
+def test_brief_does_not_promote_configuration_that_only_illustrates_it(tmp_path):
+    """A config file under a documentation directory performs nothing.
+
+    This repository's `docs/evaluation/*-facts.json` are expected-output
+    fixtures for the evaluation harness. They are `ConfigFile` nodes only
+    because the structured parser claims every `.json`, and they took ten of
+    the section's twelve slots.
+    """
+    root = tmp_path / "project"
+    root.mkdir()
+    _configuration_project(root)
+    (root / "docs" / "evaluation").mkdir(parents=True)
+    for index in range(12):
+        (root / "docs" / "evaluation" / f"facts-{index}.json").write_text(
+            '{"expected": {"nodes": 3}}\n'
+        )
+    with _indexed(root) as store:
+        result = project_brief(root, store, budget=2000)
+        indexed_docs = store.conn.execute(
+            "SELECT count(*) FROM nodes WHERE type='ConfigFile' AND path GLOB 'docs/*'"
+        ).fetchone()[0]
+
+    assert indexed_docs == 12, "the documentation's config must still be in the graph"
+    promoted = [fact["source"] for section in result["sections"]
+                for fact in section["facts"]]
+    assert not any(source.startswith("docs/") for source in promoted), promoted
+
+
 def test_brief_detects_added_changed_and_deleted_files(small_app):
     with _indexed(small_app) as store:
         assert project_brief(small_app, store)["staleness"]["is_stale"] is False

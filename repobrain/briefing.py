@@ -19,6 +19,15 @@ MINIMUM_BUDGET = 64
 _UNREPRESENTATIVE_DIRS = ("examples", "example", "fixtures", "fixture",
                           "samples", "sample")
 
+#: Directory segments that *document* the project rather than constitute it.
+#: Deliberately not folded into `_UNREPRESENTATIVE_DIRS`: documentation does
+#: describe the project — that is its entire purpose — so it stays eligible
+#: wherever prose is what the section wants. A `ConfigFile` under `docs/`,
+#: though, illustrates configuration rather than performing it, and this
+#: repository's own `docs/evaluation/*-facts.json` took ten of the twelve
+#: Configuration slots on the strength of being `.json`.
+_DOCUMENTATION_DIRS = ("docs", "doc")
+
 
 def _source(row) -> str:
     keys = row.keys()
@@ -59,21 +68,39 @@ _LOCATION = f"COALESCE(NULLIF(nodes.path,''),{_OBSERVED_PATH})"
 
 
 def _node_facts(store: GraphStore, types: tuple[str, ...], limit: int,
-                *, by_degree: bool = False) -> list[dict]:
+                *, by_degree: bool = False, by_type: bool = False,
+                withhold: tuple[str, ...] = _UNREPRESENTATIVE_DIRS) -> list[dict]:
+    """Promote up to ``limit`` facts of ``types``, best first.
+
+    ``by_type`` ranks by the order ``types`` is written in. Degree is the right
+    relevance signal for code (D46) and the wrong one for configuration: 390 of
+    the 419 edges touching this repository's config nodes are structural, so
+    counting them ranks a file by how many keys it declares — file size wearing
+    a graph costume, the very thing `_STRUCTURAL_EDGES` exists to refuse.
+    """
     marks = ",".join("?" for _ in types)
     # A file the code parser classified as a test carries a TestFile node at the
     # same path. That is already in the graph, so "is a test" needs no second
     # mechanism to express. "Not representative" is the wider question and is
     # answered here, at promotion time, by path segment.
+    # The trailing equality catches the directory node itself: `docs/*` does not
+    # match `docs`, and a `Directory` node's path is the bare segment.
     globs = " OR ".join(
-        f"{_LOCATION} GLOB ? OR {_LOCATION} GLOB ?" for _ in _UNREPRESENTATIVE_DIRS
+        f"{_LOCATION} GLOB ? OR {_LOCATION} GLOB ? OR {_LOCATION} = ?"
+        for _ in withhold
     )
-    patterns = [pattern for segment in _UNREPRESENTATIVE_DIRS
-                for pattern in (f"{segment}/*", f"*/{segment}/*")]
+    patterns = [pattern for segment in withhold
+                for pattern in (f"{segment}/*", f"*/{segment}/*", segment)]
     # Path length is a tie-break, never the ranking: it says nothing about
     # relevance, and on its own it hands the twelve promoted slots to whichever
     # modules happen to sit nearest the repository root.
     degree = f"{_DEGREE} DESC," if by_degree else ""
+    # Rank by the order `types` is written in, so the section's own signature
+    # states the priority: what must be set to run anything, then what governs
+    # how it runs, then the individual keys inside those.
+    priority = ("CASE type " + " ".join(
+        f"WHEN '{type_}' THEN {index}" for index, type_ in enumerate(types)
+    ) + " END,") if by_type else ""
     rows = store.conn.execute(
         f"SELECT type,name,qualified_name,path,start_line,metadata_json,"
         f"       {_OBSERVED_PATH} AS observed_path,"
@@ -85,7 +112,10 @@ def _node_facts(store: GraphStore, types: tuple[str, ...], limit: int,
         f"WHERE type IN ({marks}) AND {_LOCATION} IS NOT NULL "
         f"AND NOT EXISTS (SELECT 1 FROM nodes t WHERE t.type='TestFile' AND t.path={_LOCATION}) "
         f"AND NOT ({globs}) "
-        f"ORDER BY {degree} length({_LOCATION}),{_LOCATION},start_line,name LIMIT ?",
+        # `start_line IS NULL` first: SQLite sorts NULLs ahead of values, which
+        # handed the tie-break to exactly the facts that cannot cite a line.
+        f"ORDER BY {priority}{degree} length({_LOCATION}),{_LOCATION},"
+        f"start_line IS NULL,start_line,name LIMIT ?",
         (*types, *patterns, *(_STRUCTURAL_EDGES if by_degree else ()), limit),
     ).fetchall()
     return [
@@ -217,9 +247,13 @@ def project_brief(
     candidates = [
         ("Memory requiring attention", alerts),
         ("Purpose", _purpose_facts(store)),
-        ("Subsystems", _node_facts(store, ("Directory", "Module"), 12, by_degree=True)),
+        ("Subsystems", _node_facts(
+            store, ("Directory", "Module"), 12, by_degree=True,
+            withhold=_UNREPRESENTATIVE_DIRS + _DOCUMENTATION_DIRS)),
         ("Entrypoints", _node_facts(store, ("Route",), 12)),
-        ("Configuration", _node_facts(store, ("ConfigFile", "ConfigKey", "EnvVar"), 12)),
+        ("Configuration", _node_facts(
+            store, ("EnvVar", "ConfigFile", "ConfigKey"), 12, by_type=True,
+            withhold=_UNREPRESENTATIVE_DIRS + _DOCUMENTATION_DIRS)),
         ("Active assumptions", assumptions),
         ("Open questions", questions),
         ("Recent memory", recent),

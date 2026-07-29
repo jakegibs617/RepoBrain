@@ -1701,3 +1701,89 @@ second defect.
 Removing the parameter outright fails all three new tests and leaves the
 pre-existing CLI/MCP parity test passing — that test compares grounded sections,
 which is exactly why it never caught this.
+
+### D49: Brief eligibility asks whether a fact can be cited, not whether it has a line; configuration ranks by kind, not by degree
+
+`Configuration` named `EnvVar` as one of its three node types and could never
+show one. `_node_facts` required `start_line IS NOT NULL`, and D17 keys `EnvVar`
+on `("EnvVar", name, "")` so that many readers converge on one repo-global node
+— pathless and lineless *by design*:
+
+```sql
+SELECT count(*) FROM nodes WHERE type='EnvVar';                            -- 3
+SELECT count(*) FROM nodes WHERE type='EnvVar' AND start_line IS NOT NULL; -- 0
+```
+
+**The extractor was right and the brief was wrong**, which is the cheaper of the
+two fixes the item allowed for: nothing here moves D44's fingerprint. Location
+already survives in `metadata.observation`, so eligibility now asks the question
+it always meant to ask — *can this fact be cited?* — via
+`COALESCE(NULLIF(nodes.path,''), json_extract(metadata_json,'$.observation.path'))`.
+The same relaxation makes `Directory` nodes eligible, which is the third time
+this filter has been the answer (D46 records the second).
+
+**Every promotion predicate had to move with it.** The `TestFile` correlated
+subquery and D43/D46's unrepresentative-path GLOBs both keyed on `nodes.path`,
+which is `''` for an `EnvVar`. Every one of this repository's seven `READS_ENV`
+edges originates in `tests/fixtures/`, so relaxing eligibility alone would have
+promoted fixture config as the project's own — D43's defect, re-entering through
+a node type that has no path to test. Predicates now key on the cited location.
+
+**Degree was measured for `Configuration` and rejected.** Carrying D46's ranking
+across was the obvious move and it is wrong, for a reason D46 itself states.
+Of the 419 edges touching this repository's config nodes, 390 are structural:
+
+| edge | count |
+| --- | ---: |
+| `CONTAINS` | 236 |
+| `DECLARES_CONFIG` | 154 |
+| `MENTIONS` | 17 |
+| `READS_ENV` | 7 |
+| `SETS_ENV` | 5 |
+
+`DECLARES_CONFIG` is the config-world `DEFINES`: a file is *made of* its keys.
+Counting it ranks `ci.yml` first on the strength of declaring 44 of them — file
+size wearing a graph costume, which is the exact failure `_STRUCTURAL_EDGES`
+exists to refuse. Excluding it instead collapses every candidate to degree 0–4
+and hands the section straight back to `pyproject.toml`. Degree is simply not a
+signal for configuration; there is nothing there to count.
+
+**Kind is the signal.** `_node_facts` gained `by_type`, which ranks by the order
+`types` is written in, so the call site states the priority:
+`("EnvVar", "ConfigFile", "ConfigKey")` — what must be set to run anything, then
+what governs how it runs, then the individual keys inside those. Twelve slots of
+packaging metadata became:
+
+```
+- pyproject.toml [ConfigFile] (pyproject.toml:1)
+- .github/workflows/ci.yml [ConfigFile] (.github/workflows/ci.yml:1)
+- build-system [ConfigKey] (pyproject.toml:1)
+  …
+```
+
+The remaining ten are still `pyproject.toml` keys, and on this repository that
+is the honest answer rather than a residual defect: it has exactly two config
+files and reads no environment variable of its own outside its fixtures.
+
+**Documentation is withheld from `Configuration`, and it is a separate list.**
+`docs/evaluation/*-facts.json` are expected-output fixtures for the evaluation
+harness, `ConfigFile` nodes purely because the structured parser claims every
+`.json`, and they took ten of twelve slots under every ranking tried.
+`_DOCUMENTATION_DIRS` is deliberately *not* folded into
+`_UNREPRESENTATIVE_DIRS`: documentation does describe the project — that is its
+purpose — so it stays eligible wherever prose is what the section wants. A
+config file under `docs/` illustrates configuration rather than performing it.
+`Subsystems` withholds the same paths, because a `docs` directory is not a
+subsystem of the software; the twelve modules it promotes are unchanged.
+
+**`start_line IS NULL` is now an explicit sort term.** SQLite sorts NULLs ahead
+of values, so relaxing eligibility handed the tie-break to precisely the facts
+that cannot cite a line — the implied parent tables of
+`[tool.hatch.build.targets.wheel]` outranked every key that names a line. Every
+promoted fact now carries a `path:line`.
+
+**Mutation-checked, four times, at the call site.** Reverting eligibility,
+the predicate's location key, `by_type`, and the NULL-line term each fail
+exactly one test. A fifth attempt failed fifteen tests by mangling the SQL
+string rather than the behaviour — the same false signal D46 recorded, and it
+proved nothing both times.
