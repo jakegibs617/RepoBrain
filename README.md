@@ -484,6 +484,13 @@ quality page and `AGENT_HANDOFF.md` publish, so one command closes the gate:
   than exact parity with `git check-ignore`.
 - Paths are stored relative to the indexed root; one repository per database
   (enforced: the database is pinned to its root and refuses other roots).
+- Scanning is contained to the *resolved* root: a candidate whose
+  `realpath` lands outside the indexed tree is skipped, so a symlink cannot
+  pull in a file the ignore rules never get to see (they match names, and a
+  link is reached by one name and read from another). Symlinks resolving
+  inside the root are indexed as ordinary content — they cross no boundary —
+  and directory symlinks are never traversed. Dangling and mutually recursive
+  links are skipped rather than fatal.
 - On POSIX, incremental change detection trusts size plus nanosecond mtime and
   ctime before hashing; on Windows, where ctime is creation time, unchanged
   candidates are conservatively hashed. `--no-incremental` remains the

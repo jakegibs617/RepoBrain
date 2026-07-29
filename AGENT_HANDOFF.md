@@ -666,7 +666,7 @@ milestone — see `docs/NEXT_SESSION_PROMPT.md`.
   confidence, DATABASE_URL env read, `tests/test_users.py` via imports).
   Same for `node_api_app` with `createUser` / `src/config.js` (PORT,
   DATABASE_URL, LOG_LEVEL env reads; TestCases calling the service).
-- 395 tests are collected; the full suite passes, and the isolated offline
+- 399 tests are collected; the full suite passes, and the isolated offline
   `uvx` smoke skips when its external cache prerequisites are unavailable
   (`.venv/bin/pytest -q`; run with `PYTHONPATH`
   pointed at the checkout under test — see Known Pitfalls above about the
