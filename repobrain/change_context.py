@@ -24,16 +24,26 @@ from .parsers.base import default_registry
 DEFAULT_CHANGE_BUDGET = 15_000
 MINIMUM_CHANGE_BUDGET = 256
 
-#: Lowest-priority first. Trimming starts at the top of this list, so the diff
-#: itself is the last thing to go and the evidence derived from it goes first.
-_TRIM_ORDER: tuple[tuple[str, str | None], ...] = (
-    ("historical_impact", "items"),
-    ("docs_to_review", None),
-    ("impact", "low_confidence"),
-    ("impact", "medium_confidence"),
-    ("impact", "high_confidence"),
-    ("tests_to_run", None),
-    ("changes", None),
+#: Lowest-priority first. Trimming starts at the top of this list, so the set
+#: of changed paths is the last thing to go.
+#:
+#: The three `changes.*` tiers sit above the weakest impact and below the
+#: strongest because the *fidelity* of the diff, unlike the diff itself, is
+#: something the agent can already reproduce: `git diff` restates symbol spans,
+#: file identity, and changed line ranges for free, while the blast radius and
+#: the tests to run exist nowhere else. Ranking full-fidelity change records
+#: above all evidence made a wide diff emit a worse `git diff --stat`.
+_TRIM_ORDER: tuple[str, ...] = (
+    "historical_impact.items",
+    "docs_to_review",
+    "impact.low_confidence",
+    "impact.medium_confidence",
+    "changes.symbols",
+    "changes.file_node",
+    "changes.line_ranges",
+    "impact.high_confidence",
+    "tests_to_run",
+    "changes",
 )
 
 #: Pops between exact re-measurements while trimming. Small enough that the
@@ -97,6 +107,10 @@ def change_context(
         file_node, symbols = _map_change(store, item)
         public["file_node"] = file_node
         public["symbols"] = symbols
+        if item.get("_old_revision") and item["status"] == "deleted":
+            # Stated once, for the whole record: these symbols were read out of
+            # a Git blob that no longer exists, so their lines are historical.
+            public["source_revision"] = item["_old_revision"]
         public["mapping_status"] = (
             "mapped" if file_node or symbols else
             "binary_unparsed" if item["binary"] else "unmapped"
@@ -309,7 +323,7 @@ def _map_change(store: GraphStore, change: dict) -> tuple[dict | None, list[dict
             for span in ranges
         ):
             continue
-        symbols.append(_node_record(node))
+        symbols.append(_node_record(node, standalone=False))
     return file_node, symbols
 
 
@@ -335,24 +349,33 @@ def _parse_deleted_nodes(path: str, content: str, revision: str) -> list[dict]:
     ]
 
 
-def _node_record(node: dict) -> dict:
-    """A symbol inside a change record.
+def _node_record(node: dict, *, standalone: bool = True) -> dict:
+    """A code node, as a `file_node` or as a symbol inside a change record.
 
-    It carries no copy of why it changed: it is nested in the change that
-    explains that, and repeating `status`/`old_path`/`new_path` on all 395
-    symbols of a wide diff cost 33,745 characters to say what the enclosing
-    record already said.
+    A symbol carries no copy of why it changed, where it lives, or where it
+    came from: it is nested in the change record that states all three.
+    Repeating `status`/`old_path`/`new_path` on all 395 symbols of a wide diff
+    cost 33,745 characters; `path` and `provenance` cost another 37,089 to
+    restate the enclosing record's path and a string derivable from it.
     """
-    return {
+    record = {
         "id": node["id"], "type": node["type"], "name": node["name"],
-        "qualified_name": node.get("qualified_name") or "", "path": node["path"],
+        "qualified_name": node.get("qualified_name") or "",
         "start_line": node.get("start_line"), "end_line": node.get("end_line"),
         "language": node.get("language"),
-        "provenance": (
-            f"git:{node['source_revision']}:{node['path']}:{node.get('start_line') or 1}"
-            if node.get("source_revision") else f"{node['path']}:{node.get('start_line') or 1}"
-        ),
     }
+    if standalone:
+        record["path"] = node["path"]
+        record["provenance"] = _provenance(
+            node["path"], node.get("start_line"), node.get("source_revision"),
+        )
+    return record
+
+
+def _provenance(path: str, start_line: int | None, revision: str | None = None) -> str:
+    """Where a fact came from. `git:REV:` marks a blob that no longer exists."""
+    located = f"{path}:{start_line or 1}"
+    return f"git:{revision}:{located}" if revision else located
 
 
 def _historical_impact(
@@ -603,6 +626,56 @@ def _historical_path_doc_candidates(
     return results
 
 
+class _SymbolTier(list):
+    """Every symbol in the diff, as one trimmable sequence.
+
+    Popping removes a symbol from its change record rather than a record from
+    the diff: on a wide diff the symbols are the bulk of `changes`, and the
+    changed paths are the part that must survive.
+    """
+
+    def __init__(self, changes: list[dict]) -> None:
+        super().__init__((change, symbol) for change in changes
+                         for symbol in change["symbols"])
+
+    def pop(self) -> dict:  # type: ignore[override]
+        change, _ = super().pop()
+        return change["symbols"].pop()
+
+
+class _FieldTier(list):
+    """One field of every change record that still carries it."""
+
+    def __init__(self, changes: list[dict], field: str) -> None:
+        self._field = field
+        super().__init__(change for change in changes if change.get(field))
+
+    def pop(self) -> object:  # type: ignore[override]
+        return super().pop().pop(self._field)
+
+
+def _trim_targets(result: dict) -> list[tuple[str, list]]:
+    """Resolve `_TRIM_ORDER` into (label, container) pairs, once per budget run.
+
+    The fidelity tiers are views over the change records, so they must be built
+    before trimming starts and reused throughout — re-resolving them mid-trim
+    would rebuild them against records they have already been popping from.
+    """
+    tiers = {
+        "changes.symbols": _SymbolTier(result["changes"]),
+        "changes.file_node": _FieldTier(result["changes"], "file_node"),
+        "changes.line_ranges": _FieldTier(result["changes"], "line_ranges"),
+    }
+    targets = []
+    for label in _TRIM_ORDER:
+        if label in tiers:
+            targets.append((label, tiers[label]))
+            continue
+        key, _, sub = label.partition(".")
+        targets.append((label, result[key][sub] if sub else result[key]))
+    return targets
+
+
 def _payload_chars(result: dict) -> int:
     return len(json.dumps(result))
 
@@ -644,12 +717,11 @@ def _apply_budget(result: dict, budget: int) -> None:
     result["truncation"] = {"applied": False, "budget": budget,
                             "within_budget": True, "dropped": dropped}
 
+    targets = _trim_targets(result)
     remaining = _payload_chars(result)
-    for key, sub in _TRIM_ORDER:
+    for label, container in targets:
         if remaining <= limit:
             break
-        container = result[key] if sub is None else result[key][sub]
-        label = key if sub is None else f"{key}.{sub}"
         while container and remaining > limit:
             # Decrement by the removed item rather than re-serializing the whole
             # payload per pop, resynchronising periodically: dropping an item
@@ -663,11 +735,9 @@ def _apply_budget(result: dict, budget: int) -> None:
         _prune_reasons(result)
         remaining = _payload_chars(result)
     while _payload_chars(result) > limit:
-        for key, sub in _TRIM_ORDER:
-            container = result[key] if sub is None else result[key][sub]
+        for label, container in targets:
             if container:
                 container.pop()
-                label = key if sub is None else f"{key}.{sub}"
                 dropped[label] = dropped.get(label, 0) + 1
                 break
         else:
@@ -691,8 +761,10 @@ def render_change_context(result: dict) -> str:
         rename = f" (from {change['old_path']})" if change["status"] == "renamed" else ""
         lines.append(f"- {change['status']}: {path}{rename}")
         for symbol in change["symbols"]:
+            provenance = _provenance(path, symbol["start_line"],
+                                     change.get("source_revision"))
             lines.append(f"  - {symbol['type']} {symbol['qualified_name'] or symbol['name']} "
-                         f"({symbol['provenance']})")
+                         f"({provenance})")
     lines.append("\nLikely impact")
     for bucket in ("high_confidence", "medium_confidence", "low_confidence"):
         for item in result["impact"][bucket]:

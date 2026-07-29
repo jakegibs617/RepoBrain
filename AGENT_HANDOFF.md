@@ -439,7 +439,15 @@ rather than manufacture a synthetic next milestone.
   deltas. Queries over either threshold deliberately fail closed.
 - M13 captures Git state before M12 auto-indexing. Deleted nodes and their
   graph edges are gone afterward, so deleted symbol spans come from the old
-  Git blob and deleted impact relationships are reported as unavailable.
+  Git blob and deleted impact relationships are reported as unavailable. That
+  blob's revision is on the *change record* as `source_revision`, not on each
+  symbol (D47); a symbol's location is its record's path plus its `start_line`.
+- A change record can lose detail without losing the path: `changes.symbols`,
+  `changes.file_node`, `changes.line_ranges` are trim tiers, so a budgeted
+  payload may list a changed file with no symbols. Never read that as "no
+  symbols changed" — check `truncation.dropped`. Anything added to a change
+  record that `git diff` cannot reproduce must rank *above* those tiers, or the
+  budget will trade away a fact with no other source.
 - Stale-doc candidates are review evidence, not semantic claims. Live targets
   use MENTIONS edges; renamed/deleted paths use only exact structured path
   references because their live MENTIONS edge necessarily disappears.
@@ -658,7 +666,7 @@ milestone — see `docs/NEXT_SESSION_PROMPT.md`.
   confidence, DATABASE_URL env read, `tests/test_users.py` via imports).
   Same for `node_api_app` with `createUser` / `src/config.js` (PORT,
   DATABASE_URL, LOG_LEVEL env reads; TestCases calling the service).
-- 384 tests are collected; the full suite passes, and the isolated offline
+- 386 tests are collected; the full suite passes, and the isolated offline
   `uvx` smoke skips when its external cache prerequisites are unavailable
   (`.venv/bin/pytest -q`; run with `PYTHONPATH`
   pointed at the checkout under test — see Known Pitfalls above about the
