@@ -1489,3 +1489,86 @@ arguably the wrong one at this width. It is left as-is deliberately: the
 truncation report names exactly what went, so the failure is legible and the
 remedy is one flag. Whether wide diffs should instead degrade `changes` to
 paths-only and keep the impact set is a real question and is not answered here.
+
+## 2026-07-29 — Promotion is a ranking question, twice
+
+### D46: The brief promotes by how connected a node is, and withholds promotion from paths that are not representative
+
+`repobrain brief` on this repository gave four of its twelve Subsystems slots
+to test modules and omitted `graph.store`, `graph.queries`, `indexing.indexer`,
+`parsers.base`, and `change_context` entirely. The cause was worse than the
+symptom: `_node_facts` ordered by `length(path),path`, so the twelve subsystems
+an agent is shown were the ones whose paths were shortest. That is not a
+relevance ranking at all — `repobrain/__init__.py` outranked
+`repobrain/graph/store.py` for being three characters nearer the root.
+
+**Degree, not length.** Ordering is now a `count(*)` over the edges a node is
+either end of, `DEFINES`/`CONTAINS` excluded, with the old ordering demoted to
+a tie-break so output stays deterministic. At module granularity that count is
+almost entirely `IMPORTS` — how much of the project is wired to this module —
+and it needs no new extraction, no new node type, and no configuration key. The
+result reads like a table of contents: `cli`, `graph.store`, `graph.queries`,
+`indexing.indexer`, `parsers.base`, `mcp_server`, `graph.schema`, `history`,
+`freshness`, `change_context`, `memory`, `agent_install`.
+
+**Structural edges are excluded because they rank by file size.** Counting
+`DEFINES`/`CONTAINS` counts the symbols a module contains, which is file size
+wearing a graph costume: measured, it puts `tests/test_code_parser.py` first
+with 80 edges. The point of the change is to stop ranking by an accident of
+layout, not to swap one accident for another.
+
+**The D43 predicate alone was not the fix, and this was measured first.** The
+queued question was whether demoting test modules — the `TestFile` clause D43
+already wrote and tested — was the whole of it. It is not: with test modules
+removed the twelve become `setup/graph`, `setup/script`, `cli`, `config`,
+`memory`, `setup/evaluation`, `history`, `repobrain` (`__init__.py`),
+`briefing`, `freshness`, `reporting`, `mcp_server` — still ordered by path
+length, still missing every module named above. Establishing that cost one
+query and is why the ordering was touched at all.
+
+**"Is a test" and "is not representative" are different predicates.** D43's
+named limitation was that `is_test_file` matches `{tests, test, __tests__,
+spec}`, so a user whose sample application lives in a top-level `examples/`
+directory still gets its routes promoted as their project's entrypoints. The
+fix is *not* to widen `_TEST_DIRS`
+(`repobrain/parsers/code_treesitter.py:173`): that set decides `TestFile`
+classification for the whole graph, including which tests `impact` recommends
+running (`repobrain/graph/queries.py:896`) and what `explain module` reports,
+so widening it would have RepoBrain recommend running a sample application as
+the test suite. It is also an extraction change, which under D44 moves the
+parser-source fingerprint and forces a re-index for every user on upgrade.
+
+So promotion gets its own predicate, local to `briefing.py`, evaluated at query
+time and costing no re-extraction: `_UNREPRESENTATIVE_DIRS` = `examples`,
+`example`, `fixtures`, `fixture`, `samples`, `sample`. `demo`, `vendor`, and
+`third_party` were considered and left out — `demo` is a plausible name for a
+real product directory, and the other two are normally excluded from indexing
+before promotion is ever reached.
+
+**Applied to all three promoted sections.** Subsystems, Entrypoints and
+Configuration ask the same question, and a fixture application's modules and
+`pyproject.toml` keys describe the project that ships them no better than its
+routes do. The degree *ordering* is Subsystems-only: the other two sections
+have no measured ordering defect and churning them would be unearned.
+
+**Cost, measured rather than assumed.** The correlated degree subquery is
+index-served on both edge endpoints (`idx_edges_source`, `idx_edges_target`).
+On a generated 1,212-file repository — 7,407 nodes, 9,936 edges, 1,200 modules
+— the Subsystems query goes from 1.0 ms to 3.2 ms inside a 42 ms brief. The
+grouped-degree rewrite that was held in reserve is not needed.
+
+**Ranking, not filtering, as in D43.** Nothing is removed from the graph.
+Example and fixture nodes stay reachable through `search`, `explain file`, and
+`impact`; `reporting.py`'s full inventory still lists them. Only promotion into
+the first thing an agent reads is withheld.
+
+**Known consequence: a repository that *is* a collection of examples gets an
+empty section.** If every route a project has lives under `examples/`, the
+brief promotes none of them, exactly as D43 promotes nothing for a project
+whose only routes are fixtures. That is the correct answer for a tool whose
+sample apps are not its product and the wrong one for a sample-app repository;
+the section is absent rather than wrong, and `search` still finds everything.
+
+**Incidental, recorded so nobody re-derives it:** `Directory` nodes never carry
+a `start_line`, so `_node_facts(store, ("Directory", "Module"), 12)` has only
+ever returned Modules. Left alone.

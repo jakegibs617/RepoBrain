@@ -426,6 +426,14 @@ rather than manufacture a synthetic next milestone.
   indexing (D12), a same-size edit whose mtime is restored can evade it.
 - Brief budgets are approximate, not model-tokenizer exact. Facts are never
   cut mid-item, so a very small budget may omit whole lower-priority sections.
+- Brief promotion has its own predicate. `_UNREPRESENTATIVE_DIRS` in
+  `repobrain/briefing.py` is deliberately **not** the parser's `_TEST_DIRS`:
+  that one classifies `TestFile` for the whole graph — including which tests
+  `impact` recommends — and moving it is an extraction change that trips D44's
+  fingerprint. Add `examples/`-style segments to the briefing set, never to the
+  parser's. Subsystems rank by edge degree (D46); path length is a tie-break
+  only, and `DEFINES`/`CONTAINS` stay out of the count or the ranking becomes
+  file size.
 - M12 counts the full current size of added/changed files and the last indexed
   size of deleted files toward its byte threshold; it does not compute byte
   deltas. Queries over either threshold deliberately fail closed.
@@ -650,7 +658,7 @@ milestone — see `docs/NEXT_SESSION_PROMPT.md`.
   confidence, DATABASE_URL env read, `tests/test_users.py` via imports).
   Same for `node_api_app` with `createUser` / `src/config.js` (PORT,
   DATABASE_URL, LOG_LEVEL env reads; TestCases calling the service).
-- 382 tests are collected; the full suite passes, and the isolated offline
+- 384 tests are collected; the full suite passes, and the isolated offline
   `uvx` smoke skips when its external cache prerequisites are unavailable
   (`.venv/bin/pytest -q`; run with `PYTHONPATH`
   pointed at the checkout under test — see Known Pitfalls above about the
