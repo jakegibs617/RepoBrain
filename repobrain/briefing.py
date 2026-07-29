@@ -66,6 +66,17 @@ _OBSERVED_PATH = "json_extract(metadata_json,'$.observation.path')"
 #: whose path lives one level down.
 _LOCATION = f"COALESCE(NULLIF(nodes.path,''),{_OBSERVED_PATH})"
 
+#: A block that opens with a list marker is an enumeration, not a description.
+#: Structural on purpose: recognising a lead-in must not require a word list or
+#: any heuristic about English, both of which would be wrong in some language
+#: this indexer already parses.
+_LIST_ITEM = re.compile(r"[-*+]\s|\d+[.)]\s")
+
+#: A paragraph with no sentence terminator is not making a statement. This is
+#: what separates `Implemented:` from the prose beneath it without measuring
+#: length, which would be a threshold somebody has to tune.
+_STATEMENT = re.compile(r"[.!?]")
+
 
 def _node_facts(store: GraphStore, types: tuple[str, ...], limit: int,
                 *, by_degree: bool = False, by_type: bool = False,
@@ -138,9 +149,18 @@ def _purpose_facts(store: GraphStore, limit: int = 3) -> list[dict]:
     facts = []
     for row in rows:
         raw = row["content"] or row["name"]
-        paragraphs = [" ".join(block.split()) for block in re.split(r"\n\s*\n", raw)
-                      if block.strip() and not block.lstrip().startswith("#")]
-        content = paragraphs[0] if paragraphs else " ".join(raw.split())
+        blocks = [block for block in re.split(r"\n\s*\n", raw)
+                  if block.strip() and not block.lstrip().startswith("#")]
+        paragraphs = [" ".join(block.split()) for block in blocks
+                      if not _LIST_ITEM.match(block.lstrip())]
+        # Prefer a paragraph that states something. A section whose body opens
+        # with a bare lead-in — `Implemented:` — promoted the lead-in, and the
+        # brief's whole claim is that everything in it is a fact.
+        content = next((text for text in paragraphs if _STATEMENT.search(text)),
+                       # Substance decides *which* paragraph, never whether the
+                       # section exists: an absent `Purpose` is a worse outcome
+                       # than a thin one, and a terse README is not a defect.
+                       next(iter(paragraphs), " ".join(raw.split())))
         if content and content.casefold() != row["name"].casefold():
             facts.append({"text": content, "type": "Purpose", "source": _source(row)})
     return facts

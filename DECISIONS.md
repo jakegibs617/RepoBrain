@@ -1787,3 +1787,52 @@ the predicate's location key, `by_type`, and the NULL-line term each fail
 exactly one test. A fifth attempt failed fifteen tests by mangling the SQL
 string rather than the behaviour — the same false signal D46 recorded, and it
 proved nothing both times.
+
+### D50: `Purpose` promotes the first paragraph that makes a statement, and never promotes a lead-in
+
+The brief's second `Purpose` fact was the word `Implemented:`:
+
+```
+Purpose
+- RepoBrain is a **local-first "second brain" for AI coding agents**… (README.md:1)
+- Implemented: (README.md:11)
+```
+
+`_purpose_facts` took the first non-heading paragraph of each matching section,
+and a section whose body opens with a bare list lead-in yields the lead-in. The
+cost to an agent is small, which is why this ranked third — but the brief's
+entire claim is that everything in it is a source-grounded fact, and
+`Implemented:` is not one. A surface that asks to be trusted about 2,158 nodes
+cannot be visibly wrong about the second line it prints.
+
+**Two structural rules, no word list and no length threshold.** A lead-in is
+recognisable without any heuristic about English, which matters because this
+indexer already parses seven languages' worth of documentation:
+
+- A block opening with a list marker is an enumeration, not a description.
+- A paragraph with no sentence terminator is not making a statement.
+
+Measured on this repository's own `README.md:11`, whose three candidates are
+exactly the case that motivated each rule:
+
+| paragraph | chars | outcome |
+| --- | ---: | --- |
+| `Implemented:` | 12 | no terminator — rejected |
+| the feature list | 3,187 | list block — rejected |
+| `The ten-milestone MVP is implemented…` | 144 | **promoted** |
+
+**The list rule is load-bearing and was nearly lost.** The first fixture written
+for this used list items with no full stops, so the terminator rule rejected the
+block on its own and deleting the list filter broke no test. This repository's
+real list items *do* carry terminators, so without the filter the whole
+3,187-character block reads as a statement and is promoted in place of the
+lead-in — a worse fact than the one being removed. The fixture now carries
+terminators, and the mutation fails as it should. A mutation that kills nothing
+is evidence about the test, not about the code.
+
+**Substance chooses which paragraph, never whether the section exists.** If no
+paragraph makes a statement, the first non-list paragraph is still promoted. The
+item warned that over-filtering would silently empty `Purpose` for a terse
+README, and that an absent section is a worse outcome than a thin one. Verified
+against all four fixture READMEs plus a README whose entire body is the fragment
+`A tiny indexer`: every one still yields a populated `Purpose`.

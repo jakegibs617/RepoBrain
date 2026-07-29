@@ -260,6 +260,61 @@ def test_brief_does_not_promote_configuration_that_only_illustrates_it(tmp_path)
     assert not any(source.startswith("docs/") for source in promoted), promoted
 
 
+def _purpose_texts(result: dict) -> list[str]:
+    section = next((item for item in result["sections"] if item["title"] == "Purpose"),
+                   None)
+    return [fact["text"] for fact in section["facts"]] if section else []
+
+
+def test_brief_purpose_skips_a_lead_in_for_the_prose_underneath_it(tmp_path):
+    """`Implemented:` is not a source-grounded fact about anything.
+
+    `_purpose_facts` took the first non-heading paragraph, so a section whose
+    body opens with a bare list lead-in promoted the lead-in. The brief's whole
+    claim is that everything in it is a fact; this one said nothing at all.
+    """
+    root = tmp_path / "project"
+    root.mkdir()
+    (root / "README.md").write_text(
+        "# Demo\n\nDemo is a tool for indexing things.\n\n"
+        "## Current status\n\nImplemented:\n\n"
+        # Items carry sentence terminators, as this repository's own README
+        # does. Without the list filter the whole 3,000-character block reads
+        # as a statement and is promoted in place of the lead-in.
+        "- Storage. Uses SQLite in WAL mode.\n"
+        "- Retrieval. Keyword search over the graph.\n"
+        "- Reporting. Renders the brief.\n\n"
+        "The ten-milestone MVP is complete and running offline.\n"
+    )
+    (root / "demo.py").write_text("def run():\n    return 1\n")
+    with _indexed(root) as store:
+        result = project_brief(root, store, budget=2000)
+
+    texts = _purpose_texts(result)
+    assert texts, "the section must not be emptied to remove one bad fact"
+    assert "Implemented:" not in texts
+    # The list underneath is not a statement either; the prose after it is.
+    assert "The ten-milestone MVP is complete and running offline." in texts
+    assert not any(text.lstrip().startswith("-") for text in texts), texts
+
+
+def test_brief_purpose_survives_a_readme_too_terse_to_contain_a_sentence(tmp_path):
+    """An absent `Purpose` is a worse outcome than a thin one.
+
+    The substance test chooses *which* paragraph to promote; it never decides
+    whether the section exists. A README whose entire purpose is a fragment
+    still describes the project better than silence does.
+    """
+    root = tmp_path / "project"
+    root.mkdir()
+    (root / "README.md").write_text("# Terse\n\nA tiny indexer\n")
+    (root / "terse.py").write_text("def run():\n    return 1\n")
+    with _indexed(root) as store:
+        result = project_brief(root, store, budget=2000)
+
+    assert "A tiny indexer" in _purpose_texts(result)
+
+
 def test_brief_detects_added_changed_and_deleted_files(small_app):
     with _indexed(small_app) as store:
         assert project_brief(small_app, store)["staleness"]["is_stale"] is False
