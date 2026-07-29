@@ -97,7 +97,8 @@ def test_sqlalchemy_table_change_uses_shared_change_context_impact(small_app):
                for item in change["symbols"])
     impacted = [item for bucket in result["impact"].values() for item in bucket]
     assert {item["node"]["name"] for item in impacted} >= {"load_by_id", "persist"}
-    assert {item["via"] for item in impacted} >= {"READS_TABLE", "WRITES_TABLE"}
+    assert {proof["via"] for item in impacted
+            for proof in item["evidence"]} >= {"READS_TABLE", "WRITES_TABLE"}
 
 
 def test_changed_document_is_not_flagged_as_stale(small_app):
@@ -188,10 +189,100 @@ def test_multiple_changed_targets_deduplicate_impact_but_keep_reasons(small_app)
         repo.write_text(repo.read_text() + "\n# repository change\n")
         result = change_context(small_app, store)
     records = [item for bucket in result["impact"].values() for item in bucket]
-    keys = [(item["node"]["id"], item["via"], item["evidence_path"], item["evidence_line"])
-            for item in records]
+    keys = [(item["node"]["id"], evidence["via"], evidence["path"], evidence["line"])
+            for item in records for evidence in item["evidence"]]
     assert len(keys) == len(set(keys))
-    assert any(len(item["changed_reasons"]) > 1 for item in records)
+    assert any(len(item["reason_ids"]) > 1 for item in records)
+    # Every id resolves; the table is the only place a reason is spelled out.
+    for item in records:
+        assert all(result["reasons"][index] for index in item["reason_ids"])
+
+
+def _repo_with_a_shared_dependent(root: Path) -> None:
+    """Two modules a downstream module imports, so one node has two edges in."""
+    (root / "alpha.py").write_text("def alpha():\n    return 1\n")
+    (root / "beta.py").write_text("def beta():\n    return 2\n")
+    (root / "downstream.py").write_text(
+        "from alpha import alpha\nfrom beta import beta\n\n\n"
+        "def combined():\n    return alpha() + beta()\n"
+    )
+
+
+def test_one_node_reached_by_two_edges_is_one_item_carrying_both(tmp_path):
+    """A node is a fact about the blast radius; an edge is why it is in it.
+
+    Emitting the same node once per incoming edge made the payload grow with
+    the graph's edge count rather than with the size of the impacted set —
+    958 rows for 497 nodes on this repository's own two-commit diff.
+    """
+    root = tmp_path / "repo"
+    root.mkdir()
+    _repo_with_a_shared_dependent(root)
+    _init_repo(root)
+    with _indexed(root) as store:
+        for name in ("alpha.py", "beta.py"):
+            target = root / name
+            target.write_text(target.read_text() + "\n# changed\n")
+        result = change_context(root, store)
+
+    records = [item for bucket in result["impact"].values() for item in bucket]
+    ids = [item["node"]["id"] for item in records]
+    assert len(ids) == len(set(ids)), "a node must appear at most once in the impact set"
+    downstream = next(item for item in records
+                      if item["node"]["path"] == "downstream.py"
+                      and item["node"]["type"] == "Module")
+    assert len(downstream["evidence"]) == 2
+    assert {evidence["line"] for evidence in downstream["evidence"]} == {1, 2}
+    assert downstream["confidence"] == max(
+        evidence["confidence"] for evidence in downstream["evidence"]
+    )
+
+
+def test_reasons_are_spelled_out_once_however_many_items_cite_them(tmp_path):
+    """The dominant cost was attribution, not facts.
+
+    3,175 reason dicts across 958 impact items and 599 across 32 test items —
+    441,930 and 82,878 characters respectively, for a set of reasons no larger
+    than the diff itself.
+    """
+    root = tmp_path / "repo"
+    root.mkdir()
+    _repo_with_a_shared_dependent(root)
+    _init_repo(root)
+    with _indexed(root) as store:
+        for name in ("alpha.py", "beta.py"):
+            target = root / name
+            target.write_text(target.read_text() + "\n# changed\n")
+        result = change_context(root, store)
+
+    serialized = [json.dumps(reason, sort_keys=True) for reason in result["reasons"]]
+    assert len(serialized) == len(set(serialized)), "the table must not repeat a reason"
+    cited = {index for bucket in result["impact"].values()
+             for item in bucket for index in item["reason_ids"]}
+    cited |= {index for item in result["tests_to_run"] for index in item["reason_ids"]}
+    assert cited, "items must cite the table rather than inline their reasons"
+    assert cited <= set(range(len(result["reasons"])))
+
+
+def test_json_output_omits_the_rendered_text_it_would_duplicate(small_app):
+    """`text` is the same payload again in prose — 157,802 characters of it on
+    the diff that motivated this. A caller parsing JSON has the structure."""
+    _init_repo(small_app)
+    tools = RepoBrainTools(small_app)
+    tools.index_repo()
+    _change_create_user(small_app)
+
+    machine = CliRunner().invoke(
+        main, ["change-context", "--path", str(small_app), "--json"],
+    )
+    assert machine.exit_code == 0, machine.output
+    assert "text" not in json.loads(machine.output)
+    assert "text" not in tools.change_context()
+
+    human = CliRunner().invoke(main, ["change-context", "--path", str(small_app)])
+    assert human.exit_code == 0, human.output
+    assert "RepoBrain change context" in human.output
+    assert "Tests to run" in human.output
 
 
 def test_ambiguous_names_do_not_cross_map_changed_line_symbols(small_app):
@@ -227,8 +318,11 @@ def test_cli_and_mcp_change_context_have_matching_grounded_sections(small_app):
     assert {(item["doc_path"], item["section"]) for item in cli_data["docs_to_review"]} == {
         (item["doc_path"], item["section"]) for item in mcp_data["docs_to_review"]
     }
-    assert "Tests to run" in cli_data["text"]
-    assert "Docs to review" in cli_data["text"]
+    assert cli_data["reasons"] == mcp_data["reasons"]
+    human = CliRunner().invoke(main, ["change-context", "--path", str(small_app)])
+    assert human.exit_code == 0, human.output
+    assert "Tests to run" in human.output
+    assert "Docs to review" in human.output
 
 
 def test_freshness_failure_returns_no_change_facts(small_app):

@@ -35,8 +35,14 @@ def change_context(
     *,
     base: str | None = None,
     auto_index: bool = True,
+    include_text: bool = True,
 ) -> dict:
-    """Capture a Git change set, repair freshness, then resolve grounded context."""
+    """Capture a Git change set, repair freshness, then resolve grounded context.
+
+    ``include_text`` renders the human report into the payload. Machine-readable
+    surfaces turn it off: it restates the whole structured result in prose, so a
+    caller that parses the structure pays for it twice.
+    """
     root = Path(root).resolve()
     captured = capture_git_changes(root, base=base)
     freshness = ensure_fresh(root, store, auto_index=auto_index)
@@ -68,7 +74,8 @@ def change_context(
             public["mapping_status"] = f"{item['special_file']}_unparsed"
         changes.append(public)
 
-    impacts, tests, impact_unknowns = _aggregate_impacts(store, changes)
+    reasons = _ReasonTable()
+    impacts, tests, impact_unknowns = _aggregate_impacts(store, changes, reasons)
     docs = _stale_doc_candidates(store, changes, changed_paths)
     result = {
         "status": "ok",
@@ -77,6 +84,7 @@ def change_context(
         "head": captured["head"],
         "freshness": freshness,
         "changes": changes,
+        "reasons": reasons.reasons,
         "impact": impacts,
         "historical_impact": _historical_impact(
             store, freshness, changes, mode=captured["mode"],
@@ -85,7 +93,8 @@ def change_context(
         "docs_to_review": docs,
         "unknowns": impact_unknowns,
     }
-    result["text"] = render_change_context(result)
+    if include_text:
+        result["text"] = render_change_context(result)
     return result
 
 
@@ -348,8 +357,32 @@ def _historical_impact(
             "provenance": evidence["provenance"]}
 
 
-def _aggregate_impacts(store: GraphStore, changes: list[dict]) -> tuple[dict, list[dict], list[str]]:
-    evidence: dict[tuple, dict] = {}
+class _ReasonTable:
+    """Intern the "why is this in the blast radius" records.
+
+    A reason is drawn from the diff, so there are at most a few per changed
+    path — but before this they were re-serialized in full at every citing
+    item, which on this repository's own two-commit diff meant 3,175 copies
+    across the impact set and 599 across the tests, for 525k characters. Items
+    now carry indices into one table.
+    """
+
+    def __init__(self) -> None:
+        self._ids: dict[tuple, int] = {}
+        self.reasons: list[dict] = []
+
+    def id_for(self, reason: dict) -> int:
+        key = tuple(sorted(reason.items()))
+        if key not in self._ids:
+            self._ids[key] = len(self.reasons)
+            self.reasons.append(reason)
+        return self._ids[key]
+
+
+def _aggregate_impacts(
+    store: GraphStore, changes: list[dict], reasons: _ReasonTable,
+) -> tuple[dict, list[dict], list[str]]:
+    evidence: dict[str, dict] = {}
     tests: dict[str, dict] = {}
     unknowns = []
     for change in changes:
@@ -372,27 +405,43 @@ def _aggregate_impacts(store: GraphStore, changes: list[dict]) -> tuple[dict, li
                                      include_history=False)
             if result is None:
                 continue
-            reason = {
+            reason_id = reasons.id_for({
                 "changed_path": change.get("new_path") or change.get("old_path"),
                 "status": change["status"], "target": target, "target_kind": target_kind,
-            }
+            })
             for bucket in ("high_confidence", "medium_confidence", "low_confidence"):
                 for item in result[bucket]:
-                    key = (item["node"]["id"], item["via"], item["evidence_path"],
-                           item["evidence_line"])
-                    record = evidence.setdefault(key, {**item, "changed_reasons": []})
+                    # One row per node, not per edge: the node is the fact about
+                    # the blast radius and each edge is only evidence for it.
+                    record = evidence.setdefault(item["node"]["id"], {
+                        "node": item["node"], "confidence": item["confidence"],
+                        "evidence": {}, "reason_ids": [],
+                    })
                     record["confidence"] = max(record["confidence"], item["confidence"])
-                    if reason not in record["changed_reasons"]:
-                        record["changed_reasons"].append(reason)
+                    # One edge reached at two traversal depths is one edge; its
+                    # confidence decays with depth, so keep the shortest path's.
+                    key = (item["via"], item["evidence_path"], item["evidence_line"])
+                    proof = record["evidence"].setdefault(key, {
+                        "via": item["via"], "path": item["evidence_path"],
+                        "line": item["evidence_line"], "confidence": item["confidence"],
+                    })
+                    proof["confidence"] = max(proof["confidence"], item["confidence"])
+                    if reason_id not in record["reason_ids"]:
+                        record["reason_ids"].append(reason_id)
             for item in result["recommended_tests"]:
                 path = item["node"]["path"]
-                record = tests.setdefault(path, {**item, "changed_reasons": []})
-                if reason not in record["changed_reasons"]:
-                    record["changed_reasons"].append(reason)
+                record = tests.setdefault(path, {**item, "reason_ids": []})
+                if reason_id not in record["reason_ids"]:
+                    record["reason_ids"].append(reason_id)
     buckets: dict[str, list[dict]] = {
         "high_confidence": [], "medium_confidence": [], "low_confidence": [],
     }
     for item in evidence.values():
+        item["evidence"] = sorted(
+            item["evidence"].values(),
+            key=lambda proof: (-proof["confidence"], proof["path"],
+                               proof["line"] or 0, proof["via"]),
+        )
         bucket = ("high_confidence" if item["confidence"] >= 0.85 else
                   "medium_confidence" if item["confidence"] >= 0.6 else "low_confidence")
         buckets[bucket].append(item)
@@ -534,9 +583,10 @@ def render_change_context(result: dict) -> str:
     for bucket in ("high_confidence", "medium_confidence", "low_confidence"):
         for item in result["impact"][bucket]:
             node = item["node"]
-            lines.append(f"- {bucket}: {node['name']} via {item['via']} "
-                         f"({item['evidence_path']}:{item['evidence_line'] or 1}, "
-                         f"confidence={item['confidence']:.2f})")
+            for proof in item["evidence"]:
+                lines.append(f"- {bucket}: {node['name']} via {proof['via']} "
+                             f"({proof['path']}:{proof['line'] or 1}, "
+                             f"confidence={proof['confidence']:.2f})")
     lines.append("\nHistorical co-change (heuristic)")
     historical = result["historical_impact"]
     if historical["status"] != "ok":

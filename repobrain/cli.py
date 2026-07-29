@@ -350,7 +350,8 @@ def change_context(base: str | None, path: str, as_json: bool, no_auto_index: bo
     try:
         with _open_store(root, gate=False) as store:
             result = run_change_context(root, store, base=base,
-                                        auto_index=not no_auto_index)
+                                        auto_index=not no_auto_index,
+                                        include_text=not as_json)
     except GitDiffError as exc:
         raise click.ClickException(str(exc)) from exc
     if result["status"] != "ok":
