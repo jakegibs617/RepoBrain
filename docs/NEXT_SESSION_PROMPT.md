@@ -28,8 +28,12 @@ Measure first. It has now redirected three of the last four pieces of work.
 - **D47** — `changes` sheds fidelity in three reported stages
   (`changes.symbols`, `changes.file_node`, `changes.line_ranges`) before the
   evidence derived from the diff is given up. On this repository's own 87-file
-  diff at the default budget: 27/87 changes, 0 impact, 0 tests → 87/87 changes,
-  18 impact, 32 tests.
+  diff (`--base b80a0a9`) at the default budget: 27/87 changes, 0 impact, 0
+  tests → 87/87 changes, 18 impact, 32 tests.
+
+All three items below were re-measured against `main` at 2544cc4, after both
+merges, and all three still reproduce. The commands that produced each number
+are in the item.
 
 Read D46 and D47 before touching anything below; M7 and M8 sit directly on
 them.
@@ -41,9 +45,12 @@ surface an agent is most likely to call. `RepoBrainTools.change_context`
 (`repobrain/mcp_server.py:142`) passes `base` and `auto_index` and nothing
 else, so `budget` defaults to `None` and the tool emits everything:
 
+Measured against `b80a0a9`, an 87-file diff (pinned deliberately — a
+`HEAD~N` reference decays the moment this repository moves):
+
 ```
-CLI  `change-context --base HEAD~8 --json`  →  14,922 tokens, truncation reported
-MCP  change_context(base="HEAD~8")          →  96,064 tokens, no `truncation` key
+CLI  `change-context --base b80a0a9 --json`  →   14,895 tokens, truncation reported
+MCP  change_context(base="b80a0a9")          →  137,858 tokens, no `truncation` key
 ```
 
 Same repository, same diff, same minute. The MCP payload is not merely larger:
@@ -84,8 +91,9 @@ The sharper half is not ranking but eligibility. `_node_facts` requires
 `start_line IS NOT NULL`, and this repository's three `EnvVar` nodes —
 `DATABASE_URL`, `LOG_LEVEL`, `PORT` — carry `path=''` and `start_line=NULL`:
 
-```
-EnvVar nodes eligible for the brief: 0 of 3
+```sql
+SELECT count(*) FROM nodes WHERE type='EnvVar';                          -- 3
+SELECT count(*) FROM nodes WHERE type='EnvVar' AND start_line IS NOT NULL; -- 0
 ```
 
 So `EnvVar` is named as one of the section's three node types and can never
@@ -139,9 +147,12 @@ terse — an absent `Purpose` is a worse outcome than a thin one.
   deleting a SQL fragment broke thirteen tests through a parameter-count
   mismatch and proved nothing. Reverting it at the call site failed exactly one
   test, which is the signal you want.
-- `--base HEAD~N` is how to reach a wide diff without tripping the ten-file
+- `--base <commit>` is how to reach a wide diff without tripping the ten-file
   auto-index threshold: commit the changes, leave the tree clean, and diff
   against an earlier commit. Both D47 regression tests are built this way.
+  Cite a **SHA, never `HEAD~N`**, in anything that outlives the session — this
+  file quoted `HEAD~8` for an hour and three merges later it named a 16-file
+  diff instead of an 87-file one.
 
 ## Still needs a human, still not blocking
 
