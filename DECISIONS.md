@@ -1650,3 +1650,54 @@ views over the change records rather than lists inside `result`, so
 `_TRIM_ORDER` is now a flat sequence of labels resolved to `(label, container)`
 pairs before trimming starts. Rebuilding a view mid-trim would rebuild it
 against records it has already popped from.
+
+### D48: The MCP `change_context` tool takes the CLI's budget, and the same default
+
+D45 built the budget and D47 fixed what it spends on. Neither reached the
+surface an agent is most likely to call. `RepoBrainTools.change_context` passed
+`base` and `auto_index` and nothing else, so `budget` fell to the `None` default
+that means *emit everything*. Measured on this repository at `b80a0a9`, an
+87-file diff, same repository and same minute:
+
+| surface | tokens | reports its own limits? |
+| --- | ---: | --- |
+| CLI `change-context --base b80a0a9 --json` | 14,895 | yes |
+| MCP `change_context(base="b80a0a9")` | 137,858 | **no** |
+
+The payload was not merely 9× larger. It carried no `budget`, no
+`token_estimate` and no `truncation`, so a caller had nothing to read to
+discover whether it was complete — the one honesty property D45 and D47 both
+treat as non-negotiable. An agent parsing the MCP result could not distinguish
+"this is everything" from "this is what fit", which is the confidently-wrong
+answer the freshness gate exists to prevent, arriving through a different door.
+
+After: **14,906 tokens, `truncation.applied` true, `within_budget` true**, 87/87
+changes, 17 impact, 32 tests — D47's degradation ladder doing exactly what it
+was built to do, now on both surfaces.
+
+**The default is the CLI's 15,000, not an MCP-specific number.** The argument
+for a tighter MCP default is real — its caller is inside a live session, so its
+context is more contended than a terminal's. It was rejected on three grounds.
+`project_brief` already sets the precedent that an MCP tool's default *is* the
+CLI's `DEFAULT_BUDGET`, and a second convention would have to be remembered by
+whoever adds the third budgeted surface. One number is one thing to reason
+about; two invite the question "why is this one different?" at every call site.
+And the caller that actually knows its own context pressure can now say so —
+`budget` is a parameter, not a constant. **No config key**: a knob nobody sets
+is a knob that has to be documented, defaulted, and tested forever.
+
+**The queued twin turned out not to exist.** The item asked to check whether
+`project_brief` had the same gap rather than fixing one and leaving its sibling.
+It does not — it has taken `budget: int = DEFAULT_BUDGET` since it shipped.
+`change_context` was the only budgeted surface missing one, and the reason is
+visible in the code: it is the one tool that bypasses `_query` and opens
+`self._store()` directly, in order to catch `GitDiffError`. That divergence is
+load-bearing and was left alone; it is why the tool was easy to miss, not a
+second defect.
+
+**Mutation-checked at the call site, per the rule D46 taught.** Dropping
+`budget=budget` while leaving the signature intact fails
+`test_the_mcp_tool_is_budgeted_and_reports_it_like_the_cli` and nothing else.
+Removing the parameter outright fails all three new tests and leaves the
+pre-existing CLI/MCP parity test passing — that test compares grounded sections,
+which is exactly why it never caught this.
