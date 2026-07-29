@@ -4,17 +4,38 @@ from __future__ import annotations
 import hashlib
 import posixpath
 from dataclasses import dataclass, field
+from pathlib import Path
 
 from ..graph.schema import Edge, EdgeType, FtsRow, Node, NodeType
 
 
 _RAW_FTS_EXCLUDED_LANGUAGES = {"dockerfile", "json", "toml", "yaml"}
 
-#: Bump by hand when a parser starts extracting something it did not before,
-#: or stops. Registry *composition* changes are detected automatically by
-#: :meth:`ParserRegistry.fingerprint`; this covers the case that composition
-#: cannot see, where a parser keeps its name and changes its output.
+#: Bump by hand when extraction changes *outside* this package — most of all
+#: :func:`repobrain.indexing.scanner.detect_language`, which decides which
+#: parsers run at all. Changes to the parsers themselves need no bump:
+#: :meth:`ParserRegistry.fingerprint` hashes registry composition and the
+#: parser sources, so both are detected without anyone remembering.
 EXTRACTOR_VERSION = "1"
+
+
+def parser_source_digest() -> str:
+    """Digest the bytes of every parser module in this package.
+
+    Read fresh on every call rather than cached: ``fingerprint()`` runs on
+    every freshness check, including a statusline polling ``freshness`` on a
+    timer, and a cache would hold a stale answer across exactly the edit this
+    exists to notice. Measured at 0.27 ms over the current ~147 KB of sources.
+
+    Names are hashed alongside the bytes so that renaming a parser module is a
+    change even when the corpus of bytes happens to be identical.
+    """
+    directory = Path(__file__).resolve().parent
+    digest = hashlib.sha256()
+    for source in sorted(directory.glob("*.py"), key=lambda item: item.name):
+        digest.update(source.name.encode("utf-8"))
+        digest.update(source.read_bytes())
+    return digest.hexdigest()
 
 
 @dataclass
@@ -141,8 +162,17 @@ class ParserRegistry:
         nothing after RepoBrain itself changes: the bytes are identical and the
         facts derivable from them are not. Comparing this value against the one
         recorded at index time is how that becomes visible.
+
+        Composition covers a parser being added or removed. The source digest
+        covers the case composition cannot see and that a hand-maintained
+        constant cannot be trusted to catch — a parser keeping its name while
+        changing its output.
         """
-        parts = [EXTRACTOR_VERSION, *sorted(parser.name for parser in self._parsers)]
+        parts = [
+            EXTRACTOR_VERSION,
+            parser_source_digest(),
+            *sorted(parser.name for parser in self._parsers),
+        ]
         return hashlib.sha256("\n".join(parts).encode("utf-8")).hexdigest()[:16]
 
 

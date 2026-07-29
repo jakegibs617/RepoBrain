@@ -24,6 +24,8 @@ from repobrain.graph.store import GraphStore
 from repobrain.indexing.doc_references import MarkdownMentionReconciler
 from repobrain.indexing.indexer import EXTRACTOR_FINGERPRINT_KEY, Indexer
 from repobrain.mcp_server import RepoBrainTools
+from repobrain.parsers import base as parsers_base
+from repobrain.parsers.base import default_registry
 
 
 def _store(root: Path) -> GraphStore:
@@ -392,6 +394,58 @@ def test_an_extractor_change_is_repaired_regardless_of_the_diff_thresholds(small
         assert result["before"]["extractor_changed"] is True
         # The repair is what makes the next read trustworthy, not just a flag flip.
         assert check_freshness(small_app, store)["extractor_changed"] is False
+
+
+@pytest.fixture
+def edited_parser_source():
+    """Change the bytes under ``repobrain/parsers/`` without changing composition.
+
+    This is the exact case D42 was written for and could not catch on its own:
+    every parser keeps its name, the registry keeps its shape, and what gets
+    extracted changes anyway.
+    """
+    probe = Path(parsers_base.__file__).parent / "_probe_parser.py"
+    probe.write_text("# a parser learning to extract something new\n", encoding="utf-8")
+    try:
+        yield probe
+    finally:
+        probe.unlink(missing_ok=True)
+
+
+def test_a_parser_source_change_moves_the_fingerprint_without_a_manual_bump(
+    edited_parser_source,
+):
+    """The bump that nothing forces is the bump that does not happen.
+
+    Registry composition catches a parser being added or removed. Only the
+    sources catch a parser whose name held still while its output changed —
+    the discipline that failed and produced the stale index D42 diagnoses.
+    """
+    edited_parser_source.unlink()
+    before = default_registry().fingerprint()
+
+    edited_parser_source.write_text("# now it extracts more\n", encoding="utf-8")
+    assert default_registry().fingerprint() != before
+
+    edited_parser_source.unlink()
+    assert default_registry().fingerprint() == before
+
+
+def test_a_parser_source_change_makes_a_stored_graph_stale(small_app):
+    """The fingerprint only matters if it reaches the freshness gate."""
+    probe = Path(parsers_base.__file__).parent / "_probe_parser.py"
+    with _store(small_app) as store:
+        assert check_freshness(small_app, store)["extractor_changed"] is False
+        probe.write_text("# extraction changed\n", encoding="utf-8")
+        try:
+            result = check_freshness(small_app, store)
+        finally:
+            probe.unlink(missing_ok=True)
+
+    assert result["extractor_changed"] is True
+    assert result["is_stale"] is True
+    # The tree genuinely did not move; the two axes stay separately legible.
+    assert result["out_of_date_count"] == 0
 
 
 def test_a_large_tree_diff_still_blocks_when_the_extractor_also_moved(small_app):
