@@ -157,7 +157,8 @@ uvx --from git+https://github.com/jakegibs617/RepoBrain repobrain index .
 uvx --from git+https://github.com/jakegibs617/RepoBrain repobrain brief --budget 2000
 
 # installs an MCP server entry in .mcp.json, a SessionStart hook in
-# .claude/settings.json, and a marker-delimited section in CLAUDE.md
+# .claude/settings.json, an agent skill in .claude/skills/repobrain/, and a
+# marker-delimited section in CLAUDE.md
 # add --git-hooks to also keep the index fresh after commits and merges
 uvx --from git+https://github.com/jakegibs617/RepoBrain repobrain install-agent .
 
@@ -172,6 +173,15 @@ uvx --from git+https://github.com/jakegibs617/RepoBrain repobrain uninstall-agen
 `install-agent` also adds `.repobrain/` to the repository's `.gitignore`
 idempotently. `uninstall-agent` intentionally leaves that safety rule in place
 so an existing local graph database never becomes committable by accident.
+
+**The agent skill.** `install-agent` writes `.claude/skills/repobrain/`, which
+teaches an agent to query the graph instead of grepping the tree, to check
+`impact` before editing shared code, and to tell a stale index apart from a
+missing one. Both files carry a `<!-- repobrain:skill:owned -->` marker.
+RepoBrain upgrades a file only while that marker is present, so **delete the
+marker line to adopt the skill as your own** — later installs then leave the
+whole directory alone and report `"reason": "user_owned"` rather than failing.
+`uninstall-agent` removes only marker-bearing files.
 
 Once `repobrain` is published to PyPI, the `--from git+...` prefix becomes
 unnecessary and the plain `uvx repobrain ...` form works as shown further
@@ -287,6 +297,15 @@ uv run --isolated --no-project \
 # --path picks which repository's database to inspect (default: cwd)
 .venv/bin/repobrain status
 .venv/bin/repobrain status --path tests/fixtures/small_python_app
+
+# is the index current? opens the graph read-only, never indexes, and always
+# exits 0 -- an unreadable index reports {"status": "unavailable"} with a
+# machine-readable "reason_code" (no_index / schema_mismatch / unreadable)
+# rather than failing, so status displays polling on a timer can call it safely.
+# "is_stale" covers two axes: files that moved ("out_of_date_count") and an
+# index built by a different set of parsers ("extractor_changed")
+.venv/bin/repobrain freshness
+.venv/bin/repobrain freshness --json
 
 # source-grounded session orientation (plain text or JSON)
 # --budget uses the deterministic ceil(characters / 4) token estimate
@@ -446,6 +465,15 @@ Export the current local graph for the interactive companion page:
 ```bash
 .venv/bin/python scripts/export_graph_html.py
 open setup/graph.html
+```
+
+Regenerate the published self-index snapshot that page ships with. CI fails
+when the committed snapshot no longer matches the tree, so run this after
+changes that add or remove indexed files. It also resyncs the numbers the
+quality page and `AGENT_HANDOFF.md` publish, so one command closes the gate:
+
+```bash
+.venv/bin/python scripts/refresh_snapshot.py
 ```
 
 ## Limitations

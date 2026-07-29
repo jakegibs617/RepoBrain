@@ -1,50 +1,18 @@
-"""Export RepoBrain's local SQLite graph as a browser-safe static dataset."""
+"""Export an existing RepoBrain SQLite graph as a browser-safe static dataset.
+
+To regenerate the site's own published snapshot, use ``refresh_snapshot.py``:
+it indexes the working tree from scratch rather than trusting local state.
+"""
 from __future__ import annotations
 
 import argparse
-import json
-import sqlite3
 from pathlib import Path
+
+from repobrain.testing.snapshot import graph_payload, write_snapshot
 
 
 def export_graph(database: Path, output: Path) -> None:
-    with sqlite3.connect(database) as connection:
-        connection.row_factory = sqlite3.Row
-        nodes = [
-            dict(row)
-            for row in connection.execute(
-                """
-                SELECT id, type, name, qualified_name, path, start_line, end_line,
-                       language, confidence
-                FROM nodes ORDER BY type, path, start_line, name
-                """
-            )
-        ]
-        node_ids = {node["id"] for node in nodes}
-        edges = [
-            dict(row)
-            for row in connection.execute(
-                """
-                SELECT source_node_id AS source, target_node_id AS target, type,
-                       path, start_line, confidence, is_inferred
-                FROM edges ORDER BY type, path, start_line
-                """
-            )
-            if row["source"] in node_ids and row["target"] in node_ids
-        ]
-
-    payload = {
-        "generated_from": str(database),
-        "nodes": nodes,
-        "edges": edges,
-    }
-    output.parent.mkdir(parents=True, exist_ok=True)
-    output.write_text(
-        "window.REPOBRAIN_GRAPH = "
-        + json.dumps(payload, separators=(",", ":"), ensure_ascii=False)
-        + ";\n",
-        encoding="utf-8",
-    )
+    write_snapshot(graph_payload(database), output)
 
 
 def main() -> None:

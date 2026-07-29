@@ -1,6 +1,7 @@
 """Parser interface and registry."""
 from __future__ import annotations
 
+import hashlib
 import posixpath
 from dataclasses import dataclass, field
 
@@ -8,6 +9,12 @@ from ..graph.schema import Edge, EdgeType, FtsRow, Node, NodeType
 
 
 _RAW_FTS_EXCLUDED_LANGUAGES = {"dockerfile", "json", "toml", "yaml"}
+
+#: Bump by hand when a parser starts extracting something it did not before,
+#: or stops. Registry *composition* changes are detected automatically by
+#: :meth:`ParserRegistry.fingerprint`; this covers the case that composition
+#: cannot see, where a parser keeps its name and changes its output.
+EXTRACTOR_VERSION = "1"
 
 
 @dataclass
@@ -125,6 +132,18 @@ class ParserRegistry:
 
     def all(self) -> list[Parser]:
         return list(self._parsers)
+
+    def fingerprint(self) -> str:
+        """Identify what this registry would extract, for staleness comparison.
+
+        A stored graph is only as current as the extractor that produced it.
+        File stat and content hashes answer "did the tree move", which says
+        nothing after RepoBrain itself changes: the bytes are identical and the
+        facts derivable from them are not. Comparing this value against the one
+        recorded at index time is how that becomes visible.
+        """
+        parts = [EXTRACTOR_VERSION, *sorted(parser.name for parser in self._parsers)]
+        return hashlib.sha256("\n".join(parts).encode("utf-8")).hexdigest()[:16]
 
 
 def default_registry() -> ParserRegistry:

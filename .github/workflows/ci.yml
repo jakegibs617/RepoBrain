@@ -47,9 +47,8 @@ jobs:
       - name: Verify published quality metrics
         if: matrix.python-version == '3.11'
         run: uv run --no-sync python scripts/verify_setup_metrics.py
-      - name: Measure extraction precision and recall
+      - name: Score extraction against the labeled corpus
         if: matrix.python-version == '3.11'
         run: >-
           uv run --no-sync python scripts/evaluate_extraction.py
-          tests/fixtures/small_python_app
-          docs/evaluation/small-python-facts.json
+          --corpus docs/evaluation/corpus.json

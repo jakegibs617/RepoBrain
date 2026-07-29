@@ -1,0 +1,13 @@
+{
+  "expected": [
+    "node|Function:services/user_service.create_user@services/user_service.php",
+    "node|EnvVar:DATABASE_URL@",
+    "edge|CALLS|Function:handlers/user_handler.handle_create_user@handlers/user_handler.php|Function:services/user_service.create_user@services/user_service.php|handlers/user_handler.php",
+    "edge|CALLS|Function:services/user_service.create_user@services/user_service.php|Function:services/user_service.database_url@services/user_service.php|services/user_service.php",
+    "edge|READS_ENV|Function:services/user_service.database_url@services/user_service.php|EnvVar:DATABASE_URL@|services/user_service.php"
+  ],
+  "forbidden": [
+    "edge|CALLS|Function:handlers/user_handler.handle_create_user@handlers/user_handler.php|Function:services/user_service.delete_user@services/user_service.php|handlers/user_handler.php",
+    "edge|READS_ENV|Function:services/user_service.create_user@services/user_service.php|EnvVar:DATABASE_URL@|services/user_service.php"
+  ]
+}

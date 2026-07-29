@@ -161,6 +161,19 @@ canvas.addEventListener("wheel", (event) => { event.preventDefault(); view.scale
 searchInput.addEventListener("input", applyFilters); nodeFilter.addEventListener("change", applyFilters); edgeFilter.addEventListener("change", applyFilters);
 document.querySelector("#reset-view").addEventListener("click", () => { view = { x: 0, y: 0, scale: .48 }; searchInput.value = ""; nodeFilter.value = "all"; edgeFilter.value = "all"; selectNode(null); applyFilters(); });
 
+// Provenance is read from the snapshot itself so the label can never drift
+// from the data it describes.
+const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+function snapshotDate() {
+  const parts = /^(\d{4})-(\d{2})-(\d{2})$/.exec(graph.generated_at || "");
+  return parts ? `${MONTHS[Number(parts[2]) - 1]} ${Number(parts[3])}, ${parts[1]}` : null;
+}
+const provenance = [snapshotDate(), graph.commit].filter(Boolean);
+document.querySelector("[data-snapshot-label]").textContent = ["Snapshot", ...provenance].join(" · ");
+document.querySelector("[data-snapshot-footer]").textContent = provenance.length
+  ? `Self-index snapshot generated ${provenance.join(" at ")}.`
+  : "Self-index snapshot of this repository.";
+
 document.querySelector("#node-count").textContent = graph.nodes.length.toLocaleString();
 document.querySelector("#edge-count").textContent = graph.edges.length.toLocaleString();
 document.querySelector("#type-count").textContent = nodeTypes.length;

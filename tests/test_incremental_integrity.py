@@ -5,6 +5,47 @@ from pathlib import Path
 from repobrain.graph.store import GraphStore
 from repobrain.indexing import incremental
 from repobrain.indexing.indexer import Indexer
+from repobrain.parsers.base import GenericFileParser, ParserRegistry
+
+
+def _older_extractor() -> ParserRegistry:
+    """A registry that cannot read structured config, standing in for a past
+    RepoBrain whose JSON extraction did not exist yet."""
+    registry = ParserRegistry()
+    registry.register(GenericFileParser())
+    return registry
+
+
+def _config_keys(store: GraphStore) -> set[str]:
+    return {
+        row["name"]
+        for row in store.conn.execute("SELECT name FROM nodes WHERE type = 'ConfigKey'")
+    }
+
+
+def test_extractor_upgrade_reparses_files_the_working_tree_never_touched(tmp_path):
+    """A parser improvement must reach files whose bytes never changed.
+
+    Stat-and-hash freshness answers "did the tree move", which is the wrong
+    question after RepoBrain itself changes: the file is byte-identical and the
+    facts extractable from it are not. Without a fingerprint the second index
+    below takes the unchanged fast path and the config keys never appear, which
+    is exactly how a live index goes semantically stale while reporting current.
+    """
+    root = tmp_path / "repo"
+    root.mkdir()
+    (root / "package.json").write_text(
+        '{"name": "svc", "version": "1.0.0"}\n', encoding="utf-8"
+    )
+
+    with GraphStore(tmp_path / "graph.sqlite") as store:
+        Indexer(store, registry=_older_extractor()).index(root)
+        assert _config_keys(store) == set()
+
+        stats = Indexer(store).index(root)
+
+        assert _config_keys(store) == {"name", "version"}
+        assert stats.files_changed == 1
 
 
 def test_restored_mtime_same_size_replaces_deleted_symbol(tmp_path):

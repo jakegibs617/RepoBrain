@@ -1,0 +1,15 @@
+{
+  "expected": [
+    "node|Function:services/user_service.CreateUser@services/user_service.go",
+    "node|Class:services/user_service.Store@services/user_service.go",
+    "node|Method:services/user_service.Store.Save@services/user_service.go",
+    "edge|DEFINES|Class:services/user_service.Store@services/user_service.go|Method:services/user_service.Store.Save@services/user_service.go|services/user_service.go",
+    "edge|CALLS|Function:services/user_service.CreateUser@services/user_service.go|Function:services/user_service.normalize@services/user_service.go|services/user_service.go",
+    "edge|IMPORTS|Module:handlers/user_handler@handlers/user_handler.go|Module:services/user_service@services/user_service.go|handlers/user_handler.go"
+  ],
+  "forbidden": [
+    "edge|CALLS|Function:services/user_service.CreateUser@services/user_service.go|Method:services/user_service.Store.Save@services/user_service.go|services/user_service.go",
+    "edge|CALLS|Function:handlers/user_handler.HandleCreateUser@handlers/user_handler.go|Function:services/user_service.DeleteUser@services/user_service.go|handlers/user_handler.go",
+    "edge|INSTANTIATES|Function:services/user_service.CreateUser@services/user_service.go|Class:services/user_service.Store@services/user_service.go|services/user_service.go"
+  ]
+}

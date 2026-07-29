@@ -1,0 +1,13 @@
+{
+  "expected": [
+    "node|Class:src/main/java/com/example/services/UserService.UserService@src/main/java/com/example/services/UserService.java",
+    "node|Method:src/main/java/com/example/services/UserService.UserService.createUser@src/main/java/com/example/services/UserService.java",
+    "edge|CALLS|Method:src/main/java/com/example/handlers/UserHandler.UserHandler.handleCreateUser@src/main/java/com/example/handlers/UserHandler.java|Method:src/main/java/com/example/services/UserService.UserService.createUser@src/main/java/com/example/services/UserService.java|src/main/java/com/example/handlers/UserHandler.java",
+    "edge|INSTANTIATES|Method:src/main/java/com/example/handlers/UserHandler.UserHandler.handleDescribe@src/main/java/com/example/handlers/UserHandler.java|Class:src/main/java/com/example/services/UserService.UserService@src/main/java/com/example/services/UserService.java|src/main/java/com/example/handlers/UserHandler.java",
+    "edge|IMPORTS|Module:src/main/java/com/example/handlers/UserHandler@src/main/java/com/example/handlers/UserHandler.java|Module:src/main/java/com/example/services/UserService@src/main/java/com/example/services/UserService.java|src/main/java/com/example/handlers/UserHandler.java"
+  ],
+  "forbidden": [
+    "edge|CALLS|Method:src/main/java/com/example/handlers/UserHandler.UserHandler.handleDescribe@src/main/java/com/example/handlers/UserHandler.java|Method:src/main/java/com/example/services/UserService.UserService.describe@src/main/java/com/example/services/UserService.java|src/main/java/com/example/handlers/UserHandler.java",
+    "edge|CALLS|Method:src/main/java/com/example/handlers/UserHandler.UserHandler.handleCreateUser@src/main/java/com/example/handlers/UserHandler.java|Method:src/main/java/com/example/services/UserService.UserService.deleteUser@src/main/java/com/example/services/UserService.java|src/main/java/com/example/handlers/UserHandler.java"
+  ]
+}

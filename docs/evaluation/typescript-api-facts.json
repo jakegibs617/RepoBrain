@@ -1,0 +1,18 @@
+{
+  "expected": [
+    "node|Function:src/services/userService.createUser@src/services/userService.ts",
+    "node|EnvVar:DATABASE_URL@",
+    "edge|CALLS|Function:src/handlers/userHandler.handleCreateUser@src/handlers/userHandler.ts|Function:src/services/userService.createUser@src/services/userService.ts|src/handlers/userHandler.ts",
+    "edge|CALLS|Function:src/services/userService.createUser@src/services/userService.ts|Function:src/services/userService.databaseUrl@src/services/userService.ts|src/services/userService.ts",
+    "edge|IMPORTS|Module:src/handlers/userHandler@src/handlers/userHandler.ts|Module:src/services/userService@src/services/userService.ts|src/handlers/userHandler.ts",
+    "edge|READS_ENV|Function:src/services/userService.databaseUrl@src/services/userService.ts|EnvVar:DATABASE_URL@|src/services/userService.ts",
+    "edge|MENTIONS|MarkdownSection:README.md#TypeScript API App@README.md|File:src/services/userService.ts@src/services/userService.ts|README.md"
+  ],
+  "forbidden": [
+    "node|File:docs/missing-guide.md@docs/missing-guide.md",
+    "node|MarkdownDocument:docs/missing-guide.md@docs/missing-guide.md",
+    "node|File:https://example.com/typescript-api-app@https://example.com/typescript-api-app",
+    "edge|CALLS|Function:src/handlers/userHandler.handleCreateUser@src/handlers/userHandler.ts|Function:src/services/userService.deleteUser@src/services/userService.ts|src/handlers/userHandler.ts",
+    "edge|READS_ENV|Function:src/services/userService.createUser@src/services/userService.ts|EnvVar:DATABASE_URL@|src/services/userService.ts"
+  ]
+}

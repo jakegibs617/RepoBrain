@@ -949,3 +949,357 @@ findings were fixed by factoring `_resolve_method_in_class` out of
 `_resolve_java_qualified_call` is a genuinely different target shape from
 `_resolve_plain_call`'s own symbol_aliases tier (Method-nested-in-class vs
 top-level Function/Class), not accidental duplication.
+
+## 2026-07-25 — Release hardening (audit remediation)
+
+These five records are a backfill. The 2026-07-25 morning audit found a
+Critical secret-exfiltration defect and two structural absences, and the fix
+wave that closed them (PRs #10/#11, 2,339 insertions) landed without ADRs —
+which the afternoon re-audit correctly called out as a lapse exactly where
+future maintainers most need rationale. D35–D38 reconstruct decisions already
+implemented; D39 records a decision made while closing the re-audit's
+remaining items.
+
+### D35: Dotenv files are excluded by a mandatory matcher that no repository rule can negate, and the dotenv parser is value-free by construction — defense in depth, not one gate
+
+The morning audit planted canary secrets in `.env`/`.env.local` and retrieved
+them through `repobrain search`, `trace config --json`, the MCP
+`search_project` tool, and `strings` over the SQLite file. The values were in
+the index because the file was scanned and its assignments stored.
+
+One fix would have sufficed to close the probe: stop scanning dotenv files.
+That is not what was built, because the failure mode here is asymmetric — a
+secret in a user's index is unrecoverable once it leaks into a shared
+database, an agent transcript, or a git history, while an over-exclusion costs
+only a missing config key. Two independent layers now have to fail before a
+value is stored.
+
+**Layer one — exclusion that cannot be argued with.** `MANDATORY_EXCLUDES`
+(`repobrain/indexing/scanner.py:15-22`) lists `.env`, `.env.*`, `*.env`,
+`*.env.*` alongside `.git/` and `.repobrain/`, and is compiled into a
+*separate*, final `GitIgnoreSpec` (`scanner.py:99`) rather than being
+prepended to the repository's own patterns. This is the load-bearing detail:
+gitignore semantics are last-match-wins, so a pattern list is negotiable — a
+repository's `!.env.local` or a user's `.repobrainignore` negation would
+otherwise re-include the file and silently re-open the vulnerability. A
+separate matcher consulted after the layered ones has no negation path at all.
+`.env.example` is deliberately inside the exclusion, not carved out: a file
+that *should* contain only placeholder keys frequently does not, and the
+declarative-key benefit does not justify reasoning about which dotenv files
+are safe.
+
+**Layer two — a parser that has nothing to leak.** `EnvFileParser`
+(`repobrain/parsers/config_parser.py:15-22`) is now unreachable through normal
+scanning, and is kept anyway, rewritten to record key names and line numbers
+only. Custom parser wiring and direct invocation are real surfaces, and a
+parser that never holds a value cannot be made to disclose one by a future
+caller who forgets why the scanner rule exists.
+
+**Pinned, not trusted.** `tests/test_secret_safety.py` re-runs the original
+attack — canaries planted, index built, then every retrieval surface plus raw
+`strings` over the database asserted clean. The regression test is the reason
+this record can be short: the policy is executable.
+
+### D36: Ignore matching moved to `pathspec`'s `GitIgnoreSpec`, retiring D3's fnmatch subset
+
+D3 chose "a small fnmatch-based subset" of gitignore semantics for the MVP,
+which was the right call while the graph was the risk and ignore rules were
+cosmetic. D35 changed the stakes: once exclusion is a security boundary, an
+approximation of gitignore semantics is a liability, because the gap between
+"what the user believes is ignored" and "what RepoBrain actually skips" is
+where a secret gets indexed.
+
+`pathspec>=0.12,<2` (`pyproject.toml`) is a dependency added deliberately
+against this project's local-first, thin-dependency instinct. The trade
+accepted: one well-maintained, pure-Python library versus hand-maintaining
+directory-only patterns (`build/`), anchoring rules (`/dist` vs `dist`),
+`**` semantics, and last-match-wins negation — each a place where a
+hand-rolled subset silently under-matches. `IgnoreMatcher` keeps per-directory
+layers (`_IgnoreLayer`, `scanner.py:108`) so nested `.gitignore` files resolve
+relative to their own base path, matching git's actual behavior rather than
+flattening every pattern to the repository root.
+
+### D37: CI is an independent adversarial runner, not a convenience — it re-derives every published number rather than trusting the repository's claims about itself
+
+Before this milestone the project had 300+ tests and no CI. The audit's
+finding was not "tests might break"; it was that *every* quality claim on the
+setup site and in the docs rested on the author having run something locally
+and reported the result honestly. A CI job that only runs `pytest` would have
+fixed the smaller problem.
+
+`.github/workflows/ci.yml` therefore has four kinds of step, and the last two
+are the point:
+
+1. **A 3.11/3.12/3.13 matrix** on `uv sync --locked`, so the floor of
+   `requires-python` and the current release are both exercised and the
+   committed `uv.lock` is the thing being tested. Dependencies gained upper
+   bounds in the same change (`pathspec<2`, `mcp<2`,
+   `tree-sitter-language-pack<1.14`) — an unbounded range means a green CI run
+   today says nothing about an install tomorrow.
+2. **Lint and types on 3.11 only.** `ruff` and `mypy` results do not vary
+   usefully across the matrix; running them three times buys nothing and slows
+   the signal.
+3. **A coverage floor of 88%**, enforced with `--cov-fail-under` rather than
+   reported. A reported number drifts down one uncovered branch at a time; a
+   gate makes the drift a conversation.
+4. **Scripts that recompute published claims.**
+   `scripts/verify_setup_metrics.py` re-derives the test count, file count,
+   and graph-fact total and fails if the site disagrees;
+   `scripts/evaluate_extraction.py` re-measures extraction against labeled
+   ground truth. This is the adversarial part: documentation is verified by
+   execution, so the site cannot overstate the project without turning the
+   build red.
+
+### D38: The extraction harness is a labeled-corpus regression gate; it is never described as a general accuracy measurement
+
+`scripts/evaluate_extraction.py` indexes a fixture into a throwaway database
+and scores the result against a JSON specification of `expected` and
+`forbidden` fact keys, exiting non-zero on a missing expected fact, a present
+forbidden fact, *or* any extraction warning. The `forbidden` array is the
+design decision: an extractor can trivially maximize recall by inventing
+edges, so a harness that only checks expected facts measures the wrong half.
+Pinning facts that must *not* appear — an unresolvable `someVar.method()`
+(D34), a call that does not exist — is what makes the gate meaningful.
+
+The scope limit is recorded here because the number the harness prints invites
+misuse. Precision and recall computed over a committed corpus are properties
+*of that corpus*, not of the extractor in general; a `1.0/1.0` result on a
+handful of fixtures says the extractor has not regressed, and says nothing
+about an unseen repository. `docs/EVALUATION_STRATEGY.md` and every other
+description of this gate must therefore state the corpus scope alongside any
+figure. Publishing a bare accuracy number sourced from this harness would be
+the same category of overclaim the audit already found on the setup site.
+
+### D39: Snapshot freshness is enforced by re-indexing and comparing exact structural counts, with history-derived edges excluded — a drift budget was rejected
+
+`setup/graph-data.js` is RepoBrain's index of itself, rendered by the graph
+page. It is generated by hand, so it decays silently; the re-audit found it
+~10% behind HEAD, and noted that nothing in CI could catch further decay. The
+morning fix had made the label honest (a dated snapshot pill instead of a
+"Live" badge), which converted a misleading claim into ordinary staleness —
+worth fixing properly rather than re-labeling again.
+
+**Exact, not bounded.** The rejected alternative was a drift budget: fail only
+when the snapshot trails by more than ~2% of nodes and edges. It is friendlier
+— most pull requests would not need to regenerate — but it licenses permanent
+rot just under the threshold, and a gate that tolerates being slightly wrong
+forever is a gate that has to be re-audited. `snapshot_drift`
+(`repobrain/testing/snapshot.py`) re-indexes the working tree from scratch and
+compares file count, node count, and structural edge count for exact equality.
+When it fails, `scripts/refresh_snapshot.py` regenerates the artifact; the
+cost is one command and one commit, and the audit's failure mode becomes
+impossible rather than merely bounded.
+
+**Why history edges are excluded.** `CO_CHANGED_WITH` is derived from git
+history, not from the working tree, so it changes on every commit. Including
+it would make a correct snapshot fail one commit after it was generated,
+which trains maintainers to regenerate mechanically or to weaken the gate —
+the two ways checks like this die. Excluding the history layer keeps the
+comparison over exactly the part of the graph the snapshot claims to be a
+function of.
+
+**Provenance moved into the data.** The date and commit were hardcoded in
+`setup/graph.html` in two places, a second drift source the freshness check
+could not see. The exporter now writes `commit` and `generated_at` into the
+payload and `setup/graph.js` renders both from it, so the label cannot
+disagree with the graph it labels.
+
+**Regenerating indexes into a temporary database**, never the developer's
+`.repobrain/`, so the published artifact is a function of the tree alone and
+not of whatever local state happened to be lying around.
+
+**The remedy is one command, deliberately.** An exact gate is only defensible
+if closing it is cheap; a check that costs a scavenger hunt gets weakened the
+first time it is inconvenient. The published figures were duplicated by hand in
+three places — the machine-readable `data-value`, the `<strong>` a reader sees,
+and one line of `AGENT_HANDOFF.md` — which is precisely where the drift the
+audit found got in. `verify_setup_metrics.py` now owns the edit as well as the
+check (`sync_metrics`, exposed as `--write`), and `refresh_snapshot.py` calls
+it, so a failing gate costs `refresh_snapshot.py` and a commit. Writer and
+checker are pinned to each other by a test that syncs a page and then reads the
+values back through `_published_metric`: if they ever disagree, the gate could
+never go green, and that test fails first. The handoff's unverified "N pass"
+count was dropped in the same change rather than synced — nothing measured it,
+so it was a published number with no gate behind it.
+
+## 2026-07-25 — Index freshness as a display surface
+
+### D40: `freshness` is ungated and read-only, the one read command that neither repairs nor refuses
+
+Every other read path in RepoBrain runs through `require_fresh`
+(`repobrain/freshness.py:141`), which enforces the invariant that stale facts
+are never served: a small diff is auto-indexed, a large one raises and the
+query is refused. That is right for a fact-serving surface and wrong for a
+status display. A statusline widget polls every few seconds; under the gate it
+would either write to the database on a timer that has nothing to do with the
+user's work, or exit non-zero — printing `[Exit: 1]` — precisely when it has
+something worth saying. Before this change there was no way to ask "is the
+index current?" without doing one or the other, so the answer only ever
+reached the user once, in the SessionStart brief.
+
+**Reporting staleness is not reading through it.** The invariant `freshness.py`
+protects is about facts extracted from the graph: symbols, edges, call sites,
+anything whose truth depends on the index matching the tree. `freshness`
+returns none of that. Its entire output is a description of the gap between
+index and working tree, which is *more* accurate the staler things get. So the
+gate does not apply — not as an exception carved out of it, but because the
+command is not the kind of surface the gate governs.
+
+**Always exit zero.** Missing database, off-version schema, unreadable file,
+scan error: all render as `{"status": "unavailable", "reason": ...}`. A
+display's caller cannot tell a crash from a report if both arrive as a
+non-zero exit, and the failure mode of guessing wrong is a statusline that
+shows an error string forever. The bare `except Exception` here is deliberate
+and is the only one in the CLI.
+
+**Read-only opens needed a new path in the store.** `GraphStore.__init__`
+writes on every open — `mkdir`, `PRAGMA journal_mode=WAL`, an `executescript`
+of the whole schema, pending migrations, `commit`. Repeating that on a timer
+next to a live `repobrain index` is exactly the contention the WAL is there to
+avoid, so `read_only=True` skips all of it and connects via
+`file:...?mode=ro`. Writes then fail loudly with SQLite's `readonly database`
+error rather than silently no-opping.
+
+**`mode=ro` without `immutable=1`.** `immutable` is the faster flag and was
+rejected: it asserts no other process can be writing and lets SQLite ignore
+the WAL entirely, which would serve a torn pre-WAL snapshot in the middle of
+an indexing run — the display would report a freshness number computed against
+a database state that never existed. The cost of correctness is that a
+read-only open still maps the `-shm` file, and creates `-shm` and a zero-length
+`-wal` when they are absent. Those live inside the gitignored `.repobrain/`
+and the database file itself is never modified, which the store test asserts
+by hashing it across an open.
+
+*Amended 2026-07-29.* The test shipped asserting more than this decision
+promises: it compared the whole directory listing across the open, which holds
+on macOS — where a clean close truncates `-wal` to zero bytes but leaves it in
+place — and fails on Linux, where the close removes it and the read-only open
+recreates it. Every CI leg failed on that difference alone. The assertion now
+matches the guarantee as written above: database bytes and mtime unchanged,
+writes still refused, and no *non-empty* log left behind. An empty log is the
+proof that nothing was committed through it; a missing one was never the claim.
+
+The same investigation found the rejection of `immutable=1` above to be too
+flat. A read-only connection is not permitted to *create* the `-shm` index, so
+`mode=ro` does not degrade on a WAL database whose sidecars are absent — it
+fails the open outright with `unable to open database file`. Sidecars are
+absent whenever nothing holds the database, which is the resting state of every
+idle index, so `freshness` reported `unavailable` for a completely intact
+9.4 MB graph on this repository. `_read_only_connection` now falls back to
+`immutable=1` when the preferred open fails. The torn-snapshot risk that
+rejected `immutable` outright does not apply on that path: the sidecars are
+missing *because* no connection holds the database, and a live indexing run
+necessarily has them present — in which case `mode=ro` succeeded and the
+fallback was never reached. The fallback is only taken when the precondition
+`immutable` asserts is what the failed open just demonstrated.
+
+**Off-version schemas are refused rather than read.** The ordinary open path
+migrates a legacy database in place; a read-only store cannot. Reading a
+pre-migration schema as though it were current would return wrong answers
+instead of an error, so a version mismatch in either direction raises and
+surfaces as `unavailable`.
+
+### D41: The agent skill ships in the wheel and is installed as a marked, adoptable file
+
+`install-agent` already wrote everything an agent needs to *receive* RepoBrain
+facts — a SessionStart hook, an MCP entry, a `CLAUDE.md` block — and nothing
+that told it what to *do* with them. The brief orients; it does not teach. The
+observed consequence, reproduced against this repository with the hook
+installed and no skill present, was that agents answered graph-shaped
+questions with grep fan-outs of 21 to 28 tool calls and 49k to 62k tokens,
+never called `impact` before proposing a change to shared code, and recorded
+session handoffs by hand-editing `AGENT_HANDOFF.md` — which is a rendered
+mirror of the memory graph, so those notes gained no anchors and never came
+back from `memory read`. Two of the three runs stated the same reasoning
+verbatim: no `repobrain` binary was visible in the checkout, so they used grep
+instead. None had checked whether one was installed.
+
+**The skill ships with the tool rather than living in user configuration.**
+The failure is a property of the tool's surface, not of any one user's setup,
+and a fix that every adopter must first hear about and then hand-copy is not a
+fix. Shipping it as package data under `repobrain/agent_skill/` puts it in the
+wheel, in CI, and in the same install command that already earns the user's
+consent to write agent configuration.
+
+**CLI-first, MCP when connected.** The MCP server is an optional extra behind
+a `.mcp.json` entry that a client may have disabled — this repository's own
+checkout has it disabled — whereas the CLI is present wherever the package is.
+Teaching MCP as the primary surface would make the skill's first instruction
+fail in exactly the environments that most need it. The skill names the MCP
+tools as a preferred alternative when that server is live.
+
+**Binary discovery is delegated to the installed hook, not guessed.** An early
+draft told agents to fall back to `uvx --from repobrain repobrain`, which
+would fail: RepoBrain is not on PyPI, and `install-agent` resolves a PEP 610
+direct URL per installation. The skill instead points at the SessionStart hook
+command in `.claude/settings.json`, which by construction contains a working
+invocation for that project.
+
+**Ownership is a marker in the file, not a content hash.** Hashing would
+require shipping a registry of every previously released version to tell "the
+user edited this" from "this is last release's copy". A
+`<!-- repobrain:skill:owned -->` marker collapses that to one rule readable by
+the person it constrains: RepoBrain overwrites the file while the marker is
+present, and deleting the marker adopts it permanently.
+
+**An adopted skill is not a conflict.** `_prepare_mcp` refuses to proceed on a
+foreign `mcpServers.repobrain` entry, because a wrong MCP entry is a broken
+server. A customized skill is a *working* skill, so `_prepare_skill` returns
+`{"installed": false, "reason": "user_owned"}` and lets the rest of the
+installation land. Refusing the hook and the MCP entry because someone edited
+their documentation would be a worse failure than the one it prevents.
+Uninstall stays per-file: it removes every marker-bearing file it still owns
+even if a sibling was adopted, and prunes only directories it emptied.
+
+## 2026-07-29 — Extractor identity as the second freshness axis
+
+### D42: The index records which extractor built it, and a change to that forces re-extraction regardless of the file diff
+
+`check_freshness` compared file size and mtime against the stored `files`
+table, which answers one question: *did the working tree move?* That is the
+wrong question after RepoBrain itself changes. When a parser starts extracting
+something it did not before, every affected file is byte-identical, its stat is
+untouched, and the incremental fast path in `compute_diff` skips it forever.
+The graph then holds facts no current parser would produce, and `freshness`
+reports it current — a wrong answer served confidently, which is the exact
+failure the gate exists to prevent.
+
+This was observed, not theorized. On this repository, at `12ade8e`, `freshness
+--json` reported current at 153 files with zero changed inputs while the live
+`.repobrain` index held 2,064 nodes against 2,076 in a fresh index of the same
+tree. The gap was the JSON-derived `ConfigFile` and eleven `ConfigKey` nodes
+for `tests/fixtures/node_api_app/package.json`, a file nothing had touched
+since before the structured-config parser learned to read it.
+
+**The fingerprint covers composition automatically and behavior by hand.**
+`ParserRegistry.fingerprint()` hashes `EXTRACTOR_VERSION` together with the
+sorted parser names. Names catch a parser being added or removed without anyone
+remembering to do anything. They cannot catch the case that actually bit us —
+a parser whose name held still while its output changed — so `EXTRACTOR_VERSION`
+is bumped by hand for that, on the same discipline as `RUNTIME_ADAPTER_VERSION`,
+which had already established this pattern one level down for runtime adapters.
+
+**Stored in `meta`, not in a new column or a schema bump.** The `meta` table
+already carries `root` and `runtime_adapter_version`. A schema version bump
+would have been the more invasive answer to the same need, and would have made
+every existing database unreadable to the read-only path in D40 — turning a
+recoverable staleness into a hard `schema_mismatch` for every user on upgrade.
+The fingerprint is written inside the index run's single transaction, so a
+failed run never leaves behind a claim that its facts are current.
+
+**Drift bypasses the auto-index thresholds; it is not counted in files.** The
+`max_changed_files`/`max_changed_bytes` policy exists to withhold trust from a
+tree diff too large to have been reviewed. A parser upgrade is not that: the
+tree is unchanged and re-extraction is deterministic. Counting drift as file
+churn would put it above every sane threshold and leave every read surface
+refusing until the user ran `repobrain index` by hand, which is a worse default
+than one slow query after an upgrade. So `extractor_changed` is reported as its
+own axis alongside `out_of_date_count`, and only the file count is measured
+against the policy — a large tree diff arriving in the same run as a parser
+upgrade still blocks, because that axis is untouched.
+
+**Two axes, separately legible, one `is_stale`.** Both kinds of staleness make
+stored facts untrustworthy, so both set `is_stale` and both are repaired the
+same way. They stay separately reported because only one of them is measured in
+files: saying "0 file(s) are out of date" about a graph that is entirely out of
+date would be technically true and actively misleading.

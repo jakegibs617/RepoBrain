@@ -1,0 +1,15 @@
+{
+  "expected": [
+    "node|MarkdownDocument:docs/adr-001-sqlite-storage.md@docs/adr-001-sqlite-storage.md",
+    "node|MarkdownSection:docs/adr-001-sqlite-storage.md#ADR-001: Use SQLite for storage/Decision@docs/adr-001-sqlite-storage.md",
+    "node|Task:docs/implementation-plan.md#task:17@docs/implementation-plan.md",
+    "edge|CONTAINS|MarkdownSection:README.md#Markdown Docs App@README.md|MarkdownSection:README.md#Markdown Docs App/Database@README.md|README.md",
+    "edge|MENTIONS|MarkdownSection:README.md#Markdown Docs App/Overview@README.md|File:docs/adr-001-sqlite-storage.md@docs/adr-001-sqlite-storage.md|README.md",
+    "edge|MENTIONS|MarkdownSection:docs/implementation-plan.md#Implementation Plan/Phase 1: User API@docs/implementation-plan.md|File:docs/adr-001-sqlite-storage.md@docs/adr-001-sqlite-storage.md|docs/implementation-plan.md"
+  ],
+  "forbidden": [
+    "edge|MENTIONS|MarkdownSection:README.md#Markdown Docs App/Database@README.md|File:docs/implementation-plan.md@docs/implementation-plan.md|README.md",
+    "node|Route:POST /api/users@README.md",
+    "node|EnvVar:DATABASE_URL@"
+  ]
+}

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Iterable
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -22,7 +23,7 @@ from .graph.queries import impact_analysis as run_impact_analysis
 from .graph.queries import trace_data_flow as run_trace_data_flow
 from .graph.queries import trace_config as run_trace_config
 from .graph.store import GraphStore
-from .freshness import FreshnessBlockedError, require_fresh
+from .freshness import FreshnessBlockedError, check_freshness, require_fresh
 from .history import (
     co_change_report,
     churn_report,
@@ -159,6 +160,28 @@ def index(path: str, no_incremental: bool, no_history: bool) -> None:
         click.echo(f"  warning: {warning}")
 
 
+def _impact_subject(item: dict) -> str:
+    """Identify an impacted node well enough to act on it.
+
+    Path alone collapses distinct symbols in the same file into rows that look
+    like duplicates, so lead with the symbol and keep the location alongside it.
+    """
+    node = item["node"]
+    name = node.get("qualified_name") or node.get("name") or node.get("path") or "?"
+    return f"{name} [{node['type']}] ({node.get('path') or '?'}:{node.get('start_line') or '?'})"
+
+
+def _dedupe(rows: Iterable[str]) -> list[str]:
+    """Drop repeats while preserving rank order; distinct rows all survive."""
+    seen: set[str] = set()
+    unique = []
+    for row in rows:
+        if row not in seen:
+            seen.add(row)
+            unique.append(row)
+    return unique
+
+
 def _history_summary(history: dict) -> str:
     status = history["status"]
     if status == "extracted":
@@ -213,6 +236,89 @@ def status(path: str, as_json: bool, no_auto_index: bool) -> None:
     click.echo("\nEdges by type")
     for type_, count in edge_counts.items():
         click.echo(f"  {type_:<20} {count}")
+
+
+@main.command()
+@click.option("--path", "path", type=click.Path(exists=True, file_okay=False), default=".",
+              show_default=True, help="Repository root whose index to check.")
+@click.option("--json", "as_json", is_flag=True, help="Machine-readable output.")
+def freshness(path: str, as_json: bool) -> None:
+    """Report whether the index is current, without indexing or refusing.
+
+    Every other read surface runs the freshness gate, which repairs a small
+    stale diff and refuses a large one. Both are wrong for a status display
+    polling on a timer: one writes to the database on someone else's schedule,
+    the other exits non-zero exactly when it has something to say. This
+    command opens the graph read-only, never writes to the database and never
+    takes a write lock, and always exits zero — an unreadable index is a
+    reportable state, not an error.
+
+    "Never writes to the database" is the exact claim, not "never touches the
+    directory": on Linux, SQLite creates an empty WAL sidecar when it opens a
+    WAL-mode database even under ``mode=ro``. That costs nothing and is what
+    lets a reader see a live indexer's log rather than a torn snapshot.
+    """
+    root = _resolve_root(path)
+    try:
+        config = RepoBrainConfig.load(root)
+        with GraphStore(root / config.db_path, read_only=True) as store:
+            staleness = check_freshness(root, store, config=config)
+            run = store.last_index_run()
+            result = {
+                "status": "ok",
+                "is_stale": staleness["is_stale"],
+                "extractor_changed": staleness["extractor_changed"],
+                "out_of_date_count": staleness["out_of_date_count"],
+                "changed_bytes": staleness["changed_bytes"],
+                "files": store.file_count(),
+                "last_indexed_at": run["finished_at"] if run else None,
+            }
+    except Exception as exc:  # noqa: BLE001 - a display surface must never crash
+        result = {
+            "status": "unavailable",
+            "reason_code": _unavailable_code(exc),
+            "reason": str(exc),
+        }
+
+    if as_json:
+        click.echo(json.dumps(result, indent=2))
+        return
+    if result["status"] != "ok":
+        click.echo(f"Index freshness: unavailable ({result['reason']})")
+    elif result["is_stale"]:
+        click.echo(f"STALE INDEX: {_stale_summary(result)}; run `repobrain index`.")
+    else:
+        click.echo("Index freshness: current.")
+
+
+def _unavailable_code(exc: Exception) -> str:
+    """Name why the index could not be read, so a caller can dispatch on it.
+
+    The three states need different responses — index the repository, upgrade
+    or rebuild a database from another RepoBrain, or investigate — and the
+    command is an agent's first call. Matching on the message would make every
+    caller regex an English sentence that is free to be reworded.
+    """
+    if isinstance(exc, FileNotFoundError):
+        return "no_index"
+    if isinstance(exc, RuntimeError) and "schema version" in str(exc):
+        return "schema_mismatch"
+    return "unreadable"
+
+
+def _stale_summary(result: dict) -> str:
+    """Describe staleness in the terms that actually apply.
+
+    A changed extractor invalidates files whose contents never moved, so
+    reporting it as a file count would say "0 file(s) are out of date" about a
+    graph that is entirely out of date.
+    """
+    parts = []
+    if result["out_of_date_count"]:
+        parts.append(f"{result['out_of_date_count']} file(s) are out of date")
+    if result["extractor_changed"]:
+        parts.append("the extractor changed since this index was built")
+    return "; ".join(parts)
 
 
 @main.command("brief")
@@ -703,16 +809,18 @@ def impact(target: str, change_type: str, depth: int, path: str,
         return
     for title,key in (("High-confidence impact","high_confidence"),("Medium-confidence impact","medium_confidence"),("Low-confidence possible impact","low_confidence"),("Recommended tests","recommended_tests"),("Docs likely needing updates","docs_likely_needing_updates")):
         click.echo(f"\n{title}")
-        for item in result[key]:
-            click.echo(f"  {item['node']['path']} [{item['node']['type']}] via {item['via']} conf={item['confidence']:.2f}")
+        for row in _dedupe(f"{_impact_subject(item)} via {item['via']} "
+                           f"conf={item['confidence']:.2f}" for item in result[key]):
+            click.echo(f"  {row}")
         if not result[key]:
             click.echo("  none")
     click.echo("\nHistorical co-change (heuristic)")
     historical = result["historical_evidence"]
-    for item in historical["items"]:
-        click.echo(f"  {item['node']['path']} via {item['via']} "
-                   f"support={item['support']} score={item['score']:.2f} "
-                   f"conf={item['confidence']:.2f}")
+    for row in _dedupe(f"{_impact_subject(item)} via {item['via']} "
+                       f"support={item['support']} score={item['score']:.2f} "
+                       f"conf={item['confidence']:.2f}"
+                       for item in historical["items"]):
+        click.echo(f"  {row}")
     if not historical["items"]:
         detail = f" ({historical['explanation']})" if historical.get("status") else ""
         click.echo(f"  none{detail}")

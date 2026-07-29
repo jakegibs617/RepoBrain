@@ -9,11 +9,26 @@ quality bar. Evaluation therefore happens at three levels.
 Each subsystem gets focused fixtures with explicit expected facts and explicit
 non-facts. Every evaluation checks both recall and precision.
 
-`scripts/evaluate_extraction.py <repository> <spec.json>` is the executable
-release-gate harness for labeled corpora. The JSON specification contains
-`expected` and `forbidden` arrays of stable fact keys; the command indexes into
-a temporary database, reports measured precision/recall, and exits non-zero on
-missing expected facts, present forbidden facts, or extraction warnings.
+`scripts/evaluate_extraction.py` is the executable release-gate harness for
+labeled corpora. It runs either one repository against one specification
+(`<repository> <spec.json>`) or the whole committed corpus
+(`--corpus docs/evaluation/corpus.json`). A specification contains `expected`
+and `forbidden` arrays of stable fact keys; the command indexes each entry into
+a temporary database and exits non-zero on missing expected facts, present
+forbidden facts, or extraction warnings.
+
+**What the numbers mean.** The precision and recall the harness prints are
+computed over the labeled corpus and are properties *of that corpus* — this is
+a regression gate, not a measurement of extraction accuracy on arbitrary
+repositories (D38). Any figure taken from this harness must be quoted with the
+corpus it was measured over. The committed corpus currently labels 99 facts
+(68 expected, 31 forbidden) across nine fixtures covering Python, JavaScript,
+TypeScript, Go, Java, Ruby, PHP, YAML/Compose/Kubernetes/Actions config, and
+Markdown. Its `forbidden` entries are the load-bearing half: they pin
+behaviours that are deliberately out of scope — variable-qualified and
+dynamic-receiver calls (D33/D34), Go `INSTANTIATES` (D32), dotenv files never
+being indexed (D35) — plus ordinary false positives such as inbound calls to
+functions nobody calls.
 
 | Capability | Positive examples | Adversarial examples | Primary measures |
 |---|---|---|---|

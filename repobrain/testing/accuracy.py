@@ -1,10 +1,19 @@
-"""Labeled extraction evaluation for deterministic graph facts."""
+"""Labeled extraction evaluation for deterministic graph facts.
+
+Scores are properties of the committed corpus, not of the extractor in
+general (D38): this is a regression gate, and a figure taken from it must be
+quoted with the corpus it was measured over.
+"""
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
+from pathlib import Path
+import tempfile
 from typing import Iterable
 
 from ..graph.store import GraphStore
+from ..indexing.indexer import Indexer
 
 
 def _identity(type_: str, qualified_name: str, name: str, path: str) -> str:
@@ -112,3 +121,85 @@ def evaluate_facts(
         false_negatives=missing,
         false_positives=unexpected,
     )
+
+
+def load_specification(path: str | Path) -> tuple[list[str], list[str]]:
+    """Read and validate an expected/forbidden fact specification."""
+    specification = json.loads(Path(path).read_text(encoding="utf-8"))
+    if not isinstance(specification, dict):
+        raise ValueError(f"accuracy specification must be a JSON object: {path}")
+    labels = []
+    for field in ("expected", "forbidden"):
+        facts = specification.get(field, [])
+        if not isinstance(facts, list) or not all(isinstance(x, str) for x in facts):
+            raise ValueError(
+                f"accuracy specification '{field}' must be an array of strings: {path}"
+            )
+        labels.append(facts)
+    return labels[0], labels[1]
+
+
+def evaluate_repository(
+    repository: str | Path,
+    *,
+    expected: Iterable[str],
+    forbidden: Iterable[str],
+) -> tuple[AccuracyResult, list[str]]:
+    """Index a repository from scratch and score it; also return its warnings."""
+    with tempfile.TemporaryDirectory(prefix="repobrain-accuracy-") as temp_dir:
+        with GraphStore(Path(temp_dir) / "repobrain.sqlite") as store:
+            stats = Indexer(store).index(Path(repository).resolve(), incremental=False)
+            result = evaluate_facts(store, expected=expected, forbidden=forbidden)
+    return result, list(stats.warnings)
+
+
+def evaluate_corpus(manifest_path: str | Path) -> dict:
+    """Score every entry of a labeled corpus and aggregate the totals.
+
+    Entry ``repository`` and ``spec`` paths resolve relative to the manifest,
+    so a corpus can be moved without rewriting every entry.
+    """
+    manifest = Path(manifest_path).resolve()
+    entries = json.loads(manifest.read_text(encoding="utf-8")).get("entries", [])
+    if not isinstance(entries, list) or not entries:
+        raise ValueError(f"corpus manifest must list entries: {manifest}")
+
+    base = manifest.parent
+    scored: list[dict] = []
+    totals: dict[str, float] = {
+        "expected_count": 0, "forbidden_count": 0, "true_positives": 0,
+        "false_positives": 0,
+    }
+    for entry in entries:
+        expected, forbidden = load_specification(base / entry["spec"])
+        result, warnings = evaluate_repository(
+            base / entry["repository"], expected=expected, forbidden=forbidden
+        )
+        payload = result.to_dict()
+        payload["name"] = entry.get("name", entry["repository"])
+        payload["languages"] = entry.get("languages", [])
+        payload["warnings"] = warnings
+        # Extraction warnings mean the indexer could not read part of the
+        # corpus; a score computed over a partial index is not a score.
+        payload["passed"] = payload["passed"] and not warnings
+        scored.append(payload)
+        totals["expected_count"] += result.expected_count
+        totals["forbidden_count"] += result.forbidden_count
+        totals["true_positives"] += result.true_positives
+        totals["false_positives"] += len(result.false_positives)
+
+    retrieved = totals["true_positives"] + totals["false_positives"]
+    totals["precision"] = round(
+        totals["true_positives"] / retrieved if retrieved else 1.0, 6
+    )
+    totals["recall"] = round(
+        totals["true_positives"] / totals["expected_count"]
+        if totals["expected_count"]
+        else 1.0,
+        6,
+    )
+    return {
+        "passed": all(entry["passed"] for entry in scored),
+        "entries": scored,
+        "totals": totals,
+    }

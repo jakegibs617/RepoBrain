@@ -6,6 +6,7 @@ import re
 import shlex
 import subprocess
 from importlib.metadata import PackageNotFoundError, distribution
+from importlib.resources import files
 from pathlib import Path
 
 MARKER_START = "<!-- repobrain:brief:start -->"
@@ -59,6 +60,41 @@ GIT_MARKER_START = "# repobrain:index:start"
 GIT_MARKER_END = "# repobrain:index:end"
 GIT_RUNNER = "repobrain-index"
 GITIGNORE_ENTRY = ".repobrain/"
+SKILL_MARKER = "<!-- repobrain:skill:owned -->"
+SKILL_DIRNAME = Path(".claude") / "skills" / "repobrain"
+SKILL_FILES = ("SKILL.md", "reference.md")
+
+
+def shipped_skill_file(name: str) -> str:
+    """Read a packaged skill file from the wheel rather than the source tree."""
+    return files("repobrain").joinpath("agent_skill", name).read_text(encoding="utf-8")
+
+
+def _prepare_skill(root: Path) -> tuple[dict[Path, str], dict]:
+    """Return the skill files to write plus a JSON-ready status.
+
+    Ownership is carried by a marker inside each file. Removing the marker is
+    how a user adopts the skill: RepoBrain then leaves the whole directory
+    alone rather than pushing upgrades over their edits. An adopted skill is
+    deliberately not a conflict — unlike an MCP entry, a customized skill still
+    works, so it must not fail the rest of the installation.
+    """
+    skill_dir = root / SKILL_DIRNAME
+    status: dict = {"path": str(SKILL_DIRNAME), "installed": True, "changed": False}
+    existing = {}
+    for name in SKILL_FILES:
+        path = skill_dir / name
+        if not path.exists():
+            continue
+        existing[name] = path.read_text(encoding="utf-8")
+        if SKILL_MARKER not in existing[name]:
+            return {}, {**status, "installed": False, "reason": "user_owned"}
+    writes = {
+        skill_dir / name: shipped
+        for name in SKILL_FILES
+        if (shipped := shipped_skill_file(name)) != existing.get(name)
+    }
+    return writes, {**status, "changed": bool(writes)}
 
 
 def mcp_server_entry(root: str | Path) -> dict:
@@ -255,6 +291,7 @@ def install_agent(root: str | Path, *, git_hooks: bool = False) -> dict:
     settings, _, settings_changed = _prepare_settings(settings_path)
     mcp_config, _, mcp_changed = _prepare_mcp(mcp_path, root)
     gitignore_content, gitignore_changed = _prepare_gitignore(gitignore_path)
+    skill_writes, skill_result = _prepare_skill(root)
     # Validate optional Git integration before any configuration is changed.
     if git_hooks:
         _git_hooks_dir(root)
@@ -265,7 +302,9 @@ def install_agent(root: str | Path, *, git_hooks: bool = False) -> dict:
         f"{MARKER_START}\n"
         "## RepoBrain session context\n\n"
         "RepoBrain injects a source-grounded project brief at session start. "
-        "If it reports a stale index, run `repobrain index`.\n"
+        "If it reports a stale index, run `repobrain index`.\n\n"
+        "The `repobrain` skill in `.claude/skills/` covers how to query the index; "
+        "use it for questions about this codebase.\n"
         f"{MARKER_END}\n"
     )
     claude_changed = False
@@ -294,6 +333,9 @@ def install_agent(root: str | Path, *, git_hooks: bool = False) -> dict:
         _write_json(mcp_path, mcp_config)
     if gitignore_changed:
         gitignore_path.write_text(gitignore_content, encoding="utf-8")
+    for skill_file, content in skill_writes.items():
+        skill_file.parent.mkdir(parents=True, exist_ok=True)
+        skill_file.write_text(content, encoding="utf-8")
     if claude_changed:
         if MARKER_START in existing:
             claude_path.write_text(replacement.rstrip("\n") + "\n", encoding="utf-8")
@@ -308,10 +350,11 @@ def install_agent(root: str | Path, *, git_hooks: bool = False) -> dict:
                 "installed": True,
                 "changed": gitignore_changed,
             },
+            "skill": skill_result,
             "git_hooks": git_result,
             "changed": (
                 settings_changed or mcp_changed or gitignore_changed
-                or claude_changed or git_result["changed"]
+                or claude_changed or skill_result["changed"] or git_result["changed"]
             )}
 
 
@@ -400,11 +443,32 @@ def uninstall_agent(root: str | Path) -> dict:
                                    encoding="utf-8")
             changed = True
 
+    skill_result = _uninstall_skill(root)
     git_result = _uninstall_git_hooks(root)
     return {"status": "ok", "settings": str(settings_path.relative_to(root)),
             "claude_md": str(claude_path.relative_to(root)),
-            "mcp_config": str(mcp_path.relative_to(root)), "git_hooks": git_result,
-            "changed": changed or mcp_changed or git_result["changed"]}
+            "mcp_config": str(mcp_path.relative_to(root)), "skill": skill_result,
+            "git_hooks": git_result,
+            "changed": (changed or mcp_changed or skill_result["changed"]
+                        or git_result["changed"])}
+
+
+def _uninstall_skill(root: Path) -> dict:
+    """Delete only marker-bearing skill files, then prune directories we emptied."""
+    skill_dir = root / SKILL_DIRNAME
+    changed = False
+    for name in SKILL_FILES:
+        path = skill_dir / name
+        if not path.exists():
+            continue
+        if SKILL_MARKER not in path.read_text(encoding="utf-8"):
+            continue
+        path.unlink()
+        changed = True
+    for directory in (skill_dir, skill_dir.parent):
+        if directory.is_dir() and not any(directory.iterdir()):
+            directory.rmdir()
+    return {"path": str(SKILL_DIRNAME), "installed": False, "changed": changed}
 
 
 def _git_hooks_dir(root: Path) -> Path:

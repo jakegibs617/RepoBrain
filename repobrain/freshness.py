@@ -7,8 +7,9 @@ from pathlib import Path
 from .config import RepoBrainConfig
 from .graph.store import GraphStore
 from .history import refresh_history
-from .indexing.indexer import Indexer
+from .indexing.indexer import EXTRACTOR_FINGERPRINT_KEY, Indexer
 from .indexing.scanner import scan
+from .parsers.base import default_registry
 
 DEFAULT_MAX_CHANGED_FILES = 10
 DEFAULT_MAX_CHANGED_BYTES = 256 * 1024
@@ -30,9 +31,19 @@ class FreshnessPolicy:
 
 def check_freshness(root: str | Path, store: GraphStore,
                     config: RepoBrainConfig | None = None) -> dict:
-    """Return a cheap size+mtime staleness summary without reading file content."""
+    """Return a cheap size+mtime staleness summary without reading file content.
+
+    Staleness has two independent axes. The working tree moves, which file
+    stat catches; and RepoBrain's own extraction changes, which it cannot —
+    the bytes are identical and the facts derivable from them are not. Both
+    make stored facts untrustworthy, so both set ``is_stale``, but they stay
+    separately reported because only one of them is measured in files.
+    """
     root = Path(root).resolve()
     config = config or RepoBrainConfig.load(root)
+    extractor_changed = (
+        store.get_meta(EXTRACTOR_FINGERPRINT_KEY) != default_registry().fingerprint()
+    )
     scanned = scan(
         root,
         extra_excludes=config.exclude_patterns,
@@ -53,7 +64,8 @@ def check_freshness(root: str | Path, store: GraphStore,
         + sum(known[path]["size"] for path in deleted)
     )
     return {
-        "is_stale": bool(added or changed or deleted),
+        "is_stale": bool(added or changed or deleted or extractor_changed),
+        "extractor_changed": extractor_changed,
         "out_of_date_count": len(added) + len(changed) + len(deleted),
         "changed_bytes": changed_bytes,
         "added": added,

@@ -1,47 +1,67 @@
-"""Index a repository and score it against a labeled graph-fact specification."""
+"""Score extraction against labeled ground truth.
+
+Two forms:
+
+    evaluate_extraction.py <repository> <spec.json>
+    evaluate_extraction.py --corpus docs/evaluation/corpus.json
+
+Both exit non-zero on a missing expected fact, a present forbidden fact, or an
+extraction warning. Scores describe the labeled corpus, not repositories in
+general (D38).
+"""
 from __future__ import annotations
 
 import argparse
 import json
 from pathlib import Path
-import tempfile
 
-from repobrain.graph.store import GraphStore
-from repobrain.indexing.indexer import Indexer
-from repobrain.testing.accuracy import evaluate_facts
+from repobrain.testing.accuracy import (
+    evaluate_corpus,
+    evaluate_repository,
+    load_specification,
+)
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser()
-    parser.add_argument("repository", type=Path)
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("repository", type=Path, nargs="?")
     parser.add_argument(
         "spec",
         type=Path,
+        nargs="?",
         help="JSON object with expected and forbidden fact-key arrays",
+    )
+    parser.add_argument(
+        "--corpus",
+        type=Path,
+        help="JSON manifest scoring several labeled repositories in one run",
     )
     args = parser.parse_args()
 
-    try:
-        specification = json.loads(args.spec.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
-        parser.error(f"cannot read accuracy specification: {exc}")
-    if not isinstance(specification, dict):
-        parser.error("accuracy specification must be a JSON object")
-    expected = specification.get("expected", [])
-    forbidden = specification.get("forbidden", [])
-    if not isinstance(expected, list) or not all(isinstance(x, str) for x in expected):
-        parser.error("accuracy specification 'expected' must be an array of strings")
-    if not isinstance(forbidden, list) or not all(isinstance(x, str) for x in forbidden):
-        parser.error("accuracy specification 'forbidden' must be an array of strings")
+    if args.corpus:
+        if args.repository or args.spec:
+            parser.error("--corpus scores a whole manifest; pass no positional paths")
+        try:
+            report = evaluate_corpus(args.corpus)
+        except (OSError, ValueError, json.JSONDecodeError, KeyError) as exc:
+            parser.error(f"cannot evaluate corpus: {exc}")
+        print(json.dumps(report, indent=2, sort_keys=True))
+        return 0 if report["passed"] else 1
 
-    with tempfile.TemporaryDirectory(prefix="repobrain-accuracy-") as temp_dir:
-        with GraphStore(Path(temp_dir) / "repobrain.sqlite") as store:
-            stats = Indexer(store).index(args.repository.resolve(), incremental=False)
-            result = evaluate_facts(store, expected=expected, forbidden=forbidden)
+    if not args.repository or not args.spec:
+        parser.error("pass a repository and a spec, or --corpus")
+    try:
+        expected, forbidden = load_specification(args.spec)
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        parser.error(f"cannot read accuracy specification: {exc}")
+
+    result, warnings = evaluate_repository(
+        args.repository, expected=expected, forbidden=forbidden
+    )
     payload = result.to_dict()
-    payload["warnings"] = stats.warnings
+    payload["warnings"] = warnings
     print(json.dumps(payload, indent=2, sort_keys=True))
-    return 0 if result.passed and not stats.warnings else 1
+    return 0 if result.passed and not warnings else 1
 
 
 if __name__ == "__main__":
