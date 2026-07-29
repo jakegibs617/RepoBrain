@@ -17,6 +17,25 @@ from .indexing.doc_references import MarkdownMentionReconciler
 from .indexing.scanner import detect_language
 from .parsers.base import default_registry
 
+#: Approximate token ceiling for a change context, on ``brief``'s deterministic
+#: ceil(chars / 4) heuristic. Chosen so an ordinary working diff is never
+#: touched while the pathological case stays inside what a session can spend:
+#: the two-commit diff that motivated this emitted ~461,000 tokens.
+DEFAULT_CHANGE_BUDGET = 15_000
+MINIMUM_CHANGE_BUDGET = 256
+
+#: Lowest-priority first. Trimming starts at the top of this list, so the diff
+#: itself is the last thing to go and the evidence derived from it goes first.
+_TRIM_ORDER: tuple[tuple[str, str | None], ...] = (
+    ("historical_impact", "items"),
+    ("docs_to_review", None),
+    ("impact", "low_confidence"),
+    ("impact", "medium_confidence"),
+    ("impact", "high_confidence"),
+    ("tests_to_run", None),
+    ("changes", None),
+)
+
 _HUNK = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@", re.MULTILINE)
 _SYMBOL_TYPES = {
     "Function", "Method", "Class", "Variable", "TestCase", "Route", "Endpoint",
@@ -36,13 +55,20 @@ def change_context(
     base: str | None = None,
     auto_index: bool = True,
     include_text: bool = True,
+    budget: int | None = None,
 ) -> dict:
     """Capture a Git change set, repair freshness, then resolve grounded context.
 
     ``include_text`` renders the human report into the payload. Machine-readable
     surfaces turn it off: it restates the whole structured result in prose, so a
     caller that parses the structure pays for it twice.
+
+    ``budget`` caps the approximate token count on ``brief``'s deterministic
+    ceil(chars / 4) heuristic, trimming lowest-priority evidence first and
+    always reporting what it removed. ``None`` emits everything.
     """
+    if budget is not None and budget < MINIMUM_CHANGE_BUDGET:
+        raise ValueError(f"budget must be at least {MINIMUM_CHANGE_BUDGET} tokens")
     root = Path(root).resolve()
     captured = capture_git_changes(root, base=base)
     freshness = ensure_fresh(root, store, auto_index=auto_index)
@@ -93,6 +119,8 @@ def change_context(
         "docs_to_review": docs,
         "unknowns": impact_unknowns,
     }
+    if budget is not None:
+        _apply_budget(result, budget)
     if include_text:
         result["text"] = render_change_context(result)
     return result
@@ -567,6 +595,77 @@ def _historical_path_doc_candidates(
     return results
 
 
+def _payload_chars(result: dict) -> int:
+    return len(json.dumps(result))
+
+
+def _prune_reasons(result: dict) -> None:
+    """Drop reasons nothing cites and renumber what is left.
+
+    Trimming an item takes its citations with it, so without this a budgeted
+    payload spends its allowance on attribution for facts it no longer carries.
+    """
+    cited = sorted(
+        {index for bucket in result["impact"].values()
+         for item in bucket for index in item["reason_ids"]}
+        | {index for item in result["tests_to_run"] for index in item["reason_ids"]}
+    )
+    renumbered = {old: new for new, old in enumerate(cited)}
+    result["reasons"] = [result["reasons"][index] for index in cited]
+    for bucket in result["impact"].values():
+        for item in bucket:
+            item["reason_ids"] = [renumbered[index] for index in item["reason_ids"]]
+    for item in result["tests_to_run"]:
+        item["reason_ids"] = [renumbered[index] for index in item["reason_ids"]]
+
+
+def _apply_budget(result: dict, budget: int) -> None:
+    """Trim lowest-priority evidence until the payload fits, and report it.
+
+    Truncation is reported rather than silent: a caller that cannot tell a
+    trimmed impact set from a complete one will treat it as complete, which is
+    the confidently-wrong answer the freshness gate exists to prevent.
+    """
+    limit = budget * 4
+    dropped: dict[str, int] = {}
+    # Installed before measuring so the report of the trimming is itself inside
+    # the budget rather than pushing the payload back over it.
+    result["budget"] = budget
+    result["token_heuristic"] = "ceil(characters / 4)"
+    result["token_estimate"] = budget
+    result["truncation"] = {"applied": False, "budget": budget,
+                            "within_budget": True, "dropped": dropped}
+
+    remaining = _payload_chars(result)
+    for key, sub in _TRIM_ORDER:
+        container = result[key] if sub is None else result[key][sub]
+        label = key if sub is None else f"{key}.{sub}"
+        while container and remaining > limit:
+            # Decrement by the removed item rather than re-serializing the whole
+            # payload per pop; the exact size is recomputed below.
+            remaining -= len(json.dumps(container.pop())) + 1
+            dropped[label] = dropped.get(label, 0) + 1
+    if dropped:
+        _prune_reasons(result)
+    while _payload_chars(result) > limit:
+        for key, sub in _TRIM_ORDER:
+            container = result[key] if sub is None else result[key][sub]
+            if container:
+                container.pop()
+                label = key if sub is None else f"{key}.{sub}"
+                dropped[label] = dropped.get(label, 0) + 1
+                break
+        else:
+            break
+        _prune_reasons(result)
+    result["truncation"]["applied"] = bool(dropped)
+    result["token_estimate"] = (_payload_chars(result) + 3) // 4
+    # Every trimmable list can be emptied and the payload still costs what its
+    # own scaffolding costs — status, head, the freshness envelope. A budget
+    # under that floor is unmeetable, and saying so beats implying it was met.
+    result["truncation"]["within_budget"] = result["token_estimate"] <= budget
+
+
 def render_change_context(result: dict) -> str:
     lines = ["RepoBrain change context", f"Mode: {result['mode']}"]
     if result.get("base"):
@@ -615,4 +714,12 @@ def render_change_context(result: dict) -> str:
     if result["unknowns"]:
         lines.append("\nUnknowns")
         lines.extend(f"- {item}" for item in result["unknowns"])
+    truncation = result.get("truncation") or {}
+    if truncation.get("applied"):
+        lines.append(f"\nTruncated to fit {truncation['budget']} tokens")
+        lines.extend(f"- {label}: {count} item(s) not shown"
+                     for label, count in sorted(truncation["dropped"].items()))
+        if not truncation.get("within_budget", True):
+            lines.append(f"- Still over budget at {result['token_estimate']} tokens; "
+                         "nothing further can be dropped.")
     return "\n".join(lines) + "\n"

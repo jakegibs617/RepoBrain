@@ -5,7 +5,12 @@ from pathlib import Path
 import pytest
 from click.testing import CliRunner
 
-from repobrain.change_context import GitDiffError, capture_git_changes, change_context
+from repobrain.change_context import (
+    MINIMUM_CHANGE_BUDGET,
+    GitDiffError,
+    capture_git_changes,
+    change_context,
+)
 from repobrain.cli import main
 from repobrain.graph.store import GraphStore
 from repobrain.indexing.indexer import Indexer
@@ -323,6 +328,76 @@ def test_cli_and_mcp_change_context_have_matching_grounded_sections(small_app):
     assert human.exit_code == 0, human.output
     assert "Tests to run" in human.output
     assert "Docs to review" in human.output
+
+
+def test_a_budget_trims_from_the_bottom_and_says_so(small_app):
+    """Silent truncation is the confidently-wrong answer the gate exists to stop.
+
+    A caller that cannot tell a complete impact set from a trimmed one will
+    treat the trimmed one as complete, which is worse than being told the
+    payload was too large.
+    """
+    _init_repo(small_app)
+    with _indexed(small_app) as store:
+        _change_create_user(small_app)
+        full = change_context(small_app, store, include_text=False)
+        trimmed = change_context(small_app, store, budget=1200, include_text=False)
+
+    assert trimmed["truncation"]["applied"] is True
+    assert trimmed["truncation"]["within_budget"] is True
+    assert trimmed["token_estimate"] <= 1200
+    assert trimmed["truncation"]["budget"] == 1200
+    assert sum(trimmed["truncation"]["dropped"].values()) > 0
+    # The diff itself outranks everything derived from it.
+    assert len(trimmed["changes"]) == len(full["changes"])
+    assert len(trimmed["docs_to_review"]) < len(full["docs_to_review"])
+    # A trimmed payload must not carry attribution nothing left in it cites.
+    cited = {index for bucket in trimmed["impact"].values()
+             for item in bucket for index in item["reason_ids"]}
+    cited |= {index for item in trimmed["tests_to_run"] for index in item["reason_ids"]}
+    assert cited <= set(range(len(trimmed["reasons"])))
+    assert len(trimmed["reasons"]) == len(cited)
+
+
+def test_a_budget_below_the_payload_floor_reports_that_it_was_not_met(small_app):
+    """Trimming everything still leaves the scaffolding, and that is reportable.
+
+    Claiming a budget was met when it was not is the same class of quiet lie as
+    truncating without saying so.
+    """
+    _init_repo(small_app)
+    with _indexed(small_app) as store:
+        _change_create_user(small_app)
+        result = change_context(small_app, store, budget=MINIMUM_CHANGE_BUDGET,
+                                include_text=True)
+
+    assert result["truncation"]["applied"] is True
+    assert result["truncation"]["within_budget"] is False
+    assert result["token_estimate"] > MINIMUM_CHANGE_BUDGET
+    assert "nothing further can be dropped" in result["text"]
+
+
+def test_a_budget_under_the_minimum_is_refused_rather_than_guessed(small_app):
+    _init_repo(small_app)
+    with _indexed(small_app) as store:
+        with pytest.raises(ValueError, match="at least"):
+            change_context(small_app, store, budget=MINIMUM_CHANGE_BUDGET - 1)
+
+
+def test_a_payload_inside_its_budget_is_left_exactly_alone(small_app):
+    _init_repo(small_app)
+    with _indexed(small_app) as store:
+        _change_create_user(small_app)
+        unbudgeted = change_context(small_app, store, include_text=False)
+        budgeted = change_context(small_app, store, budget=100_000, include_text=False)
+
+    assert budgeted["truncation"]["applied"] is False
+    assert budgeted["truncation"]["dropped"] == {}
+    # `freshness` describes the gate pass, not the payload, and the first call
+    # is the one that repaired the index.
+    metadata = {"truncation", "token_estimate", "token_heuristic", "budget", "freshness"}
+    assert ({key: value for key, value in budgeted.items() if key not in metadata}
+            == {key: value for key, value in unbudgeted.items() if key not in metadata})
 
 
 def test_freshness_failure_returns_no_change_facts(small_app):

@@ -12,7 +12,12 @@ from .config import CONFIG_FILENAME, REPOBRAIN_DIR, RepoBrainConfig
 from .agent_install import install_agent as run_install_agent
 from .agent_install import uninstall_agent as run_uninstall_agent
 from .briefing import DEFAULT_BUDGET, MINIMUM_BUDGET, project_brief
-from .change_context import GitDiffError, change_context as run_change_context
+from .change_context import (
+    DEFAULT_CHANGE_BUDGET,
+    MINIMUM_CHANGE_BUDGET,
+    GitDiffError,
+    change_context as run_change_context,
+)
 from .diagnostics import configure_logging, log_event
 from .graph.queries import explain_file as run_explain_file
 from .graph.queries import CHANGE_TYPES
@@ -340,18 +345,23 @@ def brief(budget: int, path: str, as_json: bool, no_auto_index: bool) -> None:
 
 @main.command("change-context")
 @click.option("--base", default=None, help="Compare merge-base(BASE, HEAD) to HEAD.")
+@click.option("--budget", type=click.IntRange(min=MINIMUM_CHANGE_BUDGET),
+              default=DEFAULT_CHANGE_BUDGET, show_default=True,
+              help="Approximate token budget (ceil(chars/4)); truncation is reported.")
 @click.option("--path", "path", type=click.Path(exists=True, file_okay=False), default=".",
               show_default=True, help="Repository root whose change set to inspect.")
 @click.option("--json", "as_json", is_flag=True, help="Machine-readable output.")
 @_freshness_option
-def change_context(base: str | None, path: str, as_json: bool, no_auto_index: bool) -> None:
+def change_context(base: str | None, budget: int, path: str, as_json: bool,
+                   no_auto_index: bool) -> None:
     """Explain a working-tree or branch diff with impact, tests, and doc review."""
     root = _resolve_root(path)
     try:
         with _open_store(root, gate=False) as store:
             result = run_change_context(root, store, base=base,
                                         auto_index=not no_auto_index,
-                                        include_text=not as_json)
+                                        include_text=not as_json,
+                                        budget=budget)
     except GitDiffError as exc:
         raise click.ClickException(str(exc)) from exc
     if result["status"] != "ok":
