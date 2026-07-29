@@ -359,6 +359,62 @@ def test_a_budget_trims_from_the_bottom_and_says_so(small_app):
     assert len(trimmed["reasons"]) == len(cited)
 
 
+def test_a_wide_diff_keeps_the_content_its_budget_can_afford(tmp_path):
+    """Trimming must stop when the payload fits, not when the lists run out.
+
+    The reason table shrinks as the items citing it are dropped, which a
+    running per-item estimate cannot see. Without periodic resynchronisation
+    the estimate never falls below the table's own size, so a budget with room
+    to spare empties every list — including the diff. Only a diff wide enough
+    for the table to be a large share of the payload exposes it.
+    """
+    root = tmp_path / "repo"
+    root.mkdir()
+    # Eight changed cores, each with several symbols, so the reason table is
+    # large relative to the payload; thirty dependents so the impact set citing
+    # it is large too. Eight stays inside the auto-index threshold.
+    for core in range(8):
+        (root / f"configuration_core_{core}.py").write_text("\n\n".join(
+            f"def read_configuration_value_{core}_{slot}():\n    return {slot}\n"
+            for slot in range(4)
+        ))
+    imports = "\n".join(
+        f"from configuration_core_{core} import read_configuration_value_{core}_0"
+        for core in range(8)
+    )
+    for index in range(30):
+        (root / f"app_{index:02d}.py").write_text(
+            f"{imports}\n\n\ndef use_{index:02d}():\n    return "
+            + " + ".join(f"read_configuration_value_{core}_0()" for core in range(8))
+            + "\n"
+        )
+    _init_repo(root)
+    with _indexed(root) as store:
+        for core in range(8):
+            # Rewrite every line so all four functions fall inside the diff
+            # range and each becomes its own changed target.
+            (root / f"configuration_core_{core}.py").write_text("\n\n".join(
+                f"def read_configuration_value_{core}_{slot}():\n"
+                f"    return {slot} + 1\n"
+                for slot in range(4)
+            ))
+        full = change_context(root, store, include_text=False)
+        reason_tokens = (len(json.dumps(full["reasons"])) + 3) // 4
+        # Below the untrimmed reason table, above the payload's own floor: the
+        # band in which the unresynchronised estimate could never converge.
+        budget = max(MINIMUM_CHANGE_BUDGET, reason_tokens - 1)
+        trimmed = change_context(root, store, budget=budget, include_text=False)
+
+    assert reason_tokens > MINIMUM_CHANGE_BUDGET, "fixture too small to test this"
+    assert trimmed["truncation"]["applied"] is True
+    assert trimmed["changes"], "trimming emptied the diff a smaller payload could hold"
+    # Whatever attribution survives must belong to something still present.
+    cited = {index for bucket in trimmed["impact"].values()
+             for item in bucket for index in item["reason_ids"]}
+    cited |= {index for item in trimmed["tests_to_run"] for index in item["reason_ids"]}
+    assert len(trimmed["reasons"]) == len(cited)
+
+
 def test_a_budget_below_the_payload_floor_reports_that_it_was_not_met(small_app):
     """Trimming everything still leaves the scaffolding, and that is reportable.
 

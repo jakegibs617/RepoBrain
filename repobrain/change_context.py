@@ -36,6 +36,11 @@ _TRIM_ORDER: tuple[tuple[str, str | None], ...] = (
     ("changes", None),
 )
 
+#: Pops between exact re-measurements while trimming. Small enough that the
+#: running estimate never drifts far, large enough to keep the number of full
+#: serializations proportional to the overshoot rather than to the item count.
+_RESYNC_EVERY = 25
+
 _HUNK = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@", re.MULTILINE)
 _SYMBOL_TYPES = {
     "Function", "Method", "Class", "Variable", "TestCase", "Route", "Endpoint",
@@ -638,15 +643,22 @@ def _apply_budget(result: dict, budget: int) -> None:
 
     remaining = _payload_chars(result)
     for key, sub in _TRIM_ORDER:
+        if remaining <= limit:
+            break
         container = result[key] if sub is None else result[key][sub]
         label = key if sub is None else f"{key}.{sub}"
         while container and remaining > limit:
             # Decrement by the removed item rather than re-serializing the whole
-            # payload per pop; the exact size is recomputed below.
+            # payload per pop, resynchronising periodically: dropping an item
+            # also releases the reasons only it cited, which this estimate
+            # cannot see and which is large enough to matter.
             remaining -= len(json.dumps(container.pop())) + 1
             dropped[label] = dropped.get(label, 0) + 1
-    if dropped:
+            if dropped[label] % _RESYNC_EVERY == 0:
+                _prune_reasons(result)
+                remaining = _payload_chars(result)
         _prune_reasons(result)
+        remaining = _payload_chars(result)
     while _payload_chars(result) > limit:
         for key, sub in _TRIM_ORDER:
             container = result[key] if sub is None else result[key][sub]
