@@ -11,27 +11,58 @@ from .memory import read_agent_memory
 DEFAULT_BUDGET = 2000
 MINIMUM_BUDGET = 64
 
+#: Directory segments whose contents are indexed but do not describe the
+#: project that ships them. Deliberately *not* the parser's `_TEST_DIRS`: that
+#: set decides `TestFile` classification for the whole graph — including which
+#: tests `impact` recommends running — and an `examples/` directory is not a
+#: test. This one is local to promotion and costs no re-extraction.
+_UNREPRESENTATIVE_DIRS = ("examples", "example", "fixtures", "fixture",
+                          "samples", "sample")
+
 
 def _source(row) -> str:
     path = row["path"] or ".repobrain/agent_memory.md"
     return f"{path}:{row['start_line']}" if row["start_line"] else path
 
 
+#: Edges that say a node is *made of* something rather than *wired to*
+#: something. Counting them ranks by symbol count, which is file size wearing
+#: a graph costume — the biggest test file wins.
+_STRUCTURAL_EDGES = ("DEFINES", "CONTAINS")
+
+#: How connected a node is: the edges it is either end of, containment aside.
+#: At module granularity this is almost entirely IMPORTS, i.e. how much of the
+#: project is wired to it. Both endpoints are index-served.
+_DEGREE = (
+    "(SELECT count(*) FROM edges e "
+    " WHERE (e.source_node_id=nodes.id OR e.target_node_id=nodes.id) "
+    f" AND e.type NOT IN ({','.join('?' for _ in _STRUCTURAL_EDGES)}))"
+)
+
+
 def _node_facts(store: GraphStore, types: tuple[str, ...], limit: int,
-                *, exclude_test_paths: bool = False) -> list[dict]:
+                *, by_degree: bool = False) -> list[dict]:
     marks = ",".join("?" for _ in types)
     # A file the code parser classified as a test carries a TestFile node at the
-    # same path. That is already in the graph, so "indexed but not
-    # representative" needs no second mechanism to express.
-    test_path_clause = (
-        "AND NOT EXISTS (SELECT 1 FROM nodes t WHERE t.type='TestFile' AND t.path=nodes.path) "
-        if exclude_test_paths else ""
+    # same path. That is already in the graph, so "is a test" needs no second
+    # mechanism to express. "Not representative" is the wider question and is
+    # answered here, at promotion time, by path segment.
+    globs = " OR ".join(
+        "nodes.path GLOB ? OR nodes.path GLOB ?" for _ in _UNREPRESENTATIVE_DIRS
     )
+    patterns = [pattern for segment in _UNREPRESENTATIVE_DIRS
+                for pattern in (f"{segment}/*", f"*/{segment}/*")]
+    # Path length is a tie-break, never the ranking: it says nothing about
+    # relevance, and on its own it hands the twelve promoted slots to whichever
+    # modules happen to sit nearest the repository root.
+    degree = f"{_DEGREE} DESC," if by_degree else ""
     rows = store.conn.execute(
         f"SELECT type,name,qualified_name,path,start_line,metadata_json FROM nodes "
-        f"WHERE type IN ({marks}) AND start_line IS NOT NULL {test_path_clause}"
-        f"ORDER BY length(path),path,start_line,name LIMIT ?",
-        (*types, limit),
+        f"WHERE type IN ({marks}) AND start_line IS NOT NULL "
+        f"AND NOT EXISTS (SELECT 1 FROM nodes t WHERE t.type='TestFile' AND t.path=nodes.path) "
+        f"AND NOT ({globs}) "
+        f"ORDER BY {degree} length(path),path,start_line,name LIMIT ?",
+        (*types, *patterns, *(_STRUCTURAL_EDGES if by_degree else ()), limit),
     ).fetchall()
     return [
         {"text": row["qualified_name"] or row["name"], "type": row["type"],
@@ -162,8 +193,8 @@ def project_brief(
     candidates = [
         ("Memory requiring attention", alerts),
         ("Purpose", _purpose_facts(store)),
-        ("Subsystems", _node_facts(store, ("Directory", "Module"), 12)),
-        ("Entrypoints", _node_facts(store, ("Route",), 12, exclude_test_paths=True)),
+        ("Subsystems", _node_facts(store, ("Directory", "Module"), 12, by_degree=True)),
+        ("Entrypoints", _node_facts(store, ("Route",), 12)),
         ("Configuration", _node_facts(store, ("ConfigFile", "ConfigKey", "EnvVar"), 12)),
         ("Active assumptions", assumptions),
         ("Open questions", questions),

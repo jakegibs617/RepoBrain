@@ -94,6 +94,54 @@ def test_brief_omits_entrypoints_found_only_under_test_paths(small_app, tmp_path
     assert all(section["title"] != "Entrypoints" for section in result["sections"])
 
 
+def test_brief_ranks_subsystems_by_how_connected_they_are(tmp_path):
+    """Twelve slots spent on the shortest paths is not a relevance ranking.
+
+    The module every other module imports is the one an agent needs named
+    first, however deep it sits; a short-pathed leaf that nothing depends on
+    is not a subsystem of anything.
+    """
+    root = tmp_path / "project"
+    (root / "core" / "services").mkdir(parents=True)
+    (root / "core" / "services" / "settings_registry.py").write_text(
+        "def load_settings():\n    return {}\n"
+    )
+    for index in range(12):
+        (root / f"m{index}.py").write_text(
+            "from core.services.settings_registry import load_settings\n\n\n"
+            f"def use_{index}():\n    return load_settings()\n"
+        )
+    with _indexed(root) as store:
+        result = project_brief(root, store, budget=2000)
+
+    subsystems = next(section for section in result["sections"]
+                      if section["title"] == "Subsystems")
+    names = [fact["text"] for fact in subsystems["facts"]]
+    assert names[0] == "core.services.settings_registry", names
+
+
+def test_brief_omits_entrypoints_found_only_under_example_paths(small_app, tmp_path):
+    """A sample application is not a description of the project that ships it.
+
+    D43 fixed this repository only because its fixtures live under `tests/`.
+    An `examples/` directory is the more common layout and is not a test, so
+    the predicate that withholds promotion cannot be the one that classifies
+    test files.
+    """
+    root = tmp_path / "project"
+    root.mkdir(parents=True)
+    shutil.move(str(small_app), str(root / "examples" / "small_python_app"))
+    with _indexed(root) as store:
+        result = project_brief(root, store, budget=2000)
+        routes = [
+            row["path"]
+            for row in store.conn.execute("SELECT path FROM nodes WHERE type='Route'")
+        ]
+
+    assert routes, "the example app's routes must still be extracted into the graph"
+    assert all(section["title"] != "Entrypoints" for section in result["sections"])
+
+
 def test_brief_detects_added_changed_and_deleted_files(small_app):
     with _indexed(small_app) as store:
         assert project_brief(small_app, store)["staleness"]["is_stale"] is False

@@ -1109,6 +1109,11 @@ def test_is_test_file_conventions():
     assert is_test_file("__tests__/thing.js")
     assert not is_test_file("app/services/user_service.py")
     assert not is_test_file("src/testimonials.js")
+    # A sample application is not a test. The brief withholds promotion from
+    # these paths, but that is a promotion decision made at query time; calling
+    # them tests here would make `impact` recommend running them.
+    assert not is_test_file("examples/small_app/routes.py")
+    assert not is_test_file("samples/demo/app.py")
 
 
 # -- Go import resolution (D19) ------------------------------------------------
