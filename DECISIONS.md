@@ -1303,3 +1303,48 @@ stored facts untrustworthy, so both set `is_stale` and both are repaired the
 same way. They stay separately reported because only one of them is measured in
 files: saying "0 file(s) are out of date" about a graph that is entirely out of
 date would be technically true and actively misleading.
+
+## 2026-07-29 — Brief promotion is a ranking question
+
+### D43: The brief withholds entrypoint promotion from test paths, using the `TestFile` node the graph already carries
+
+`repobrain brief` on this repository promoted four `Route` nodes as its
+Entrypoints section. All four were test fixtures —
+`tests/fixtures/node_api_app/src/routes/users.js` and
+`tests/fixtures/small_python_app/app/api/routes.py` — and they were not merely
+ranked too highly: they were the *only* `Route` nodes in the graph, because
+RepoBrain is a CLI with no routes of its own. The correct output was an absent
+section, and what shipped was 100% noise in the first thing an agent reads at
+session start.
+
+**The signal was already in the graph.** `is_test_file`
+(`repobrain/parsers/code_treesitter.py:181`) already classifies both files, so
+each carries a `TestFile` node at the same path. `briefing.py` simply never
+asked. The Entrypoints query now excludes rows with a `TestFile` sibling at
+their path. No new configuration key, no second list, no parser change.
+
+**Ranking, not filtering.** The nodes stay in the graph and stay reachable
+through `search`, `explain file`, and `impact` — verified, `search "POST
+/api/users"` still returns both. Only promotion is withheld. `include_patterns`
+/ `exclude_patterns` were the obvious place to look and are the wrong
+mechanism: they govern what is *indexed*, so expressing "indexed but not
+representative" through them would delete the fixtures every fixture-based test
+depends on.
+
+**`reporting.py` deliberately keeps listing them.** `project_overview`
+(`repobrain/reporting.py:18`) promotes `nodes("Route")` under "Detected
+Routes". That surface is a full inventory of what extraction found, not a
+description of what the project *is*; suppressing rows there would make the
+report lie about the graph. The inconsistency between the two surfaces is the
+point — they answer different questions.
+
+**Known limitation: `examples/` and `fixtures/` are not covered.**
+`is_test_file` matches the path segments `{tests, test, __tests__, spec}`, so
+this repository is fixed only because its fixtures live under `tests/`. A user
+whose sample application sits in a top-level `examples/` directory still gets
+its routes promoted. Extending `_TEST_DIRS` was rejected as the fix here: that
+set feeds `TestFile` classification globally, including `recommended_tests` in
+`impact_analysis` (`repobrain/graph/queries.py:896`), and changing it is an
+extraction change that would have to move the extractor fingerprint. Widening
+what counts as non-representative is its own decision and should not ride along
+inside a brief-ranking fix.
