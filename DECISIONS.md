@@ -1572,3 +1572,81 @@ the section is absent rather than wrong, and `search` still finds everything.
 **Incidental, recorded so nobody re-derives it:** `Directory` nodes never carry
 a `start_line`, so `_node_facts(store, ("Directory", "Module"), 12)` has only
 ever returned Modules. Left alone.
+
+## 2026-07-29 — The diff is the part the agent can already get
+
+### D47: `change-context` sheds change-record fidelity, in reported stages, before it gives up the evidence derived from the diff
+
+D45 shipped a budget and named its own consequence: at the 15,000-token
+default, a wide diff yielded 27 of 87 changed files and **zero** impact and
+**zero** tests. `_TRIM_ORDER` ranked the diff above everything derived from it,
+so the command spent its whole allowance restating what `git diff --stat`
+prints for free and emitted none of the blast radius, which exists nowhere
+else. That is not a smaller version of the answer; it is a worse version of a
+tool the agent already has.
+
+**The queued hypothesis was measured first, and it was wrong.** D45 suspected a
+second lossless pass would move enough that no priority change was needed:
+symbol records still carried `path` (the enclosing change record has it) and
+`provenance` (derivable from that path and `start_line`). Measured on the
+86-file diff — 573,448 chars, 143,362 tokens:
+
+| variant | `changes` | at budget 15,000 |
+| --- | ---: | --- |
+| as shipped | 47,738 tok | 27/86 changes, 0 impact, 0 tests |
+| drop symbol `path` + `provenance` | 38,058 tok | 33/86 changes, **0** impact, **0** tests |
+| drop every symbol record | 14,349 tok | 86/86 changes, **0** impact, **0** tests |
+| drop symbols + `file_node` + `line_ranges` | 7,747 tok | 86/86 changes, 15 impact, 32 tests |
+
+The lossless pass is worth taking and is taken — it is free — but 9,680 tokens
+buys six more change records and no evidence at all. Even discarding every
+symbol leaves the 86 file-level records costing 14,349 tokens of a 15,000
+budget. Recorded so nobody re-runs this experiment.
+
+**The second finding is structural.** `_TRIM_ORDER` is a strict priority list
+and trimming stops the moment the payload fits, so nothing ranked below
+`changes` can ever be traded for something above it. Three reorderings within
+the existing list were measured; all three still emit 0 impact and 0 tests at
+the default. Reordering was not the fix either.
+
+**Fidelity, not width, is what the budget buys.** D45's own candidate was to
+degrade `changes` to paths-only past some diff width. Width is the wrong
+trigger: it is a constant somebody has to tune, and the budget already knows
+when it is short. `changes` instead exposes three trim tiers —
+`changes.symbols`, `changes.file_node`, `changes.line_ranges` — placed above
+the weakest impact and below the strongest. The budget decides how far
+degradation goes, and an ordinary diff never reaches any of it: the 10-file and
+3-file diffs are byte-identical to before across budgets 15,000 / 30,000 /
+60,000.
+
+Measured on this repository's own 87-file diff at the default:
+**27/87 changes, 0 impact, 0 tests → 87/87 changes, 18 impact, 32 tests.**
+
+**Why those three and in that order.** `git diff` restates symbol spans, file
+identity, and changed line ranges for free; the blast radius and the tests to
+run do not exist outside this index. The set of changed *paths* stays the last
+thing to go, exactly as before — an agent that has lost a path has lost the
+question, not just the answer.
+
+**Degradation is reported, never silent** — the same rule D45 set for dropped
+items. Each tier lands in `truncation.dropped` under its own label and prints
+through the human renderer. A caller that could not distinguish a symbol-free
+change record from a file with no changed symbols would conclude the second,
+which is the confidently-wrong answer the freshness gate exists to prevent. The
+regression test asserts the reported count plus the surviving count equals the
+original, and was mutation-checked by degrading symbols silently before the
+trim loop.
+
+**`source_revision` moved up, not away.** Symbols parsed from a deleted file's
+old Git blob had a `git:REV:path:line` provenance string that is *not*
+derivable from the change record — the revision appeared nowhere else. Deleting
+it would have quietly presented historical line numbers as current ones. The
+revision is now stated once on the change record instead of once per symbol,
+which is the same hoist D45 applied to `changed_because`, and the human surface
+still renders `git:REV:` per symbol.
+
+**`_apply_budget` resolves its targets once.** The fidelity tiers are list
+views over the change records rather than lists inside `result`, so
+`_TRIM_ORDER` is now a flat sequence of labels resolved to `(label, container)`
+pairs before trimming starts. Rebuilding a view mid-trim would rebuild it
+against records it has already popped from.

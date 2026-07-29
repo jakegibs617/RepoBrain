@@ -6,10 +6,12 @@ import pytest
 from click.testing import CliRunner
 
 from repobrain.change_context import (
+    DEFAULT_CHANGE_BUDGET,
     MINIMUM_CHANGE_BUDGET,
     GitDiffError,
     capture_git_changes,
     change_context,
+    render_change_context,
 )
 from repobrain.cli import main
 from repobrain.graph.store import GraphStore
@@ -150,7 +152,13 @@ def test_rename_and_delete_keep_old_paths_and_deleted_symbol_evidence(small_app)
     assert deleted["old_path"] == "app/services/user_service.py"
     assert deleted["new_path"] is None
     assert any(item["name"] == "create_user" for item in deleted["symbols"])
-    assert all(item["provenance"].startswith("git:") for item in deleted["symbols"])
+    # These symbols were read out of a Git blob that no longer exists, so their
+    # line numbers are historical. The record says so once rather than on every
+    # symbol, and the human surface still renders it per symbol.
+    assert deleted["source_revision"]
+    assert all("provenance" not in item for item in deleted["symbols"])
+    rendered = render_change_context(result)
+    assert f"(git:{deleted['source_revision']}:app/services/user_service.py:" in rendered
     assert any("deleted path app/services/user_service.py" in item for item in result["unknowns"])
     old_targets = {item["target"]["path"] for item in result["docs_to_review"]}
     assert "app/db/config.py" in old_targets
@@ -415,6 +423,89 @@ def test_a_wide_diff_keeps_the_content_its_budget_can_afford(tmp_path):
     assert len(trimmed["reasons"]) == len(cited)
 
 
+def _wide_committed_diff(root: Path, *, cores: int = 30, symbols: int = 8) -> None:
+    """A committed diff wide enough that full-fidelity `changes` alone busts the
+    default budget, with dependents and tests so there is real evidence to lose.
+    """
+    root.mkdir()
+    (root / "tests").mkdir()
+    for core in range(cores):
+        (root / f"configuration_core_{core:02d}.py").write_text("\n\n".join(
+            f"def read_configuration_value_{core:02d}_{slot}():\n    return {slot}\n"
+            for slot in range(symbols)
+        ))
+    imports = "\n".join(
+        f"from configuration_core_{core:02d} import read_configuration_value_{core:02d}_0"
+        for core in range(cores)
+    )
+    for index in range(6):
+        (root / f"application_surface_{index}.py").write_text(
+            f"{imports}\n\n\ndef use_{index}():\n    return "
+            + " + ".join(f"read_configuration_value_{core:02d}_0()" for core in range(cores))
+            + "\n"
+        )
+        (root / "tests" / f"test_application_surface_{index}.py").write_text(
+            f"from application_surface_{index} import use_{index}\n\n\n"
+            f"def test_use_{index}():\n    assert use_{index}() is not None\n"
+        )
+    _init_repo(root)
+    for core in range(cores):
+        (root / f"configuration_core_{core:02d}.py").write_text("\n\n".join(
+            f"def read_configuration_value_{core:02d}_{slot}():\n    return {slot} + 1\n"
+            for slot in range(symbols)
+        ))
+    _git(root, "commit", "-aqm", "widen every core")
+
+
+def test_a_wide_diff_at_the_default_budget_still_buys_evidence(tmp_path):
+    """The diff is the part an agent can already get; the blast radius is not.
+
+    At the default budget a wide diff used to spend the whole allowance on
+    full-fidelity change records and emit no impact and no tests — a worse
+    version of `git diff --stat`. `changes` now sheds fidelity, in reported
+    stages, before evidence derived from it is given up.
+    """
+    root = tmp_path / "repo"
+    _wide_committed_diff(root)
+    with _indexed(root) as store:
+        full = change_context(root, store, base="HEAD~1", include_text=False)
+        result = change_context(root, store, base="HEAD~1", include_text=False,
+                                budget=DEFAULT_CHANGE_BUDGET)
+
+    assert (len(json.dumps(full["changes"])) + 3) // 4 > DEFAULT_CHANGE_BUDGET, (
+        "fixture too small: full-fidelity changes must not fit the default budget"
+    )
+    assert result["token_estimate"] <= DEFAULT_CHANGE_BUDGET
+    assert len(result["changes"]) == len(full["changes"]), "every changed path survives"
+    assert sum(len(bucket) for bucket in result["impact"].values()) > 0
+    assert result["tests_to_run"], "the tests to run are what a diff cannot tell you"
+
+
+def test_lost_change_fidelity_is_reported_like_any_other_truncation(tmp_path):
+    """A thinner change record must never pass for a complete one.
+
+    Dropping symbols or line ranges quietly would let a caller conclude a
+    changed file has no symbols in the diff, which is the confidently-wrong
+    answer the whole budget report exists to prevent.
+    """
+    root = tmp_path / "repo"
+    _wide_committed_diff(root)
+    with _indexed(root) as store:
+        result = change_context(root, store, base="HEAD~1", include_text=True,
+                                budget=DEFAULT_CHANGE_BUDGET)
+
+    dropped = result["truncation"]["dropped"]
+    surviving_symbols = sum(len(change["symbols"]) for change in result["changes"])
+    assert dropped["changes.symbols"] > 0
+    assert dropped["changes.symbols"] + surviving_symbols == 30 * 8
+    for label, field in (("changes.file_node", "file_node"),
+                         ("changes.line_ranges", "line_ranges")):
+        assert dropped.get(label, 0) == sum(
+            1 for change in result["changes"] if field not in change
+        )
+    assert "changes.symbols: " in result["text"]
+
+
 def test_a_budget_below_the_payload_floor_reports_that_it_was_not_met(small_app):
     """Trimming everything still leaves the scaffolding, and that is reportable.
 
@@ -487,5 +578,7 @@ def test_self_hosting_branch_change_context_is_grounded(tmp_path):
         result = change_context(project_root, store, base="HEAD~1")
     assert result["status"] == "ok"
     assert result["mode"] == "branch"
-    assert all(item["provenance"] for change in result["changes"]
-               for item in change["symbols"])
+    # Every symbol is locatable from the record that encloses it: the change
+    # carries the path, the symbol carries the line.
+    assert all(item["start_line"] and (change["new_path"] or change["old_path"])
+               for change in result["changes"] for item in change["symbols"])

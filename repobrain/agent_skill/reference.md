@@ -117,6 +117,15 @@ in the blast radius.
 exceeds the budget requested. Re-run with a larger `--budget` rather than
 concluding the impact set was empty.
 
+On a wide diff the change records themselves shed detail before the evidence
+does: `changes.symbols`, `changes.file_node`, and `changes.line_ranges` in
+`dropped` mean the changed paths are all still listed but their symbol spans,
+file identity, or changed line ranges were traded for impact and tests. `git
+diff` reproduces those three for free; the blast radius exists nowhere else.
+Symbols never repeat their enclosing record's path — a symbol's location is
+that record's path plus the symbol's `start_line`, prefixed `git:REV:` when the
+record carries a `source_revision` (a deleted file, read from an old blob).
+
 ## Exit codes
 
 `0` success. `2` bad usage — an unknown flag, an out-of-range `--depth`, or
