@@ -8,6 +8,7 @@ import subprocess
 from importlib.metadata import PackageNotFoundError, distribution
 from importlib.resources import files
 from pathlib import Path
+from urllib.parse import unquote, urlparse
 
 MARKER_START = "<!-- repobrain:brief:start -->"
 MARKER_END = "<!-- repobrain:brief:end -->"
@@ -46,12 +47,105 @@ def _installed_requirement(*, mcp: bool = False) -> str:
     return f"{project}=={installed.version}"
 
 
+def editable_source_path() -> Path | None:
+    """The checkout an editable install tracks, or None for immutable installs.
+
+    A registry or VCS requirement is immutable: `_installed_requirement` pins a
+    version or a commit, so the build uv caches for it is the right one
+    forever. An editable directory install has neither. The bare
+    ``repobrain @ file:///path`` requirement carries no version, no commit and
+    no content hash, which leaves uv's build cache with nothing to invalidate
+    on -- so the agent keeps launching whatever wheel was built first while the
+    developer edits the source it was supposed to track. Measured on this
+    project: a four-day-old build, and neither ``uvx --refresh`` nor
+    ``--refresh-package`` dislodges it.
+    """
+    try:
+        installed = distribution(PACKAGE_NAME)
+    except PackageNotFoundError:
+        return None
+    direct_url = installed.read_text("direct_url.json")
+    if not direct_url:
+        return None
+    try:
+        data = json.loads(direct_url)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(data, dict):
+        return None
+    dir_info = data.get("dir_info")
+    url = data.get("url")
+    if not isinstance(dir_info, dict) or not dir_info.get("editable"):
+        return None
+    if not isinstance(url, str) or not url.startswith("file://"):
+        return None
+    return Path(unquote(urlparse(url).path))
+
+
+def editable_uvx_flags() -> list[str]:
+    """uvx flags that force the local checkout to be rebuilt on every launch.
+
+    ``--with-editable`` costs 0.02 s over the stale-cache path (0.17 s vs
+    0.15 s, measured) and, unlike ``--no-cache`` at 1.39 s, leaves the
+    dependency cache alone.
+
+    Resolved once at import, next to the requirement it travels with: both
+    describe the same installed provenance, so a caller simulating a different
+    one (a built wheel, say) overrides them together rather than getting a
+    launcher that is half wheel and half checkout.
+    """
+    return list(EDITABLE_FLAGS)
+
+
+def build_hook_command(requirement: str) -> str:
+    flags = " ".join(shlex.quote(token) for token in editable_uvx_flags())
+    prefix = f"uvx {flags}" if flags else "uvx"
+    return (
+        f"{prefix} --from {shlex.quote(requirement)} repobrain brief "
+        '--path "$CLAUDE_PROJECT_DIR" --budget 2000'
+    )
+
+
+def build_mcp_args(requirement: str, root: str | Path) -> list[str]:
+    return [
+        *editable_uvx_flags(),
+        "--from", requirement,
+        "repobrain", "mcp", "--path", str(Path(root).resolve()),
+    ]
+
+
+_EDITABLE_SOURCE = editable_source_path()
+EDITABLE_FLAGS: list[str] = (
+    ["--with-editable", str(_EDITABLE_SOURCE)] if _EDITABLE_SOURCE else []
+)
 PACKAGE_REQUIREMENT = _installed_requirement()
 MCP_PACKAGE = _installed_requirement(mcp=True)
-HOOK_COMMAND = (
-    f"uvx --from {shlex.quote(PACKAGE_REQUIREMENT)} repobrain brief "
-    '--path "$CLAUDE_PROJECT_DIR" --budget 2000'
-)
+HOOK_COMMAND = build_hook_command(PACKAGE_REQUIREMENT)
+
+
+def legacy_uvx_hook_command() -> str:
+    """The pre-D52 hook this same install would have written.
+
+    Recognized as owned so an existing installation upgrades in place. D27
+    makes a *different* requirement a conflict, because command shape alone
+    cannot prove a user-selected fork was installer-owned; the same
+    requirement missing only the editable flags proves the opposite.
+    """
+    return (
+        f"uvx --from {shlex.quote(PACKAGE_REQUIREMENT)} repobrain brief "
+        '--path "$CLAUDE_PROJECT_DIR" --budget 2000'
+    )
+
+
+def legacy_mcp_server_entry(root: str | Path) -> dict:
+    """The pre-D52 MCP entry this same install would have written."""
+    return {
+        "command": MCP_COMMAND,
+        "args": [
+            "--from", MCP_PACKAGE,
+            "repobrain", "mcp", "--path", str(Path(root).resolve()),
+        ],
+    }
 LEGACY_HOOK_SUFFIX = (
     ' -m repobrain.cli brief --path "$CLAUDE_PROJECT_DIR" --budget 2000'
 )
@@ -99,15 +193,14 @@ def _prepare_skill(root: Path) -> tuple[dict[Path, str], dict]:
 
 def mcp_server_entry(root: str | Path) -> dict:
     """Return the exact, cross-platform MCP entry owned by RepoBrain."""
-    root = Path(root).resolve()
     return {
         "command": MCP_COMMAND,
-        "args": ["--from", MCP_PACKAGE, "repobrain", "mcp", "--path", str(root)],
+        "args": build_mcp_args(MCP_PACKAGE, root),
     }
 
 
 def _is_owned_mcp_entry(entry: object, root: Path) -> bool:
-    return entry == mcp_server_entry(root)
+    return entry in (mcp_server_entry(root), legacy_mcp_server_entry(root))
 
 
 def _is_repobrain_uvx_hook_command(command: object) -> bool:
@@ -117,13 +210,21 @@ def _is_repobrain_uvx_hook_command(command: object) -> bool:
         tokens = shlex.split(command)
     except ValueError:
         return False
+    if not tokens or tokens[0] != "uvx":
+        return False
+    # Tolerate the pre-D52 shape (no --with-editable) so an install written by
+    # an older RepoBrain is still recognized as owned and gets upgraded in
+    # place rather than reported as a foreign conflict.
+    rest = tokens[1:]
+    if rest[:1] == ["--with-editable"]:
+        rest = rest[2:]
     return (
-        len(tokens) == 9
-        and tokens[:2] == ["uvx", "--from"]
-        and (tokens[2] == PACKAGE_NAME
-             or tokens[2].startswith(f"{PACKAGE_NAME}==")
-             or tokens[2].startswith(f"{PACKAGE_NAME} @ "))
-        and tokens[3:] == [
+        rest[:1] == ["--from"]
+        and len(rest) == 8
+        and (rest[1] == PACKAGE_NAME
+             or rest[1].startswith(f"{PACKAGE_NAME}==")
+             or rest[1].startswith(f"{PACKAGE_NAME} @ "))
+        and rest[2:] == [
             "repobrain", "brief", "--path", "$CLAUDE_PROJECT_DIR", "--budget", "2000",
         ]
     )
@@ -142,10 +243,10 @@ def _read_json_object(path: Path) -> tuple[dict, bool]:
 
 
 def _is_owned_hook_command(command: object) -> bool:
-    """Recognize the current hook and the exact pre-distribution command form."""
+    """Recognize the current hook and the exact earlier command forms."""
     if not isinstance(command, str):
         return False
-    if command == HOOK_COMMAND:
+    if command in (HOOK_COMMAND, legacy_uvx_hook_command()):
         return True
     if not command.endswith(LEGACY_HOOK_SUFFIX):
         return False
@@ -206,7 +307,8 @@ def _prepare_settings(path: Path) -> tuple[dict, bool, bool]:
         normalized_hooks = []
         for hook in group_hooks:
             command = hook.get("command") if isinstance(hook, dict) else None
-            if _is_repobrain_uvx_hook_command(command) and command != HOOK_COMMAND:
+            if (_is_repobrain_uvx_hook_command(command)
+                    and not _is_owned_hook_command(command)):
                 raise ValueError(
                     f"Refusing to modify {path}: conflicting RepoBrain SessionStart hook"
                 )
@@ -253,11 +355,11 @@ def _prepare_mcp(path: Path, root: Path) -> tuple[dict, bool, bool]:
     expected = mcp_server_entry(root)
     present = MCP_SERVER_NAME in servers
     current = servers.get(MCP_SERVER_NAME)
-    if present and current != expected:
+    if present and not _is_owned_mcp_entry(current, Path(root).resolve()):
         raise ValueError(
             f"Refusing to overwrite conflicting mcpServers.{MCP_SERVER_NAME} in {path}"
         )
-    changed = not present
+    changed = current != expected
     if changed:
         servers[MCP_SERVER_NAME] = expected
         config["mcpServers"] = servers

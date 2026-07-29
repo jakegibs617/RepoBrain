@@ -229,6 +229,16 @@ stores every token as a separate argument, so repository paths containing
 spaces do not depend on shell quoting. The `mcp` extra is optional for normal
 CLI use and installed automatically by that MCP launch command.
 
+**Editable installs additionally get `--with-editable <checkout>`** in both the
+MCP entry and the SessionStart hook. A bare `repobrain @ file:///path`
+requirement carries no version, commit, or content hash, so uv has nothing to
+invalidate its build cache on and keeps launching the first wheel it built
+while you edit the source — and neither `uvx --refresh` nor
+`--refresh-package` dislodges it. Declaring the source editable costs about
+0.02 s per launch and keeps the agent on the code you are actually writing.
+Installations written by earlier versions are upgraded in place the next time
+you run `install-agent`.
+
 `install-agent` also appends a marker-delimited section to `CLAUDE.md` so the
 agent knows the session brief exists and how to refresh it:
 

@@ -323,9 +323,13 @@ def test_built_wheel_launches_over_installed_argument_array_when_cached(
         timeout=30,
     )
     wheel = next(dist.glob("repobrain-*.whl"))
+    # A built wheel is an immutable install, so the editable flags D52 adds for
+    # a source checkout must be cleared alongside the requirement: the launcher
+    # describes one provenance or the other, never half of each.
     monkeypatch.setattr(
         agent_install, "MCP_PACKAGE", f"repobrain[mcp] @ {wheel.resolve().as_uri()}",
     )
+    monkeypatch.setattr(agent_install, "EDITABLE_FLAGS", [])
     spaced_root = tmp_path / "repository with spaces"
     small_app.rename(spaced_root)
     entry = mcp_server_entry(spaced_root)
