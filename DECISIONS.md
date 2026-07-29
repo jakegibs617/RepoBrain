@@ -1170,6 +1170,29 @@ read-only open still maps the `-shm` file, and creates `-shm` and a zero-length
 and the database file itself is never modified, which the store test asserts
 by hashing it across an open.
 
+*Amended 2026-07-29.* The test shipped asserting more than this decision
+promises: it compared the whole directory listing across the open, which holds
+on macOS — where a clean close truncates `-wal` to zero bytes but leaves it in
+place — and fails on Linux, where the close removes it and the read-only open
+recreates it. Every CI leg failed on that difference alone. The assertion now
+matches the guarantee as written above: database bytes and mtime unchanged,
+writes still refused, and no *non-empty* log left behind. An empty log is the
+proof that nothing was committed through it; a missing one was never the claim.
+
+The same investigation found the rejection of `immutable=1` above to be too
+flat. A read-only connection is not permitted to *create* the `-shm` index, so
+`mode=ro` does not degrade on a WAL database whose sidecars are absent — it
+fails the open outright with `unable to open database file`. Sidecars are
+absent whenever nothing holds the database, which is the resting state of every
+idle index, so `freshness` reported `unavailable` for a completely intact
+9.4 MB graph on this repository. `_read_only_connection` now falls back to
+`immutable=1` when the preferred open fails. The torn-snapshot risk that
+rejected `immutable` outright does not apply on that path: the sidecars are
+missing *because* no connection holds the database, and a live indexing run
+necessarily has them present — in which case `mode=ro` succeeded and the
+fallback was never reached. The fallback is only taken when the precondition
+`immutable` asserts is what the failed open just demonstrated.
+
 **Off-version schemas are refused rather than read.** The ordinary open path
 migrates a legacy database in place; a read-only store cannot. Reading a
 pre-migration schema as though it were current would return wrong answers
@@ -1227,3 +1250,56 @@ installation land. Refusing the hook and the MCP entry because someone edited
 their documentation would be a worse failure than the one it prevents.
 Uninstall stays per-file: it removes every marker-bearing file it still owns
 even if a sibling was adopted, and prunes only directories it emptied.
+
+## 2026-07-29 — Extractor identity as the second freshness axis
+
+### D42: The index records which extractor built it, and a change to that forces re-extraction regardless of the file diff
+
+`check_freshness` compared file size and mtime against the stored `files`
+table, which answers one question: *did the working tree move?* That is the
+wrong question after RepoBrain itself changes. When a parser starts extracting
+something it did not before, every affected file is byte-identical, its stat is
+untouched, and the incremental fast path in `compute_diff` skips it forever.
+The graph then holds facts no current parser would produce, and `freshness`
+reports it current — a wrong answer served confidently, which is the exact
+failure the gate exists to prevent.
+
+This was observed, not theorized. On this repository, at `12ade8e`, `freshness
+--json` reported current at 153 files with zero changed inputs while the live
+`.repobrain` index held 2,064 nodes against 2,076 in a fresh index of the same
+tree. The gap was the JSON-derived `ConfigFile` and eleven `ConfigKey` nodes
+for `tests/fixtures/node_api_app/package.json`, a file nothing had touched
+since before the structured-config parser learned to read it.
+
+**The fingerprint covers composition automatically and behavior by hand.**
+`ParserRegistry.fingerprint()` hashes `EXTRACTOR_VERSION` together with the
+sorted parser names. Names catch a parser being added or removed without anyone
+remembering to do anything. They cannot catch the case that actually bit us —
+a parser whose name held still while its output changed — so `EXTRACTOR_VERSION`
+is bumped by hand for that, on the same discipline as `RUNTIME_ADAPTER_VERSION`,
+which had already established this pattern one level down for runtime adapters.
+
+**Stored in `meta`, not in a new column or a schema bump.** The `meta` table
+already carries `root` and `runtime_adapter_version`. A schema version bump
+would have been the more invasive answer to the same need, and would have made
+every existing database unreadable to the read-only path in D40 — turning a
+recoverable staleness into a hard `schema_mismatch` for every user on upgrade.
+The fingerprint is written inside the index run's single transaction, so a
+failed run never leaves behind a claim that its facts are current.
+
+**Drift bypasses the auto-index thresholds; it is not counted in files.** The
+`max_changed_files`/`max_changed_bytes` policy exists to withhold trust from a
+tree diff too large to have been reviewed. A parser upgrade is not that: the
+tree is unchanged and re-extraction is deterministic. Counting drift as file
+churn would put it above every sane threshold and leave every read surface
+refusing until the user ran `repobrain index` by hand, which is a worse default
+than one slow query after an upgrade. So `extractor_changed` is reported as its
+own axis alongside `out_of_date_count`, and only the file count is measured
+against the policy — a large tree diff arriving in the same run as a parser
+upgrade still blocks, because that axis is untouched.
+
+**Two axes, separately legible, one `is_stale`.** Both kinds of staleness make
+stored facts untrustworthy, so both set `is_stale` and both are repaired the
+same way. They stay separately reported because only one of them is measured in
+files: saying "0 file(s) are out of date" about a graph that is entirely out of
+date would be technically true and actively misleading.

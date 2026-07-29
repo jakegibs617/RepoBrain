@@ -14,6 +14,9 @@ from .doc_references import MarkdownMentionReconciler
 from .runtime_adapters import RUNTIME_ADAPTER_VERSION, RuntimeAdapterReconciler
 from .scanner import ScannedFile, scan
 
+#: meta key holding the extractor fingerprint the stored graph was built with
+EXTRACTOR_FINGERPRINT_KEY = "extractor_fingerprint"
+
 
 class RepoRootMismatchError(RuntimeError):
     """Raised when a database pinned to one repo root is asked to index another."""
@@ -27,6 +30,8 @@ class IndexStats:
     nodes_created: int = 0
     edges_created: int = 0
     warnings: list[str] = field(default_factory=list)
+    #: whether this run re-parsed everything because the extractor moved
+    extractor_changed: bool = False
 
 
 def _now() -> str:
@@ -78,9 +83,19 @@ class Indexer:
         )
         stats.files_scanned = len(scanned)
 
-        diff = compute_diff(scanned, self.store, incremental=incremental)
+        # An extractor change invalidates every stored fact, including facts
+        # from files nothing has touched, so the per-file stat shortcut has to
+        # be skipped wholesale for one run. Deletions are still detected.
+        fingerprint = self.registry.fingerprint()
+        extractor_changed = (
+            self.store.get_meta(EXTRACTOR_FINGERPRINT_KEY) != fingerprint
+        )
+        diff = compute_diff(
+            scanned, self.store, incremental=incremental and not extractor_changed
+        )
         stats.files_changed = len(diff.to_parse)
         stats.files_deleted = len(diff.deleted)
+        stats.extractor_changed = extractor_changed
 
         # Parsers that resolve cross-file references (e.g. imports) get the
         # full set of scanned paths before any file is parsed. `root` is also
@@ -168,6 +183,10 @@ class Indexer:
             # this run, e.g. that reader was deleted or edited to stop
             # reading it.
             self.store.delete_orphan_envvars()
+            # Recorded only here, inside the run's single transaction: a failed
+            # index must not leave behind a fingerprint claiming its facts were
+            # extracted by the current parsers.
+            self.store.set_meta(EXTRACTOR_FINGERPRINT_KEY, fingerprint)
             stats.nodes_created = len({n.id for n in combined.nodes})
             stats.edges_created = len({e.id for e in combined.edges})
             self.store.record_index_run(

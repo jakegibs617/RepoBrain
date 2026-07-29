@@ -1,4 +1,5 @@
 import json
+import sqlite3
 import subprocess
 from pathlib import Path
 
@@ -13,10 +14,15 @@ from repobrain.agent_install import (
 )
 from repobrain.briefing import project_brief
 from repobrain.cli import main
-from repobrain.freshness import FreshnessBlockedError, FreshnessPolicy, ensure_fresh
+from repobrain.freshness import (
+    FreshnessBlockedError,
+    FreshnessPolicy,
+    check_freshness,
+    ensure_fresh,
+)
 from repobrain.graph.store import GraphStore
 from repobrain.indexing.doc_references import MarkdownMentionReconciler
-from repobrain.indexing.indexer import Indexer
+from repobrain.indexing.indexer import EXTRACTOR_FINGERPRINT_KEY, Indexer
 from repobrain.mcp_server import RepoBrainTools
 
 
@@ -287,6 +293,125 @@ def test_freshness_reports_current_and_missing_indexes_as_ordinary_states(small_
     assert never_indexed.exit_code == 0, never_indexed.output
     assert json.loads(never_indexed.output)["status"] == "unavailable"
     assert not (tmp_path / ".repobrain").exists()
+
+
+def test_freshness_names_each_unavailable_state_in_a_stable_code(small_app, tmp_path):
+    """The orientation command's failure states must be dispatchable, not prose.
+
+    `freshness --json` is the first call an agent makes, and two of its
+    unavailable states need different responses: a missing index means run
+    `repobrain index`, a schema mismatch means this database predates the
+    installed RepoBrain. Distinguishing them by matching on `reason` would make
+    every agent regex an English sentence.
+    """
+    never_indexed = CliRunner().invoke(
+        main, ["freshness", "--json", "--path", str(tmp_path)],
+    )
+    assert never_indexed.exit_code == 0, never_indexed.output
+    assert json.loads(never_indexed.output)["reason_code"] == "no_index"
+
+    with _store(small_app):
+        pass
+    database = small_app / ".repobrain" / "repobrain.sqlite"
+    with sqlite3.connect(database) as connection:
+        connection.execute("PRAGMA user_version = 1")
+
+    mismatched = CliRunner().invoke(
+        main, ["freshness", "--json", "--path", str(small_app)],
+    )
+    assert mismatched.exit_code == 0, mismatched.output
+    payload = json.loads(mismatched.output)
+    assert payload["status"] == "unavailable"
+    assert payload["reason_code"] == "schema_mismatch"
+    # The human-readable reason survives alongside the code, not instead of it.
+    assert "schema version" in payload["reason"]
+
+
+def test_freshness_reports_an_extractor_change_without_claiming_files_moved(small_app):
+    """A parser upgrade is stale for a reason no file count can express."""
+    with _store(small_app) as store:
+        store.set_meta(EXTRACTOR_FINGERPRINT_KEY, "built-by-an-older-repobrain")
+        store.commit()
+
+    result = CliRunner().invoke(
+        main, ["freshness", "--json", "--path", str(small_app)],
+    )
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert payload["is_stale"] is True
+    assert payload["extractor_changed"] is True
+    assert payload["out_of_date_count"] == 0
+
+    human = CliRunner().invoke(main, ["freshness", "--path", str(small_app)])
+    assert human.exit_code == 0, human.output
+    assert "extractor" in human.output.lower()
+    assert "0 file(s)" not in human.output
+
+
+def test_an_extractor_change_is_stale_although_the_working_tree_never_moved(small_app):
+    """The staleness a file's stat cannot express.
+
+    Nothing about a file's size or mtime changes when RepoBrain's own
+    extraction does, so a tree-diff check reports current while the graph is
+    missing facts the current parsers would produce. That is a wrong answer
+    served confidently, which is the one failure the gate exists to prevent.
+    """
+    with _store(small_app) as store:
+        assert check_freshness(small_app, store)["is_stale"] is False
+
+        store.set_meta(EXTRACTOR_FINGERPRINT_KEY, "built-by-an-older-repobrain")
+        result = check_freshness(small_app, store)
+
+    assert result["is_stale"] is True
+    assert result["extractor_changed"] is True
+    # The tree genuinely did not move; the two axes stay separately legible.
+    assert result["out_of_date_count"] == 0
+
+
+def test_an_extractor_change_is_repaired_regardless_of_the_diff_thresholds(small_app):
+    """The threshold withholds trust from a large *tree* diff, not from a
+    parser upgrade.
+
+    An extractor change invalidates every file at once, so counting it in files
+    would exceed any sane threshold and leave every read surface refusing until
+    the user ran `repobrain index` by hand. The tree is unchanged and
+    re-extraction is deterministic, so repairing it is safe; the cost is one
+    slow query after an upgrade.
+    """
+    with _store(small_app) as store:
+        store.set_meta(EXTRACTOR_FINGERPRINT_KEY, "built-by-an-older-repobrain")
+
+        result = ensure_fresh(
+            small_app, store,
+            policy=FreshnessPolicy(max_changed_files=0, max_changed_bytes=0),
+        )
+
+        assert result["status"] == "reindexed"
+        assert result["can_query"] is True
+        assert result["before"]["extractor_changed"] is True
+        # The repair is what makes the next read trustworthy, not just a flag flip.
+        assert check_freshness(small_app, store)["extractor_changed"] is False
+
+
+def test_a_large_tree_diff_still_blocks_when_the_extractor_also_moved(small_app):
+    """Bypassing the threshold is scoped to the extractor axis alone.
+
+    A parser upgrade arriving in the same run as an unreviewably large tree
+    diff must not smuggle that diff past the gate.
+    """
+    with _store(small_app) as store:
+        store.set_meta(EXTRACTOR_FINGERPRINT_KEY, "built-by-an-older-repobrain")
+        for index in range(3):
+            (small_app / f"added_{index}.py").write_text("x = 1\n", encoding="utf-8")
+
+        result = ensure_fresh(
+            small_app, store, policy=FreshnessPolicy(max_changed_files=2),
+        )
+
+    assert result["status"] == "blocked"
+    assert result["reason"] == "threshold_exceeded"
+    assert result["can_query"] is False
 
 
 def test_self_hosted_query_auto_repairs_a_small_diff(tmp_path):

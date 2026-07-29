@@ -121,13 +121,31 @@ different situations:
 
 ## The freshness model
 
-Staleness is computed from file **size and mtime**, not content hashes, and
-not the Git HEAD. A `git checkout` that restores byte-identical files still
+Staleness has two axes, and `is_stale` is set by either.
+
+**The tree moved.** Computed from file **size and mtime**, not content hashes,
+and not the Git HEAD. A `git checkout` that restores byte-identical files still
 marks them stale, because mtimes moved. The Git history sub-graph is checked
 separately, since a commit or rebase moves HEAD without touching the tree.
+Reported as `out_of_date_count`.
 
-A stale diff of at most **10 files and 256 KiB** is repaired in place before
-the query runs. Anything larger is refused. `--no-auto-index` means *refuse
-instead of repairing* — it never permits a stale answer.
+**The extractor moved.** `extractor_changed` is true when the index was built
+by a different set of parsers than the ones installed now. The files are
+byte-identical, so no file count expresses it — the facts derivable from them
+changed, not the files. Repaired by re-extracting everything, and deliberately
+exempt from the size thresholds below, since the tree is unchanged.
+
+A stale *tree* diff of at most **10 files and 256 KiB** is repaired in place
+before the query runs. Anything larger is refused. `--no-auto-index` means
+*refuse instead of repairing* — it never permits a stale answer.
+
+When `freshness` reports `"status": "unavailable"`, dispatch on `reason_code`,
+never on `reason`:
+
+| `reason_code` | Meaning | Do |
+| --- | --- | --- |
+| `no_index` | This repository was never indexed. | `repobrain index .` |
+| `schema_mismatch` | The database was built by a different RepoBrain. | `repobrain index .` to migrate it. |
+| `unreadable` | The database exists but could not be opened. | Report it; do not fall back to grep silently. |
 
 <!-- repobrain:skill:owned -->

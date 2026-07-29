@@ -231,40 +231,66 @@ def test_database_newer_than_supported_schema_is_rejected(tmp_path):
     conn.close()
 
 
-def test_read_only_store_reads_without_touching_the_database(tmp_path):
-    """A display surface must be able to poll the graph without taking a write lock.
+def test_read_only_store_reads_without_writing_to_the_database(tmp_path):
+    """A display surface must be able to poll the graph without writing to it.
 
     Opening a normal store applies the schema and commits, so a statusline
     polling every few seconds would rewrite the database forever. The
-    read-only open must leave the file, and its WAL sidecars, alone.
+    read-only open must leave the database's bytes and its modification time
+    alone, and must not take a write lock.
+
+    It is deliberately *not* a promise that the directory is untouched. On
+    Linux, SQLite creates an empty ``-wal``/``-shm`` pair when it opens a
+    WAL-mode database even under ``mode=ro``, because mapping the shared
+    memory index is how a reader finds the log at all. Refusing that would
+    mean ``immutable=1``, which serves a torn pre-WAL snapshot mid-index. An
+    *empty* log is the signal that matters: nothing was committed through it.
     """
     database = tmp_path / "ro.sqlite"
     with GraphStore(database) as store:
         store.upsert_nodes([_sample_node()])
         store.commit()
 
-    # The WAL sidecars are left behind by the read-write close above. The
-    # database and the log must come through the read-only open untouched;
-    # -shm is deliberately excluded, because mapping the shared-memory index
-    # is how a reader finds the WAL at all, and skipping it would mean
-    # immutable=1 and a torn snapshot mid-index.
-    def _state() -> dict[str, tuple[int, int]]:
-        return {
-            path.name: (path.stat().st_size, path.stat().st_mtime_ns)
-            for path in tmp_path.iterdir()
-            if not path.name.endswith("-shm")
-        }
-
-    before = _state()
     contents = database.read_bytes()
+    mtime_ns = database.stat().st_mtime_ns
 
     with GraphStore(database, read_only=True) as store:
         assert store.conn.execute("SELECT COUNT(*) FROM nodes").fetchone()[0] == 1
         with pytest.raises(sqlite3.OperationalError, match="readonly"):
             store.upsert_nodes([_sample_node()])
 
-    assert _state() == before
     assert database.read_bytes() == contents
+    assert database.stat().st_mtime_ns == mtime_ns
+    assert [
+        path.name
+        for path in tmp_path.iterdir()
+        if path.name.endswith("-wal") and path.stat().st_size
+    ] == []
+
+
+def test_read_only_store_opens_a_wal_database_whose_sidecars_are_gone(tmp_path):
+    """The common resting state of an idle index must still be readable.
+
+    ``mode=ro`` alone cannot open a WAL-mode database when ``-shm`` is absent:
+    a read-only connection is not allowed to create the shared-memory index,
+    and SQLite fails the open outright rather than degrading. Sidecars are
+    absent whenever nothing holds the database — after a clean close on Linux,
+    and on any machine where the database was copied, restored, or archived
+    without them. That is precisely when a status display is most likely to
+    poll, so failing there would make `freshness` report `unavailable` for an
+    index that is perfectly intact.
+    """
+    database = tmp_path / "idle.sqlite"
+    with GraphStore(database) as store:
+        store.upsert_nodes([_sample_node()])
+        store.commit()
+    for sidecar in tmp_path.glob("idle.sqlite-*"):
+        sidecar.unlink()
+
+    with GraphStore(database, read_only=True) as store:
+        assert store.conn.execute("SELECT COUNT(*) FROM nodes").fetchone()[0] == 1
+        with pytest.raises(sqlite3.OperationalError):
+            store.upsert_nodes([_sample_node()])
 
 
 def test_read_only_store_refuses_a_database_it_cannot_migrate(tmp_path):

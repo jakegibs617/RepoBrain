@@ -299,8 +299,11 @@ uv run --isolated --no-project \
 .venv/bin/repobrain status --path tests/fixtures/small_python_app
 
 # is the index current? opens the graph read-only, never indexes, and always
-# exits 0 -- an unreadable index reports {"status": "unavailable"} rather than
-# failing, so status displays polling on a timer can call it safely
+# exits 0 -- an unreadable index reports {"status": "unavailable"} with a
+# machine-readable "reason_code" (no_index / schema_mismatch / unreadable)
+# rather than failing, so status displays polling on a timer can call it safely.
+# "is_stale" covers two axes: files that moved ("out_of_date_count") and an
+# index built by a different set of parsers ("extractor_changed")
 .venv/bin/repobrain freshness
 .venv/bin/repobrain freshness --json
 

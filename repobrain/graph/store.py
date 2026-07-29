@@ -167,13 +167,17 @@ class GraphStore:
         migrations and commits. None of that is safe to repeat on a timer
         beside a live indexing run, so read-only callers skip all of it.
 
-        ``mode=ro`` deliberately does *not* set ``immutable=1``: immutable
-        tells SQLite no other process can be writing and lets it ignore the
-        WAL, which would serve a torn pre-WAL snapshot mid-index.
+        ``mode=ro`` is preferred and deliberately does *not* set
+        ``immutable=1``: immutable tells SQLite no other process can be writing
+        and lets it ignore the WAL, which would serve a torn pre-WAL snapshot
+        mid-index. The price is that opening a WAL-mode database creates an
+        empty ``-wal``/``-shm`` pair on platforms that removed them at the last
+        close. Nothing is written to the database and no write lock is taken;
+        an empty log is the proof.
         """
         if not self.db_path.exists():
             raise FileNotFoundError(f"No RepoBrain database at {self.db_path}")
-        self.conn = sqlite3.connect(f"file:{self.db_path}?mode=ro", uri=True)
+        self.conn = self._read_only_connection()
         self.conn.row_factory = sqlite3.Row
         current_version = self.conn.execute("PRAGMA user_version").fetchone()[0]
         if current_version != _SCHEMA_VERSION:
@@ -183,6 +187,37 @@ class GraphStore:
                 f"{current_version} cannot be read read-only; supported version is "
                 f"{_SCHEMA_VERSION}. Run `repobrain index` to migrate it."
             )
+
+    def _read_only_connection(self) -> sqlite3.Connection:
+        """Connect read-only, falling back to ``immutable=1`` only when safe.
+
+        A read-only connection is not permitted to create the ``-shm``
+        shared-memory index, so ``mode=ro`` fails the open outright — not
+        degrades, fails — on a WAL-mode database whose sidecars are absent.
+        That is the resting state of any idle index on platforms that remove
+        them at the last close, and of any database that was copied or restored
+        without them, so leaving it unhandled makes a perfectly intact index
+        report ``unavailable`` to every display that polls it.
+
+        ``immutable=1`` opens those, at the documented cost of ignoring the
+        WAL. The reason that cost is not being paid here: the sidecars are
+        absent *because* no connection holds the database, and a live indexing
+        run necessarily has them present, in which case ``mode=ro`` succeeded
+        and this path was never reached. The fallback is therefore only taken
+        when the thing ``immutable`` asserts — no concurrent writer — is what
+        the failed open just demonstrated.
+
+        The preferred open is probed with a real statement, because
+        ``sqlite3.connect`` is lazy: it returns a handle without touching the
+        file, so a missing ``-shm`` only surfaces on first use.
+        """
+        preferred = sqlite3.connect(f"file:{self.db_path}?mode=ro", uri=True)
+        try:
+            preferred.execute("PRAGMA user_version")
+            return preferred
+        except sqlite3.OperationalError:
+            preferred.close()
+        return sqlite3.connect(f"file:{self.db_path}?mode=ro&immutable=1", uri=True)
 
     def _migrate_schema(self, current: int) -> None:
         """Apply pending schema migrations in order.

@@ -249,8 +249,14 @@ def freshness(path: str, as_json: bool) -> None:
     stale diff and refuses a large one. Both are wrong for a status display
     polling on a timer: one writes to the database on someone else's schedule,
     the other exits non-zero exactly when it has something to say. This
-    command opens the graph read-only, never mutates it, and always exits
-    zero — an unreadable index is a reportable state, not an error.
+    command opens the graph read-only, never writes to the database and never
+    takes a write lock, and always exits zero — an unreadable index is a
+    reportable state, not an error.
+
+    "Never writes to the database" is the exact claim, not "never touches the
+    directory": on Linux, SQLite creates an empty WAL sidecar when it opens a
+    WAL-mode database even under ``mode=ro``. That costs nothing and is what
+    lets a reader see a live indexer's log rather than a torn snapshot.
     """
     root = _resolve_root(path)
     try:
@@ -261,13 +267,18 @@ def freshness(path: str, as_json: bool) -> None:
             result = {
                 "status": "ok",
                 "is_stale": staleness["is_stale"],
+                "extractor_changed": staleness["extractor_changed"],
                 "out_of_date_count": staleness["out_of_date_count"],
                 "changed_bytes": staleness["changed_bytes"],
                 "files": store.file_count(),
                 "last_indexed_at": run["finished_at"] if run else None,
             }
     except Exception as exc:  # noqa: BLE001 - a display surface must never crash
-        result = {"status": "unavailable", "reason": str(exc)}
+        result = {
+            "status": "unavailable",
+            "reason_code": _unavailable_code(exc),
+            "reason": str(exc),
+        }
 
     if as_json:
         click.echo(json.dumps(result, indent=2))
@@ -275,12 +286,39 @@ def freshness(path: str, as_json: bool) -> None:
     if result["status"] != "ok":
         click.echo(f"Index freshness: unavailable ({result['reason']})")
     elif result["is_stale"]:
-        click.echo(
-            f"STALE INDEX: {result['out_of_date_count']} file(s) are out of date; "
-            "run `repobrain index`."
-        )
+        click.echo(f"STALE INDEX: {_stale_summary(result)}; run `repobrain index`.")
     else:
         click.echo("Index freshness: current.")
+
+
+def _unavailable_code(exc: Exception) -> str:
+    """Name why the index could not be read, so a caller can dispatch on it.
+
+    The three states need different responses — index the repository, upgrade
+    or rebuild a database from another RepoBrain, or investigate — and the
+    command is an agent's first call. Matching on the message would make every
+    caller regex an English sentence that is free to be reworded.
+    """
+    if isinstance(exc, FileNotFoundError):
+        return "no_index"
+    if isinstance(exc, RuntimeError) and "schema version" in str(exc):
+        return "schema_mismatch"
+    return "unreadable"
+
+
+def _stale_summary(result: dict) -> str:
+    """Describe staleness in the terms that actually apply.
+
+    A changed extractor invalidates files whose contents never moved, so
+    reporting it as a file count would say "0 file(s) are out of date" about a
+    graph that is entirely out of date.
+    """
+    parts = []
+    if result["out_of_date_count"]:
+        parts.append(f"{result['out_of_date_count']} file(s) are out of date")
+    if result["extractor_changed"]:
+        parts.append("the extractor changed since this index was built")
+    return "; ".join(parts)
 
 
 @main.command("brief")
