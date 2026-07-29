@@ -431,7 +431,8 @@ def test_install_agent_preserves_content_and_is_idempotent(tmp_path):
     commands = [hook["command"] for group in data["hooks"]["SessionStart"]
                 for hook in group["hooks"]]
     assert commands == [HOOK_COMMAND]
-    assert commands[0].startswith("uvx --from ")
+    assert commands[0].startswith("uvx ")
+    assert " --from " in commands[0]
     assert " repobrain brief " in commands[0]
 
 

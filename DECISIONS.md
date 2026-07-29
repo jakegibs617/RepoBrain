@@ -1893,3 +1893,79 @@ acceptable.** The `files` row retains sha256 and size for a path that is no
 longer scanned. A one-way digest of a file the user already had on disk is not
 the secret, and purging tombstones is a storage-layer concern with its own
 correctness questions about deletion detection.
+
+## 2026-07-29 — A launcher that cannot go stale
+
+### D52: An editable install declares itself editable to uvx; the requirement alone cannot keep the agent on current code
+
+The 2026-07-29 audit received a session brief that promoted four *test-fixture*
+routes as this project's entrypoints and rendered `Purpose` as the bare lead-in
+`Implemented:` — the exact output D50 and `ad1e933` had already fixed. The
+brief was headed `Index freshness: current.`
+
+**The index was current. The code was four days old.** The `SessionStart` hook
+and `.mcp.json` both launch through `uvx --from <requirement>`, and D27 chose
+that deliberately: automation should carry installed provenance rather than a
+disposable interpreter path. For a VCS install `_installed_requirement()` pins
+the commit; for a registry install it pins the version. For
+`dir_info.editable` it returned a bare `repobrain @ file:///path` — no version,
+no commit, no content hash. uv therefore had nothing to invalidate its build
+cache on, and served a wheel built on 2026-07-25 while the developer edited the
+source it was supposed to track. The cached `briefing.py` was 184 lines against
+a 301-line source.
+
+**Neither documented refresh flag dislodges it**, which is what made this
+invisible. Measured: `uvx --refresh` returns the stale build, and so does
+`uvx --refresh-package repobrain`, in 0.15 s — the cache is never consulted for
+staleness at all. Four launcher forms were measured against a source edit:
+
+| form | picks up source | warm launch |
+| --- | --- | ---: |
+| `--from 'repobrain @ file://…'` (pre-D52) | **no** | 0.15 s |
+| `--refresh` / `--refresh-package` | **no** | 0.15 s |
+| `--no-cache` | yes | 1.39 s |
+| `--with-editable <path>` | yes | **0.17 s** |
+| `uv run --project <path>` | yes | 0.17 s |
+
+**`--with-editable` wins on both axes.** It costs 0.02 s over the broken path
+and, unlike `--no-cache`, leaves the dependency cache alone — `--no-cache`
+rebuilds tree-sitter and the MCP SDK on every session start for no benefit.
+`uv run --project` works equally well but reintroduces a project-directory
+dependency that D27's argument array was written to avoid.
+
+**Reverting to the interpreter path was rejected on D27's original grounds.**
+`sys.executable` always reflects the source an editable install tracks, and it
+is faster still. It is also disposable: a recreated `.venv` silently breaks
+every hook written against it. D27 traded that away on purpose and this change
+does not reopen it.
+
+**The flags are resolved once, beside the requirement they travel with.**
+`EDITABLE_FLAGS` is a module constant like `PACKAGE_REQUIREMENT`, not a live
+lookup inside `mcp_server_entry()`. Both describe one installed provenance, so
+a caller simulating another — the built-wheel MCP smoke test — overrides them
+together instead of producing a launcher that is half wheel and half checkout.
+
+**Non-editable directory installs are deliberately untouched.** `uv pip
+install .` produces a snapshot, and a cached build of that snapshot is the
+correct artifact: it matches what the user actually installed. Only
+`editable: true` promises to track a moving source, and only that promise was
+being broken.
+
+**Existing installations upgrade rather than fail closed.** D27 makes a
+different requirement a conflict, because command shape alone cannot prove a
+user-selected fork was installer-owned. The pre-D52 command carries *the same*
+requirement and merely lacks the flags, which proves the opposite — it is this
+installer's own earlier output. `legacy_uvx_hook_command()` and
+`legacy_mcp_server_entry()` are recognized as owned and rewritten in place;
+without that, every existing installation would have kept the stale build
+forever, which is the defect rather than a fix for it. Verified end to end: a
+pre-D52 `settings.json` and `.mcp.json` upgrade on the next `install-agent`,
+and a second run is byte-idempotent.
+
+**The residual axis is named, not closed.** The freshness gate still compares
+the *running process's* parser sources against the database that process built,
+so old code and its own index remain self-consistent and report `current`.
+D52 removes the way that state was reached in the shipped configuration; it
+does not make code staleness observable. Publishing the running build's
+identity in the freshness envelope is the general fix, and is queued rather
+than smuggled in here.

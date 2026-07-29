@@ -1,4 +1,5 @@
 import json
+import shlex
 import subprocess
 import tarfile
 import zipfile
@@ -52,6 +53,91 @@ def test_installed_requirement_reconstructs_git_vcs_url_with_scheme_and_commit(m
     )
 
 
+def test_editable_directory_install_launches_from_source_not_a_cached_build(
+    monkeypatch, tmp_path
+):
+    # `uv pip install -e .` writes dir_info.editable. The bare
+    # "repobrain @ file:///path" requirement carries no version, commit or
+    # content hash, so uv resolves it to a wheel it built once and never
+    # rebuilds -- neither `uvx --refresh` nor `--refresh-package` invalidates
+    # it. The launcher has to declare the source editable instead.
+    source = tmp_path / "checkout"
+    source.mkdir()
+    direct_url_json = json.dumps({
+        "url": source.as_uri(),
+        "dir_info": {"editable": True},
+    })
+    fake = _FakeDistribution("0.1.0", direct_url_json)
+    monkeypatch.setattr(agent_install, "distribution", lambda name: fake)
+
+    assert agent_install.editable_source_path() == source
+
+
+def test_registry_install_is_not_treated_as_editable(monkeypatch):
+    # A registry install is already immutable: _installed_requirement pins the
+    # version, so uv's cached build for it stays correct forever.
+    fake = _FakeDistribution("0.1.0", None)
+    monkeypatch.setattr(agent_install, "distribution", lambda name: fake)
+
+    assert agent_install.editable_source_path() is None
+
+
+def test_launcher_carries_the_editable_flags_ahead_of_the_requirement(
+    monkeypatch, tmp_path
+):
+    source = tmp_path / "checkout"
+    monkeypatch.setattr(
+        agent_install, "EDITABLE_FLAGS", ["--with-editable", str(source)]
+    )
+
+    tokens = shlex.split(agent_install.build_hook_command("repobrain @ file:///x"))
+    assert tokens[:5] == [
+        "uvx", "--with-editable", str(source), "--from", "repobrain @ file:///x",
+    ]
+
+    args = agent_install.build_mcp_args("repobrain[mcp] @ file:///x", tmp_path / "repo")
+    assert args[:4] == [
+        "--with-editable", str(source), "--from", "repobrain[mcp] @ file:///x",
+    ]
+
+
+def test_install_upgrades_a_pre_editable_launcher_in_place(tmp_path):
+    # Configs written before D52 carry the same requirement without the
+    # editable flags. That is this installer's own earlier output, not a
+    # user-selected fork, so it must be upgraded rather than failed closed --
+    # otherwise every existing installation stays on the stale build forever,
+    # which is the whole defect D52 exists to fix.
+    root = tmp_path / "repo"
+    root.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=root, check=True)
+    legacy_hook = agent_install.legacy_uvx_hook_command()
+    settings = root / ".claude" / "settings.json"
+    settings.parent.mkdir(parents=True)
+    settings.write_text(json.dumps({"hooks": {"SessionStart": [
+        {"matcher": "", "hooks": [{"type": "command", "command": legacy_hook}]}]}}),
+        encoding="utf-8")
+    (root / ".mcp.json").write_text(json.dumps({"mcpServers": {
+        MCP_SERVER_NAME: agent_install.legacy_mcp_server_entry(root)}}),
+        encoding="utf-8")
+
+    result = install_agent(root)
+
+    assert result["changed"] is True
+    hooks = json.loads(settings.read_text(encoding="utf-8"))["hooks"]["SessionStart"]
+    commands = [h["command"] for group in hooks for h in group["hooks"]]
+    assert commands == [agent_install.HOOK_COMMAND]
+    entry = json.loads((root / ".mcp.json").read_text(encoding="utf-8"))
+    assert entry["mcpServers"][MCP_SERVER_NAME] == mcp_server_entry(root)
+
+
+def test_launcher_stays_plain_when_the_install_is_immutable(monkeypatch, tmp_path):
+    monkeypatch.setattr(agent_install, "EDITABLE_FLAGS", [])
+
+    tokens = shlex.split(agent_install.build_hook_command("repobrain==0.1.0"))
+    assert tokens[:3] == ["uvx", "--from", "repobrain==0.1.0"]
+    assert "--with-editable" not in tokens
+
+
 def test_agent_install_merges_mcp_config_and_handles_spaces(tmp_path):
     root = tmp_path / "repository with spaces"
     root.mkdir()
@@ -78,10 +164,13 @@ def test_agent_install_merges_mcp_config_and_handles_spaces(tmp_path):
     assert config["mcpServers"][MCP_SERVER_NAME] == mcp_server_entry(root)
     entry = config["mcpServers"][MCP_SERVER_NAME]
     assert entry["command"] == "uvx"
-    assert entry["args"][1].startswith("repobrain[mcp]")
-    assert entry["args"][-1] == str(root.resolve())
-    assert entry["args"][-2] == "--path"
-    assert len(entry["args"]) == 6
+    # Positional indexing would break whenever the launcher gains a flag (D52
+    # added --with-editable for editable installs); assert the contract instead.
+    args = entry["args"]
+    assert args[args.index("--from") + 1].startswith("repobrain[mcp]")
+    assert args[-1] == str(root.resolve())
+    assert args[-2] == "--path"
+    assert args[-4:-2] == ["repobrain", "mcp"]
 
     removed = uninstall_agent(root)
     assert removed["changed"] is True
