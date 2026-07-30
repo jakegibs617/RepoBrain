@@ -37,6 +37,34 @@ def test_transport_independent_mcp_tools_return_json_safe_results(small_app):
     assert impact["impact"]["high_confidence"]
 
 
+def test_mcp_project_brief_reports_omissions_on_the_surface_the_caller_reads(small_app):
+    """Asserted on the tool's return value, not on `project_brief`'s.
+
+    D53's first implementation budgeted a payload that no longer existed by the
+    time anyone read it, because `_query` attaches the freshness envelope after
+    the callback returns. The brief budgets its rendered `text` rather than the
+    payload, so the envelope cannot push it over — and that is a claim worth
+    checking here rather than assuming.
+    """
+    tools = RepoBrainTools(small_app)
+    tools.index_repo()
+
+    brief = tools.project_brief(budget=300)
+    truncation = brief["truncation"]
+
+    assert truncation["applied"] is True
+    assert truncation["dropped"]["Configuration"] == 1
+    assert truncation["within_budget"] is True
+    assert brief["token_estimate"] <= 300
+    assert "Truncated to fit 300 tokens" in brief["text"]
+    assert "freshness" in brief
+    json.dumps(brief)
+
+    whole = tools.project_brief(budget=2000)
+    assert whole["truncation"]["applied"] is False
+    assert whole["truncation"]["dropped"] == {}
+
+
 def test_mcp_trace_symbol_reuses_graph_query_and_preserves_shape(small_app):
     tools = RepoBrainTools(small_app)
     tools.index_repo()

@@ -2084,3 +2084,86 @@ mislabelled as a retryable conflict.
 unchanged" is the fact the operator actually needs, and it is true: the losing
 writer's transaction never commits, which the audit verified independently by
 killing a reparse at three points and finding the database byte-identical.
+
+## 2026-07-30 — The brief says what it left out
+
+### D55: `project_brief` reports the facts it declined to add, in the shape the other budgeted surfaces already use
+
+D45 gave `search` truncation reporting, D47 required it in human-readable output
+for `change-context`, D48 budgeted that command, and D53 extended `truncation` to
+`trace_symbol`, `trace_data_flow` and `impact_analysis`. `project_brief` was the
+last budgeted surface that omitted facts in silence, and it is the most-read one
+in the product: the SessionStart hook injects its `text` into every session.
+
+Measured on this repository at `522a5e0`, before:
+
+```
+budget 2000 → 497 tokens  Purpose 2, Subsystems 12, Configuration 12
+budget  300 → 293 tokens  Purpose 2, Subsystems  9   ← Configuration GONE
+```
+
+At 300 the `Configuration` section does not shrink, it disappears. An agent
+reading the result cannot distinguish *this project has no configuration* from
+*twelve configuration facts did not fit*, which is the confidently-wrong answer
+the freshness gate exists to prevent, on the surface an agent reads first.
+
+**"Declined to add" and "trimmed after the fact" report through the same key.**
+They are different mechanisms — the brief never cuts anything, it offers each
+fact whole and refuses the ones that will not fit — but the caller's question is
+*were facts omitted and how many*, not *by what mechanism*. A second vocabulary
+for the same consequence would make an agent learn which surface it is holding
+before it could read the answer. `truncation` carries `applied`, `budget`,
+`within_budget` and `dropped`, keyed by section title.
+
+**The shape is reused; `apply_query_budget` is not.** D53's trimmer measures
+`json.dumps(result)` and pops from the tail of lists. The brief budgets its
+rendered `text` — the only thing the hook injects — and never trims. Calling
+the shared trimmer here would cut `sections` a second time against a different
+measure than the one the text was built to. One shared *contract*, two
+implementations, is the right split; a shared implementation would have to be
+told which of two things it was measuring.
+
+**The report is inside the budget, and one pass cannot do it.** D53's rule —
+the report of the trimming is itself inside the budget rather than pushing the
+payload past it — is harder here, because the footer's size depends on what was
+dropped, which is not known until selection has finished. At budget 300 the
+untruncated brief already costs 297 tokens, so a footer appended afterwards
+lands over.
+
+**Re-running selection against its own last footer looks like the fixed point
+and is not one.** It was implemented that way first and it oscillates:
+declining an early fact frees room a later section then claims, which changes
+the drop counts, which changes the footer again. Measured on the test fixture at
+budget 100, the loop never settled and emitted a 151-token brief — text that was
+never the text that had been measured. The failure was caught by asserting that
+*a brief showing any fact at all must be within budget*, on the reasoning that
+while facts are being shown, one more could always have been declined instead;
+going over is honest only when nothing fits.
+
+**So: at most two passes, the second against the widest footer the omissions
+could produce.** The first pass reserves nothing and is exact and final wherever
+everything fits — including this repository at the default budget, which is
+byte-identical to before. Only when facts were declined does the second pass
+run, reserving the largest report those candidates could ever generate: every
+section losing all of its facts, plus the over-budget line. That bound is exact
+and known before a fact is selected, so selection terminates in one pass with
+no fixed point to converge to. It is slightly conservative — the footer finally
+rendered is usually smaller than the space reserved for it — and being a little
+under a budget is the cheap direction of that error.
+
+**`within_budget` can be false and must say so.** Below `MINIMUM_BUDGET`-scale
+floors the header plus the report of the omissions can exceed the budget on its
+own, and no further action is available: there is nothing left to decline. The
+brief reports the overflow rather than implying the budget was met, the same
+choice D48 and D53 made for the same reason.
+
+Measured after, on this repository:
+
+| call | tokens | reports |
+| --- | ---: | --- |
+| `brief` (default 2000) | 497 | `applied: false`, unchanged from before |
+| `brief --budget 300` | 274 | `Configuration: 12`, `Subsystems: 6` |
+
+Three subsystem facts were traded for the sentence that says twelve
+configuration facts are missing. That is the right trade: the facts a truncated
+brief omits are worth less to an agent than knowing that it was truncated.
