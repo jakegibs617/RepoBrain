@@ -525,6 +525,18 @@ quality page and `AGENT_HANDOFF.md` publish, so one command closes the gate:
   default. ADR-named Markdown files are represented as grounded
   `MarkdownDocument`/`MarkdownSection` nodes rather than a synthetic `ADR`
   node.
+- **What the value-free guarantee does and does not cover.** It covers
+  structured configuration — JSON, TOML, YAML, Dockerfile, Compose,
+  Kubernetes, GitHub Actions — where keys are stored with only a
+  `value_type` and never the value, plus dotenv files, which are excluded from
+  scanning outright and get no node at all. It does **not** extend to source
+  code or Markdown: those are stored verbatim in the full-text index, because
+  searching them is the product. A credential hardcoded in a source string
+  literal, or pasted into a README code fence, is therefore retrievable through
+  `repobrain search` — exactly as it is already retrievable from the working
+  tree and from git history. The index adds no exposure that the repository
+  does not already carry, and `install-agent` gitignores `.repobrain/` so the
+  database itself stays out of version control.
 - Call-graph extraction prefers precision over recall: method calls on
   dynamic receivers (anything other than `self`/`this`) are skipped, and
   cross-file name-only matches require the name to be globally unique.
