@@ -157,6 +157,18 @@ byte-identical, so no file count expresses it — the facts derivable from them
 changed, not the files. Repaired by re-extracting everything, and deliberately
 exempt from the size thresholds below, since the tree is unchanged.
 
+**The code that answered is reported, and is not an axis.** `code` names the
+build serving the request — `fingerprint` is a digest of the installed
+package's sources, `path` is where it was loaded from — and appears on
+`freshness --json`, `status --json`, and every MCP envelope including the
+refusals. `changed_since_index` is true when the build reading differs from the
+build that indexed, `null` when the index predates the field or the sources
+could not be read. **It never sets `is_stale` and never blocks a query.**
+Re-indexing is not the fix and there is no fix you can run: you cannot
+reinstall the code you are running inside. Treat it as evidence when answers
+disagree with the source — most usefully, that the installed RepoBrain is not
+the one you think — and report it to the human rather than acting on it.
+
 A stale *tree* diff of at most **10 files and 256 KiB** is repaired in place
 before the query runs. Anything larger is refused. `--no-auto-index` means
 *refuse instead of repairing* — it never permits a stale answer.

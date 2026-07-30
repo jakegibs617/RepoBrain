@@ -9,6 +9,7 @@ from pathlib import Path
 from ..config import RepoBrainConfig
 from ..graph.store import GraphStore
 from ..parsers.base import ParseResult, ParserRegistry, default_registry
+from ..provenance import CODE_FINGERPRINT_KEY, code_identity
 from .incremental import compute_diff
 from .doc_references import MarkdownMentionReconciler
 from .runtime_adapters import RUNTIME_ADAPTER_VERSION, RuntimeAdapterReconciler
@@ -187,6 +188,17 @@ class Indexer:
             # index must not leave behind a fingerprint claiming its facts were
             # extracted by the current parsers.
             self.store.set_meta(EXTRACTOR_FINGERPRINT_KEY, fingerprint)
+            # The build that stored the facts, for the same reason and with the
+            # same transaction guarantee. Wider than the extractor fingerprint
+            # and never compared against it: a difference here is provenance a
+            # reader may want, not staleness anyone can repair (D56). A build
+            # that cannot read its own sources records nothing rather than
+            # leaving the previous run's value to claim these facts.
+            identity = code_identity()["fingerprint"]
+            if identity is None:
+                self.store.delete_meta(CODE_FINGERPRINT_KEY)
+            else:
+                self.store.set_meta(CODE_FINGERPRINT_KEY, identity)
             stats.nodes_created = len({n.id for n in combined.nodes})
             stats.edges_created = len({e.id for e in combined.edges})
             self.store.record_index_run(

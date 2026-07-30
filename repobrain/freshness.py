@@ -10,6 +10,7 @@ from .history import refresh_history
 from .indexing.indexer import EXTRACTOR_FINGERPRINT_KEY, Indexer
 from .indexing.scanner import scan
 from .parsers.base import default_registry
+from .provenance import code_identity
 
 DEFAULT_MAX_CHANGED_FILES = 10
 DEFAULT_MAX_CHANGED_BYTES = 256 * 1024
@@ -96,7 +97,11 @@ def ensure_fresh(
         "max_changed_files": policy.max_changed_files,
         "max_changed_bytes": policy.max_changed_bytes,
     }
-    base = {"before": before, "thresholds": thresholds}
+    # Carried on every return path, including the refusals: the surface that
+    # declined to answer is the one a caller most wants to identify. It sits
+    # beside the gate's data rather than inside `check_freshness`, which is
+    # what keeps a later edit from quietly feeding provenance into `is_stale`.
+    base = {"before": before, "thresholds": thresholds, "code": code_identity(store)}
     if not before["is_stale"]:
         # Pure commits (or rebases) move HEAD without touching the working
         # tree, so history freshness is checked even when files are current.

@@ -2167,3 +2167,100 @@ Measured after, on this repository:
 Three subsystem facts were traded for the sentence that says twelve
 configuration facts are missing. That is the right trade: the facts a truncated
 brief omits are worth less to an agent than knowing that it was truncated.
+
+## 2026-07-30 — Nothing in the output named the code that produced it
+
+### D56: Every status surface carries the identity of the build that answered, as provenance that can never become a gate
+
+D44 fingerprints `repobrain/parsers/**` to answer *would re-extracting these
+files produce different facts*, and that scope is right for that question. It
+leaves the read path — `briefing.py`, `graph/queries.py`, the CLI, the MCP
+server — outside any identity at all. D52 removed the way a stale build got
+installed and said, in as many words, that it had not made code staleness
+observable. This is that item.
+
+Measured on this branch, editing one file at a time:
+
+| edit | code digest | D44 fingerprint |
+| --- | --- | --- |
+| baseline | `657aed809a266d34` | `e26641c13984225b` |
+| `briefing.py` | `ee9ba634add53f1c` | `e26641c13984225b` |
+| `graph/queries.py` | `46e80b3615118451` | `e26641c13984225b` |
+| `parsers/route_parser.py` | `94b4405b9ac6001c` | `ebd57afba5f5b2da` |
+
+The right-hand column is D44 working exactly as designed, and the first two
+rows are the blind spot: the whole read path can be replaced and every surface
+still reports `current`, sincerely, because old code and the index old code
+built are perfectly self-consistent. `__version__` is no help — `0.1.0` was set
+once and has never moved.
+
+**The identity is a digest of the installed package's own sources, and the
+cost was measured before the scope was widened.** D44 documented why it refuses
+to cache its digest — a cache holds a stale answer across exactly the edit the
+digest exists to notice — and widening from 9 files to 40 is what put that
+reasoning back in question, on a command a statusline may poll on a timer.
+
+| digest | files | bytes | per call |
+| --- | ---: | ---: | ---: |
+| D44, `parsers/*.py` | 9 | 148,653 | 0.35 ms |
+| this, `**/*.py` | 40 | 489,671 | 2.31 ms |
+
+6.6x the time for 3.3x the bytes, because per-file open and stat dominates at
+this size. `repobrain freshness` end-to-end is **0.17 s** with the field
+present, unchanged to the resolution of the measurement, so the no-cache rule
+survives the widening intact. (An earlier estimate of 1.12 ms was taken over 20
+cold iterations; 2.31 ms is the steady-state figure and is the one to trust.)
+
+**The alternatives are cheaper and describe only some installs.** The wheel's
+`RECORD` hash was the obvious candidate until it was read: under this
+repository's own editable install `RECORD` is **12 lines and lists no source
+file at all**, only `_editable_impl_repobrain.pth` and `dist-info/` entries. It
+is absent exactly where D52's stale-wheel bug lived. A git SHA describes a
+checkout and nothing else. A field that is present for wheels and absent for
+editables is worse than no field, because a caller cannot tell which of the two
+it is holding.
+
+**Paths are hashed relative to the package root.** An identity that moved with
+the install directory would name the machine rather than the build, and could
+not be compared across the only boundary worth comparing it across. Module
+names are hashed alongside the bytes, so moving a definition from one module to
+another is a change — D44's rename argument, unchanged.
+
+**It is a label, and it cannot be a gate.** Both axes D40 designed are
+repairable by the agent that reads them: it runs `repobrain index`. No agent can
+reinstall the code it is running inside, and for a read-path change re-indexing
+would not alter one stored fact, so a `status` of `stale` on this axis could
+never become `ok` by any action available to the caller. That is a different
+object from the one `can_query` promises, so `changed_since_index` never
+reaches `is_stale`, and a test asserts it: wiring it in kills
+`test_code_that_moved_since_the_index_is_a_label_and_never_a_gate`.
+
+**Where it appears follows from that.** `freshness --json` and `status --json`
+carry it unconditionally, and the MCP envelope inherits it on every tool,
+including the refusals — the surface that declined to answer is the one a
+caller most wants to identify. The two human-readable surfaces print it *only*
+on a mismatch: `freshness` keeps its one-line verdict and adds a note, and the
+brief header, which the SessionStart hook injects into every session, stays
+byte-identical while the code and the index agree. A line that is always there
+is not read.
+
+**Absent is unknown, and unknown is not changed.** Every database written
+before this decision lacks the key; reporting those as changed would light the
+advisory on every pre-existing install, and an advisory that is always on is
+off. A build that cannot read its own sources reports unknown for the same
+reason, rather than raising: the first implementation digested the package
+inside the index run, and `test_unreadable_file_is_skipped_with_warning` — a
+test written for something else entirely — turned an unreadable module into an
+`OSError` out of `index`. **A label must never be able to abort the thing it
+labels.** D44's parser digest is deliberately *not* softened the same way: it
+is an input to the gate, and unreadable parsers mean staleness cannot be
+decided, which is not the same situation as a caption that cannot be printed.
+
+**What this does not do, stated plainly.** The identity always says which build
+answered — that is the M13 complaint and it is closed. The comparison says only
+that the reading build differs from the indexing build; it is *evidence of*
+drift, not a measure of age, and re-indexing with the old build clears it while
+the old build is still installed. Absolute staleness would need a reference
+this process does not have — a release feed, or the checkout's own sources when
+they are not the ones installed — and inventing one to make a number look
+authoritative is the failure this whole D-series exists to avoid.

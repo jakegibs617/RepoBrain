@@ -317,7 +317,9 @@ uv run --isolated --no-project \
 # machine-readable "reason_code" (no_index / schema_mismatch / unreadable)
 # rather than failing, so status displays polling on a timer can call it safely.
 # "is_stale" covers two axes: files that moved ("out_of_date_count") and an
-# index built by a different set of parsers ("extractor_changed")
+# index built by a different set of parsers ("extractor_changed"). "code" names
+# the build that answered and is provenance, not a third axis: nothing the
+# caller can run repairs it, so it never sets "is_stale"
 .venv/bin/repobrain freshness
 .venv/bin/repobrain freshness --json
 
