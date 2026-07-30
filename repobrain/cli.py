@@ -20,7 +20,7 @@ from .change_context import (
 )
 from .diagnostics import configure_logging, log_event
 from .graph.queries import explain_file as run_explain_file
-from .graph.queries import CHANGE_TYPES
+from .graph.queries import CHANGE_TYPES, DEFAULT_QUERY_BUDGET, apply_query_budget
 from .graph.queries import code_for_docs as run_code_for_docs
 from .graph.queries import docs_for_code as run_docs_for_code
 from .graph.queries import find_symbol as run_find_symbol
@@ -776,7 +776,9 @@ def trace_config(name: str, path: str, as_json: bool, no_auto_index: bool) -> No
 
 @trace.command("data-flow")
 @click.argument("start")
-@click.option("--depth", type=click.IntRange(0, 10), default=4)
+@click.option("--depth", type=click.IntRange(0, 10), default=2, show_default=True,
+              help="Hops to follow. Two reaches route -> handler -> service; "
+                   "four cost ~25,000 tokens on the same start node.")
 @click.option("--direction", type=click.Choice(["in", "out", "both"]), default="both")
 @click.option("--path", "path", type=click.Path(exists=True, file_okay=False), default=".")
 @click.option("--json", "as_json", is_flag=True)
@@ -803,10 +805,13 @@ def trace_data_flow(start: str, depth: int, direction: str, path: str,
               show_default=True,
               help="Change scenario label used in the impact report.")
 @click.option("--depth", type=click.IntRange(1, 10), default=3)
+@click.option("--budget", type=click.IntRange(min=1), default=DEFAULT_QUERY_BUDGET,
+              show_default=True,
+              help="Approximate token budget (ceil(chars/4)); truncation is reported.")
 @click.option("--path", "path", type=click.Path(exists=True, file_okay=False), default=".")
 @click.option("--json", "as_json", is_flag=True)
 @_freshness_option
-def impact(target: str, change_type: str, depth: int, path: str,
+def impact(target: str, change_type: str, depth: int, budget: int, path: str,
            as_json: bool, no_auto_index: bool) -> None:
     """Estimate likely blast radius for a file or symbol change."""
     with _open_store(_resolve_root(path), auto_index=not no_auto_index) as store:
@@ -815,6 +820,7 @@ def impact(target: str, change_type: str, depth: int, path: str,
                                      history=history)
     if result is None:
         raise click.ClickException(f"No unique indexed target found for '{target}'.")
+    result = apply_query_budget(result, budget)
     if as_json:
         click.echo(json.dumps(result, indent=2))
         return
@@ -835,6 +841,11 @@ def impact(target: str, change_type: str, depth: int, path: str,
     if not historical["items"]:
         detail = f" ({historical['explanation']})" if historical.get("status") else ""
         click.echo(f"  none{detail}")
+    truncation = result.get("truncation") or {}
+    if truncation.get("applied"):
+        click.echo(f"\nTruncated to fit {truncation['budget']} tokens")
+        for label, count in sorted(truncation["dropped"].items()):
+            click.echo(f"  dropped {count} from {label}")
 
 
 @main.command("report")

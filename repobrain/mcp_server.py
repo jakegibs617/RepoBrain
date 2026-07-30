@@ -10,6 +10,8 @@ from .briefing import DEFAULT_BUDGET, project_brief
 from .change_context import DEFAULT_CHANGE_BUDGET, GitDiffError, change_context
 from .graph.queries import (
     CHANGE_TYPES,
+    DEFAULT_QUERY_BUDGET,
+    apply_query_budget,
     code_for_docs,
     docs_for_code,
     explain_file,
@@ -59,8 +61,14 @@ class RepoBrainTools:
             raise ValueError(f"No RepoBrain database at {db_path}; call index_repo first")
         return GraphStore(db_path)
 
-    def _query(self, callback, *, auto_index: bool = True) -> dict:
-        """Run one MCP read behind the shared freshness gate."""
+    def _query(self, callback, *, auto_index: bool = True,
+               budget: int | None = None) -> dict:
+        """Run one MCP read behind the shared freshness gate.
+
+        `budget` is applied here rather than inside the callback because the
+        freshness envelope is attached below: trimming before it exists
+        measures a payload the caller never receives, and lands over budget.
+        """
         with self._store() as store:
             freshness = ensure_fresh(self.root, store, auto_index=auto_index)
             if not freshness["can_query"]:
@@ -75,6 +83,8 @@ class RepoBrainTools:
             result = callback(store)
         result = _safe(result)
         result["freshness"] = _safe(freshness)
+        if budget is not None:
+            apply_query_budget(result, budget)
         log_event(
             "mcp.query.completed",
             status=result.get("status", "ok"),
@@ -183,13 +193,19 @@ class RepoBrainTools:
             return {"status": "ok", "symbols": _safe(result)}
         return self._query(run, auto_index=auto_index)
 
-    def trace_symbol(self, symbol: str, depth: int = 2, auto_index: bool = True,
-                     direction: str = "both") -> dict:
-        """Trace graph edges around SYMBOL; depth counts edges (0-10)."""
+    def trace_symbol(self, symbol: str, depth: int = 1, auto_index: bool = True,
+                     direction: str = "both",
+                     budget: int = DEFAULT_QUERY_BUDGET) -> dict:
+        """Trace graph edges around SYMBOL; depth counts edges (0-10).
+
+        Depth defaults to one hop and the payload is budgeted: measured on this
+        repository, a two-hop trace of a hub symbol costs 62,000-104,000 tokens
+        and a three-hop trace 310,000-423,000. Raise `depth` deliberately.
+        """
         def run(store):
             result = trace_symbol(store, symbol, depth=depth, direction=direction)
             return {"status": "ok", **result}
-        return self._query(run, auto_index=auto_index)
+        return self._query(run, auto_index=auto_index, budget=budget)
 
     def trace_config(self, key: str, depth: int = 3, auto_index: bool = True) -> dict:
         """Find direct config definitions and reads.
@@ -202,18 +218,30 @@ class RepoBrainTools:
             return {"status": "ok", **_safe(result)}
         return self._query(run, auto_index=auto_index)
 
-    def trace_data_flow(self, start: str, depth: int = 4, direction: str = "both",
-                        auto_index: bool = True) -> dict:
+    def trace_data_flow(self, start: str, depth: int = 2, direction: str = "both",
+                        auto_index: bool = True,
+                        budget: int = DEFAULT_QUERY_BUDGET) -> dict:
+        """Trace a route, event, file, or symbol through runtime-oriented edges.
+
+        Depth defaults to two hops -- enough for route to handler to service,
+        measured at ~565 tokens, where the previous default of four cost
+        ~25,000 on the same start node.
+        """
         if direction not in ("in", "out", "both"):
             raise ValueError("direction must be in, out, or both")
         def run(store):
             result = trace_data_flow(store, start, depth=depth, direction=direction)
             return {"status": "ok" if result else "not_found", "flow": _safe(result)}
-        return self._query(run, auto_index=auto_index)
+        return self._query(run, auto_index=auto_index, budget=budget)
 
     def impact_analysis(self, target: str, change_type: str = "modify",
-                        auto_index: bool = True) -> dict:
-        """Estimate impact for a modify/modified, added, deleted, or renamed scenario."""
+                        auto_index: bool = True,
+                        budget: int = DEFAULT_QUERY_BUDGET) -> dict:
+        """Estimate impact for a modify/modified, added, deleted, or renamed scenario.
+
+        Budgeted: measured unbounded at ~46,000 tokens for a hub file, whose
+        buckets held 416 rows.
+        """
         if change_type not in CHANGE_TYPES:
             choices = ", ".join(CHANGE_TYPES)
             raise ValueError(f"change_type must be one of: {choices}")
@@ -222,7 +250,7 @@ class RepoBrainTools:
             result = impact_analysis(store, target, change_type=change_type,
                                      history=history)
             return {"status": "ok" if result else "not_found", "impact": _safe(result)}
-        return self._query(run, auto_index=auto_index)
+        return self._query(run, auto_index=auto_index, budget=budget)
 
     def docs_for_code(self, target: str, limit: int = 50, auto_index: bool = True) -> dict:
         def run(store):

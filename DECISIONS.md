@@ -1969,3 +1969,65 @@ D52 removes the way that state was reached in the shipped configuration; it
 does not make code staleness observable. Publishing the running build's
 identity in the freshness envelope is the general fix, and is queued rather
 than smuggled in here.
+
+## 2026-07-29 — An answer that does not fit is not an answer
+
+### D53: `trace_symbol`, `trace_data_flow` and `impact_analysis` get measured defaults and a reported budget; response size is treated as correctness
+
+D48 gave `change_context` a budget because "137,858 unbudgeted tokens is not an
+answer." That reasoning was never extended to the other traversal tools. The
+2026-07-29 audit measured them on this repository:
+
+| call | before |
+| --- | ---: |
+| `trace_symbol("index")` at the default depth 2 | 62,101 tokens |
+| `trace_symbol("GraphStore")` at depth 2 | 104,128 tokens |
+| `trace_symbol(…)` at depth 3 | 310,463 – 423,306 tokens |
+| `impact_analysis("repobrain/graph/store.py")` | 45,953 tokens |
+| `trace_data_flow(…)` at the default depth 4 | 25,247 tokens |
+
+None of them reported truncation, `impact_analysis` had no size parameter at
+all, and the CLI shared the defect (`impact --json` at 231,524 characters).
+These are the calls the shipped agent skill tells an agent to make *early*,
+before it knows enough to narrow the argument.
+
+**Measured before designing, because the queued item said the budget might be
+hiding a bad default — and it was, partly.** `trace_data_flow` costs 367 tokens
+at depth 1, 565 at depth 2 and 25,247 at depth 4: the default was simply wrong,
+and two hops is what the tool is for (route → handler → service). Its default
+is now 2. `trace_symbol` costs 4,019 tokens at depth 1 for an ordinary symbol
+but **17,334 at depth 1** for a hub like `GraphStore`, so lowering its default
+to 1 was necessary and *not* sufficient. Depth fixes the common case; only a
+budget fixes the tail.
+
+**One trimmer, not three.** `apply_query_budget` finds trimmable lists by name
+at the top level or one level in, which covers `trace_symbol`'s top-level
+`nodes`/`edges`, `trace_data_flow`'s `flow.nodes`, and `impact_analysis`'s
+`impact.*` buckets without three near-identical implementations.
+`change_context` keeps its own: its reason-renumbering has no analogue here,
+and merging them would generalise a shape that only one caller has.
+
+**Shed order is stated, not incidental.** Docs, then recommended tests, then
+low/medium/high confidence, then edges, then nodes. Lowest-value evidence goes
+first, and containers are trimmed from the tail so the ordering each query
+already establishes — confidence, then path and line — decides what survives.
+
+**The budget is applied at the envelope, not inside the query.** The first
+implementation trimmed inside the MCP callback and still returned 10,080 tokens
+against a 10,000 budget: `_query` attaches the freshness envelope *after* the
+callback returns, so trimming measured a payload the caller never receives.
+Budgeting now happens in `_query`, where the response is complete. The same
+bug in miniature — measuring something other than what you ship — is why the
+tests assert on the tool's return value rather than on the query function's.
+
+**10,000 rather than D48's 15,000.** `change-context` is the one call that
+frames a whole session; these are lookups made several times inside it, and
+they should not each cost what the session opener costs.
+
+**Truncation is reported on both surfaces**, including the human-readable CLI
+output, for D45's reason: a caller that cannot tell a trimmed answer from a
+complete one will treat it as complete, which is the confidently-wrong answer
+the freshness gate exists to prevent. Measured after: `impact --json` 9,943
+tokens, `trace_symbol("GraphStore")` 9,963, `impact_analysis` 9,981,
+`trace_data_flow` 608 — each either within budget untruncated, or truncated and
+saying so.
