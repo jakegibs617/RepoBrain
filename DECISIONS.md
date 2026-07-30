@@ -2208,7 +2208,17 @@ reasoning back in question, on a command a statusline may poll on a timer.
 6.6x the time for 3.3x the bytes, because per-file open and stat dominates at
 this size. `repobrain freshness` end-to-end is **0.17 s** with the field
 present, unchanged to the resolution of the measurement, so the no-cache rule
-survives the widening intact. (An earlier estimate of 1.12 ms was taken over 20
+survives the widening intact.
+
+The poll is not where most of this lands, and saying only that number would
+undersell it: `ensure_fresh` carries the identity too, so every gated read pays
+it. Measured on this repository, the gate is 28.0 ms and the digest is 2.46 ms
+of it — **8.8%**. That is accepted rather than optimized. A per-process cache
+would remove it, and is *more* accurate for a long-lived MCP server, whose
+answering build is the one imported at startup rather than the bytes now on
+disk — but it is exactly the cache D44 refused, and buying 2.46 ms with a value
+that can disagree with the filesystem is the wrong trade at this size. Revisit
+it with a measurement if the package grows an order of magnitude. (An earlier estimate of 1.12 ms was taken over 20
 cold iterations; 2.31 ms is the steady-state figure and is the one to trust.)
 
 **The alternatives are cheaper and describe only some installs.** The wheel's
