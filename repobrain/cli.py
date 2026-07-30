@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 from collections.abc import Iterable
 from contextlib import contextmanager
 from pathlib import Path
@@ -27,7 +28,12 @@ from .graph.queries import find_symbol as run_find_symbol
 from .graph.queries import impact_analysis as run_impact_analysis
 from .graph.queries import trace_data_flow as run_trace_data_flow
 from .graph.queries import trace_config as run_trace_config
-from .graph.store import GraphStore
+from .graph.store import (
+    LOCK_BUSY_EXIT_CODE,
+    LOCK_BUSY_TIMEOUT_MS,
+    GraphStore,
+    is_write_lock_error,
+)
 from .freshness import FreshnessBlockedError, check_freshness, require_fresh
 from .history import (
     co_change_report,
@@ -89,7 +95,38 @@ def _freshness_option(function):
     )(function)
 
 
-@click.group()
+class WriteLockBusy(click.ClickException):
+    """A held write lock, reported in the CLI's own voice with its own code."""
+
+    exit_code = LOCK_BUSY_EXIT_CODE
+
+    def __init__(self) -> None:
+        super().__init__(
+            "Another RepoBrain index run holds the write lock on this database. "
+            f"Waited {LOCK_BUSY_TIMEOUT_MS // 1000}s; retry shortly. "
+            "The graph is unchanged."
+        )
+
+
+class _RepoBrainGroup(click.Group):
+    """Translate a lost write-lock race once, for every subcommand.
+
+    Read commands auto-index by default, so contention is not confined to
+    `index`: the translation belongs at the group rather than at each writer.
+    """
+
+    def invoke(self, ctx: click.Context):
+        try:
+            return super().invoke(ctx)
+        except sqlite3.OperationalError as exc:
+            if not is_write_lock_error(exc):
+                raise
+            log_event("cli.command.blocked", status="locked",
+                      command=ctx.invoked_subcommand or "unknown")
+            raise WriteLockBusy() from exc
+
+
+@click.group(cls=_RepoBrainGroup)
 @click.option("--verbose", is_flag=True, help="Emit structured operational logs to stderr.")
 @click.option(
     "--log-level",

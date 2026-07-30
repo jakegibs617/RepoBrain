@@ -388,6 +388,12 @@ Each database is pinned to the repository root it indexes (stored in a `meta`
 table). Asking a database to index a different root fails with a clear error
 instead of silently purging the previous graph.
 
+One writer at a time. A second concurrent index run waits up to five seconds
+for the lock — enough to absorb the ordinary overlap of a Git hook firing while
+a session starts — and otherwise exits **75** (`EX_TEMPFAIL`) with a retryable
+message, leaving the graph unchanged. Every other failure keeps exit 1, so a
+hook can retry a lock conflict without parsing the message.
+
 Example search output:
 
 ```text

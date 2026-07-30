@@ -126,6 +126,33 @@ def _chunked(items: list[str], size: int):
         yield items[i : i + size]
 
 
+#: How long a writer waits for another writer's transaction before giving up.
+#: An index run of this project takes ~0.7 s and 6,000 files ~2.9 s, so a few
+#: seconds converts the overwhelmingly common overlap -- a Git hook firing while
+#: a session starts -- into a wait nobody notices rather than a failure.
+LOCK_BUSY_TIMEOUT_MS = 5_000
+
+#: `EX_TEMPFAIL`. A held write lock is the one failure here that is worth
+#: retrying unchanged, and the Git hooks and SessionStart hook this project
+#: installs are exactly the callers that should be able to tell that apart from
+#: a real error without parsing a message.
+LOCK_BUSY_EXIT_CODE = 75
+
+
+def is_write_lock_error(exc: BaseException) -> bool:
+    """Whether `exc` is SQLite refusing a write because another writer holds it.
+
+    Matched on message text because SQLite surfaces both SQLITE_BUSY and
+    SQLITE_LOCKED as a bare `OperationalError`; `sqlite3.SQLITE_BUSY` result
+    codes are only available via `Connection.setconfig`/extended codes that
+    this driver does not expose on the exception.
+    """
+    if not isinstance(exc, sqlite3.OperationalError):
+        return False
+    message = str(exc).lower()
+    return "database is locked" in message or "database table is locked" in message
+
+
 class GraphStore:
     """Thin wrapper around a SQLite database holding the project graph."""
 
@@ -147,6 +174,7 @@ class GraphStore:
         self.conn.execute("PRAGMA secure_delete=ON")
         self.conn.execute("PRAGMA journal_mode=WAL")
         self.conn.execute("PRAGMA foreign_keys=ON")
+        self.conn.execute(f"PRAGMA busy_timeout={LOCK_BUSY_TIMEOUT_MS}")
         current_version = self.conn.execute("PRAGMA user_version").fetchone()[0]
         if current_version > _SCHEMA_VERSION:
             self.conn.close()

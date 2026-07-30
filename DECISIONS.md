@@ -2031,3 +2031,56 @@ the freshness gate exists to prevent. Measured after: `impact --json` 9,943
 tokens, `trace_symbol("GraphStore")` 9,963, `impact_analysis` 9,981,
 `trace_data_flow` 608 — each either within budget untruncated, or truncated and
 saying so.
+
+## 2026-07-30 — Losing a write race is an outcome, not a crash
+
+### D54: Writers wait five seconds, then report a retryable refusal with its own exit code
+
+The 2026-07-29 audit ran two `repobrain index --no-incremental` processes
+against one database. The graph was fine — `integrity_check: ok`, 36,121 nodes,
+zero duplicate ids, because SQLite's lock did its job. The *operator* got a raw
+traceback ending `sqlite3.OperationalError: database is locked`, raised inside
+`GraphStore.delete_paths`, from a tool whose every other refusal is a sentence.
+
+**This is a shipped configuration, not an exotic race.** `install-agent
+--git-hooks` writes `post-commit` and `post-merge` dispatchers, and the
+SessionStart hook indexes as well. A commit landing while a session starts, or
+two agent sessions in one repository, is the ordinary case. Nothing in the suite
+spawned two writers, which is why a storage-layer exception was reaching the
+terminal unnoticed.
+
+**Two changes, because the failure has two populations.** A `busy_timeout` of
+5,000 ms converts the common overlap into a wait nobody notices: an index run of
+this project takes ~0.7 s, so the second writer simply queues. Measured, three
+rounds of two concurrent full reparses on the 153-file corpus: both processes
+exit 0 every time, integrity clean. The tail — a 6,000-file reparse that holds
+the lock for ~2.9 s while another waits — still loses, and for that population
+the answer is a message rather than a longer wait. Waiting indefinitely would
+convert a visible conflict into an invisible hang, which is worse for a tool a
+Git hook invokes.
+
+**Exit code 75, `EX_TEMPFAIL`.** A held write lock is the one failure here worth
+retrying *unchanged*, and the Git hooks and SessionStart hook this project
+installs are exactly the callers that should distinguish it from a real error
+without parsing prose. Every other failure keeps `ClickException`'s exit 1, so
+the new code carries information rather than fragmenting the convention.
+
+**Translated at the group, not at each writer.** Read commands auto-index by
+default, so contention is not confined to `index` — a `search` that repairs a
+small stale diff can lose the same race. `_RepoBrainGroup.invoke` catches
+`sqlite3.OperationalError` once, re-raises anything that is not a lock, and
+otherwise reports `WriteLockBusy`. Placing the guard at each write site would
+have needed the same code in six places and still missed the auto-index path.
+
+**Classified by message text, deliberately.** SQLite surfaces both
+`SQLITE_BUSY` and `SQLITE_LOCKED` as a bare `OperationalError`, and the
+extended result codes that would distinguish them are not exposed on the
+exception by this driver. `is_write_lock_error` matches the two documented
+strings and nothing else, so an unrelated `OperationalError` — a malformed
+schema, a disk error — still surfaces with its own traceback rather than being
+mislabelled as a retryable conflict.
+
+**The message states the outcome, not just the cause.** "The graph is
+unchanged" is the fact the operator actually needs, and it is true: the losing
+writer's transaction never commits, which the audit verified independently by
+killing a reparse at three points and finding the database byte-identical.
