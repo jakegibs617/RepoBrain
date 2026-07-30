@@ -5,7 +5,12 @@ import pytest
 
 from repobrain.graph.store import GraphStore
 from repobrain.indexing.indexer import Indexer, RepoRootMismatchError
-from repobrain.indexing.scanner import IgnoreMatcher, detect_language, scan
+from repobrain.indexing.scanner import (
+    MAX_FILE_SIZE,
+    IgnoreMatcher,
+    detect_language,
+    scan,
+)
 
 
 def _node_paths(store, type_=None):
@@ -185,6 +190,24 @@ def test_directory_symlink_to_an_outside_tree_contributes_nothing(tmp_path):
     paths = {item.path for item in scan(repo)}
 
     assert paths == {"app.py"}
+
+
+def test_files_over_the_size_cap_are_skipped_and_the_cap_is_the_documented_one(tmp_path):
+    # The 2 MB cap survived full-suite mutation testing during the 2026-07-29
+    # audit: raising MAX_FILE_SIZE to 1 GB left all 395 tests passing. The cap
+    # is a documented boundary, so it gets an assertion rather than trust.
+    assert MAX_FILE_SIZE == 2 * 1024 * 1024
+    (tmp_path / "under.py").write_text("x = 1\n" * 8, encoding="utf-8")
+    oversized = tmp_path / "over.py"
+    oversized.write_text("y = 2\n" * ((MAX_FILE_SIZE // 6) + 64), encoding="utf-8")
+    assert oversized.stat().st_size > MAX_FILE_SIZE
+
+    paths = {item.path for item in scan(tmp_path)}
+
+    assert paths == {"under.py"}
+    # Explicit cap wins over the default, proving the parameter is honoured and
+    # not merely that this one file happens to be large.
+    assert {item.path for item in scan(tmp_path, max_file_size=8)} == set()
 
 
 def test_anchored_dir_pattern_matches_only_at_root():
