@@ -36,6 +36,11 @@ def node_app(tmp_path: Path) -> Path:
 
 
 @pytest.fixture
+def click_app(tmp_path: Path) -> Path:
+    return copy_fixture("click_cli_app", tmp_path)
+
+
+@pytest.fixture
 def store(tmp_path: Path) -> GraphStore:
     s = GraphStore(tmp_path / "db" / "repobrain.sqlite")
     yield s

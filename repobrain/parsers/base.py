@@ -18,6 +18,20 @@ _RAW_FTS_EXCLUDED_LANGUAGES = {"dockerfile", "json", "toml", "yaml"}
 #: parser sources, so both are detected without anyone remembering.
 EXTRACTOR_VERSION = "2"
 
+#: Files a parser may read from the indexed tree in ``begin_run``, outside the
+#: per-file corpus the incremental fast path exists to skip.
+#:
+#: The invariant is that an unchanged run does not re-read *the files it is
+#: indexing* — a cost that scales with the tree. A fixed number of bounded
+#: manifest reads does not, and D19 established the exemption for ``go.mod``.
+#: It stayed invisible: the guard on it patched ``Path.read_bytes`` while
+#: ``_read_go_module_prefix`` reads via ``read_text``, so the exemption was
+#: enforced by nothing and grew by accident when a second reader arrived.
+#: Declaring the set is what makes a third one a decision instead of a
+#: coincidence — ``test_no_change_fast_path_does_not_read_file_bodies`` holds
+#: reads inside the indexed root to exactly these names.
+RUN_SCOPED_MANIFESTS = frozenset({"go.mod", "pyproject.toml"})
+
 
 def parser_source_digest() -> str:
     """Digest the bytes of every parser module in this package.
@@ -177,6 +191,7 @@ class ParserRegistry:
 
 
 def default_registry() -> ParserRegistry:
+    from .cli_parser import CliParser
     from .code_treesitter import CodeParser
     from .config_parser import EnvFileParser
     from .dockerfile_parser import DockerfileParser
@@ -195,4 +210,5 @@ def default_registry() -> ParserRegistry:
     registry.register(MarkdownParser())
     registry.register(CodeParser())
     registry.register(RouteParser())
+    registry.register(CliParser())
     return registry

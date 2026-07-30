@@ -339,7 +339,12 @@ def project_brief(
         ("Subsystems", _node_facts(
             store, ("Directory", "Module"), 12, by_degree=True,
             withhold=_UNREPRESENTATIVE_DIRS + _DOCUMENTATION_DIRS)),
-        ("Entrypoints", _node_facts(store, ("Route",), 12)),
+        # One section, because both types answer the same agent question: how
+        # do I invoke this? They have nothing else in common, and they do not
+        # need to — `_fact_line` already prints each fact's type, so the
+        # section states which kind each one is without a second heading.
+        ("Entrypoints", _node_facts(store, ("Route", "CLICommand"), 12,
+                                    by_type=True)),
         ("Configuration", _node_facts(
             store, ("EnvVar", "ConfigFile", "ConfigKey"), 12, by_type=True,
             withhold=_UNREPRESENTATIVE_DIRS + _DOCUMENTATION_DIRS)),
