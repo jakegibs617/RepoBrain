@@ -235,6 +235,15 @@ def _render(staleness: dict, sections: list[dict], memory_counts: dict,
         )
     else:
         lines.append("Index freshness: current.")
+    # Provenance, not a third staleness axis: it says which build answered, and
+    # nothing the reading agent can run changes it (D56). Printed only on a
+    # mismatch, because the surface this header is injected into is every
+    # session's first tokens and a line that is always there is never read.
+    if staleness.get("code", {}).get("changed_since_index"):
+        lines.append(
+            "Note: this index was built by different code than the build "
+            f"answering now ({staleness['code']['fingerprint']})."
+        )
     if memory_counts["invalidated"] or memory_counts["drifted"]:
         lines.append(
             "Memory verification: "
@@ -320,6 +329,9 @@ def project_brief(
     root = Path(root).resolve()
     freshness_gate = require_fresh(root, store, auto_index=auto_index)
     freshness = freshness_gate.get("after") or freshness_gate["before"]
+    # The header describes both the facts' age and the build reporting on it;
+    # the two stay separate keys because only one of them is repairable.
+    freshness = {**freshness, "code": freshness_gate["code"]}
     alerts, recent, assumptions, questions, memory_counts = _memory_sections(root, store)
     candidates = [
         ("Memory requiring attention", alerts),

@@ -492,6 +492,9 @@ class GraphStore:
         row = self.conn.execute("SELECT value FROM meta WHERE key = ?", (key,)).fetchone()
         return row["value"] if row else None
 
+    def delete_meta(self, key: str) -> None:
+        self.conn.execute("DELETE FROM meta WHERE key = ?", (key,))
+
     def set_meta(self, key: str, value: str) -> None:
         self.conn.execute(
             "INSERT INTO meta (key, value) VALUES (?, ?) "

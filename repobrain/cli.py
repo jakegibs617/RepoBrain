@@ -35,6 +35,7 @@ from .graph.store import (
     is_write_lock_error,
 )
 from .freshness import FreshnessBlockedError, check_freshness, require_fresh
+from .provenance import code_identity
 from .history import (
     co_change_report,
     churn_report,
@@ -248,11 +249,13 @@ def status(path: str, as_json: bool, no_auto_index: bool) -> None:
         node_counts = store.counts_by_type("nodes")
         edge_counts = store.counts_by_type("edges")
         file_count = store.file_count()
+        identity = code_identity(store)
 
     if as_json:
         click.echo(json.dumps({
             "last_run": dict(run) if run else None,
             "files": file_count,
+            "code": identity,
             "nodes_by_type": node_counts,
             "edges_by_type": edge_counts,
         }, indent=2))
@@ -314,6 +317,7 @@ def freshness(path: str, as_json: bool) -> None:
                 "changed_bytes": staleness["changed_bytes"],
                 "files": store.file_count(),
                 "last_indexed_at": run["finished_at"] if run else None,
+                "code": code_identity(store),
             }
     except Exception as exc:  # noqa: BLE001 - a display surface must never crash
         result = {
@@ -327,10 +331,20 @@ def freshness(path: str, as_json: bool) -> None:
         return
     if result["status"] != "ok":
         click.echo(f"Index freshness: unavailable ({result['reason']})")
-    elif result["is_stale"]:
+        return
+    if result["is_stale"]:
         click.echo(f"STALE INDEX: {_stale_summary(result)}; run `repobrain index`.")
     else:
         click.echo("Index freshness: current.")
+    # Advisory, and printed only when it has something to say. It is not part
+    # of the staleness verdict above and never changes the exit code: nothing
+    # the reader can run repairs it (D56).
+    if result["code"]["changed_since_index"]:
+        click.echo(
+            f"Note: this index was built by different code than the build "
+            f"answering now ({result['code']['fingerprint']}, "
+            f"{result['code']['path']})."
+        )
 
 
 def _unavailable_code(exc: Exception) -> str:
