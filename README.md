@@ -49,7 +49,11 @@ Implemented:
 - Deterministic Flask-style and Express route adapters with precise named and
   inline callback identities, plus conservative SQLAlchemy table flow
 - Grounded data-flow tracing and confidence-bucketed impact analysis shared by
-  CLI, MCP, and change-context surfaces
+  CLI, MCP, and change-context surfaces. Traversals carry a token budget
+  (default 10,000) and report what they trimmed; `trace_symbol` defaults to one
+  hop and `trace data-flow` to two, because an unbounded traversal of a hub
+  symbol measured 62,000–423,000 tokens — larger than the context window of the
+  agent it is built for.
 - A local FastMCP server exposing 19 repository-scoped tools
 - Silent-by-default structured diagnostics, opt-in via CLI `--verbose` /
   `--log-level` or `REPOBRAIN_LOG_LEVEL`; MCP logs stay on stderr and exclude
@@ -352,9 +356,12 @@ uv run --isolated --no-project \
 .venv/bin/repobrain code-for-docs README.md --heading Architecture --path tests/fixtures/small_python_app
 
 # trace config and runtime flow, then estimate change impact
+# traversals are budgeted (default 10,000 tokens) and report what they trimmed;
+# --depth defaults to 2 for data-flow (route -> handler -> service)
 .venv/bin/repobrain trace config DATABASE_URL --path tests/fixtures/small_python_app
 .venv/bin/repobrain trace data-flow "POST /api/users" --path tests/fixtures/small_python_app
 .venv/bin/repobrain impact app/services/user_service.py --path tests/fixtures/small_python_app
+.venv/bin/repobrain impact repobrain/graph/store.py --budget 4000 --json
 
 # deterministic Git history evidence (local plumbing only; heuristic, labeled)
 # co-change: files that historically change together, with supporting commits

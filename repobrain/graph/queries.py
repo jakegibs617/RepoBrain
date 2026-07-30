@@ -619,10 +619,86 @@ def _node_payload(row) -> dict:
     }
 
 
+#: Default ceiling for the graph query tools an agent calls mid-session.
+#: Smaller than `DEFAULT_CHANGE_BUDGET` (15,000) on purpose: `change-context`
+#: is the one call that frames a whole session, while these are lookups made
+#: several times within it.
+DEFAULT_QUERY_BUDGET = 10_000
+
+#: Order in which evidence is shed. Lowest-value first: an inferred or
+#: historical association is worth less than the structural fact it decorates,
+#: and the buckets a caller reads first are surrendered last.
+_TRIM_ORDER = (
+    "docs_likely_needing_updates",
+    "recommended_tests",
+    "low_confidence",
+    "medium_confidence",
+    "high_confidence",
+    "edges",
+    "nodes",
+)
+
+
+def apply_query_budget(result: dict, budget: int) -> dict:
+    """Trim list evidence until `result` fits `budget`, and say what was cut.
+
+    Reported rather than silent, for the reason D45 gave: a caller that cannot
+    tell a trimmed answer from a complete one will treat it as complete, which
+    is exactly the confidently-wrong answer the freshness gate exists to
+    prevent.
+
+    Containers are trimmed from the tail, so the ordering each query already
+    establishes (confidence, then path/line) decides what survives.
+    """
+    dropped: dict[str, int] = {}
+    # Installed before measuring so the report of the trimming is itself inside
+    # the budget rather than pushing the payload back over it.
+    result["budget"] = budget
+    result["token_heuristic"] = "ceil(characters / 4)"
+    result["truncation"] = {"applied": False, "budget": budget,
+                            "within_budget": True, "dropped": dropped}
+    limit = budget * 4
+
+    containers = [
+        (label, container)
+        for label in _TRIM_ORDER
+        for container in (_budget_container(result, label),)
+        if isinstance(container, list)
+    ]
+    for label, container in containers:
+        while container and len(json.dumps(result)) > limit:
+            container.pop()
+            dropped[label] = dropped.get(label, 0) + 1
+
+    result["truncation"]["applied"] = bool(dropped)
+    result["token_estimate"] = (len(json.dumps(result)) + 3) // 4
+    # Every trimmable list can be emptied and the payload still costs what its
+    # own scaffolding costs. A budget under that floor is unmeetable, and
+    # saying so beats implying it was met.
+    result["truncation"]["within_budget"] = result["token_estimate"] <= budget
+    return result
+
+
+def _budget_container(result: dict, label: str) -> object:
+    """Find a trimmable list by name at the top level or one level in.
+
+    `trace_symbol` returns `nodes`/`edges` at the top level while
+    `trace_data_flow` nests the same keys under `flow` and `impact_analysis`
+    nests its buckets under `impact`; one lookup covers all three rather than
+    three near-identical trimmers.
+    """
+    if isinstance(result.get(label), list):
+        return result[label]
+    for value in result.values():
+        if isinstance(value, dict) and isinstance(value.get(label), list):
+            return value[label]
+    return None
+
+
 def trace_symbol(
     store: GraphStore,
     symbol: str,
-    depth: int = 2,
+    depth: int = 1,
     direction: str = "both",
 ) -> dict:
     """Trace all structural relationships around an exact graph reference.
@@ -701,7 +777,7 @@ def trace_symbol(
     }
 
 
-def trace_data_flow(store: GraphStore, start: str, depth: int = 4,
+def trace_data_flow(store: GraphStore, start: str, depth: int = 2,
                     direction: str = "both", limit: int = 200) -> dict | None:
     """Trace a route/symbol/file through runtime-oriented graph edges."""
     if direction not in {"in", "out", "both"}:
