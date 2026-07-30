@@ -225,7 +225,8 @@ def _fact_line(fact: dict) -> str:
     return f"- {fact['text']} [{fact['type']}] ({fact['source']})"
 
 
-def _render(staleness: dict, sections: list[dict], memory_counts: dict) -> str:
+def _render(staleness: dict, sections: list[dict], memory_counts: dict,
+            truncation: dict | None = None) -> str:
     lines = ["RepoBrain project brief"]
     if staleness["is_stale"]:
         lines.append(
@@ -243,7 +244,62 @@ def _render(staleness: dict, sections: list[dict], memory_counts: dict) -> str:
     for section in sections:
         lines.extend(["", section["title"]])
         lines.extend(_fact_line(fact) for fact in section["facts"])
+    # Rendered here rather than appended by the caller, so that the trial
+    # measurement during selection and the text finally emitted are produced by
+    # the same code. Any separate estimate of the footer's cost is a second
+    # number that can drift from the first.
+    if truncation and truncation["applied"]:
+        lines.append(f"\nTruncated to fit {truncation['budget']} tokens")
+        lines.extend(f"- {title}: {count} fact(s) not shown"
+                     for title, count in sorted(truncation["dropped"].items()))
+        if not truncation.get("within_budget", True):
+            lines.append("- Still over budget; nothing further can be dropped.")
     return "\n".join(lines) + "\n"
+
+
+def _widest_footer(budget: int, candidates: list[tuple]) -> int:
+    """Characters the omission report can cost at its very worst.
+
+    Every section that has a candidate could lose all of them, and each count is
+    at most the number of facts offered, so this is an exact upper bound and it
+    is known before a single fact is selected.
+    """
+    worst = {title: len(facts) for title, facts in candidates if facts}
+    truncation = {"applied": True, "budget": budget,
+                  "within_budget": False, "dropped": worst}
+    empty = _render({"is_stale": False}, [], {"invalidated": 0, "drifted": 0})
+    footer = _render({"is_stale": False}, [], {"invalidated": 0, "drifted": 0},
+                     truncation)
+    return len(footer) - len(empty)
+
+
+def _select(staleness: dict, candidates: list[tuple], memory_counts: dict,
+            budget: int, reserve: int) -> tuple[list[dict], dict[str, int]]:
+    """Keep every fact that fits alongside ``reserve``, and count the rest.
+
+    Facts are offered one at a time and declined whole, so a fact that appears
+    is never a fragment of itself. Declining is not trimming — nothing is cut
+    after the fact — but the consequence for the caller is identical, which is
+    why it reports through the same key D48 and D53 established.
+    """
+    selected: list[dict] = []
+    dropped: dict[str, int] = {}
+    for title, facts in candidates:
+        kept: list[dict] = []
+        for fact in facts:
+            trial = selected + [{"title": title, "facts": kept + [fact]}]
+            length = len(_render(staleness, trial, memory_counts)) + reserve
+            if length <= budget * 4:
+                kept.append(fact)
+        # Only a shortfall is reported. A section with no candidates at all —
+        # this repository's own `Entrypoints`, which has no `Route` node outside
+        # test fixtures — is empty, not truncated, and saying otherwise would
+        # invent a shortfall the graph does not have.
+        if len(kept) < len(facts):
+            dropped[title] = len(facts) - len(kept)
+        if kept:
+            selected.append({"title": title, "facts": kept})
+    return selected, dropped
 
 
 def project_brief(
@@ -256,7 +312,8 @@ def project_brief(
     """Build a brief whose approximate token count never exceeds ``budget``.
 
     Tokens use the documented deterministic chars/4 heuristic. Facts are added
-    atomically in fixed section priority, so no source-grounded fact is cut.
+    atomically in fixed section priority, so no fact is ever shown in part —
+    and the ones that did not fit are counted and reported, on both surfaces.
     """
     if budget < MINIMUM_BUDGET:
         raise ValueError(f"budget must be at least {MINIMUM_BUDGET} tokens")
@@ -278,21 +335,43 @@ def project_brief(
         ("Open questions", questions),
         ("Recent memory", recent),
     ]
-    selected: list[dict] = []
-    for title, facts in candidates:
-        kept: list[dict] = []
-        for fact in facts:
-            trial = selected + [{"title": title, "facts": kept + [fact]}]
-            if len(_render(freshness, trial, memory_counts)) <= budget * 4:
-                kept.append(fact)
-        if kept:
-            selected.append({"title": title, "facts": kept})
-    text = _render(freshness, selected, memory_counts)
+    # The report of the omissions has to be inside the budget rather than
+    # appended past it (D48, D53): at budget 300 this repository's untruncated
+    # brief already costs 297 tokens, so a footer added afterwards lands over.
+    #
+    # Two passes, never more. The first reserves nothing, and where everything
+    # fits — the common case, including this repository at the default budget —
+    # it is exact and final. Only when facts were declined does the second pass
+    # run, and it reserves the *widest* footer the omissions could produce
+    # rather than the one the first pass happened to produce. Re-running
+    # selection against its own last footer looks like the obvious fixed point
+    # and does not converge: declining an early fact frees room a later section
+    # then claims, which changes the footer again. Measured, it oscillates
+    # rather than settling, and an unsettled loop emits a brief whose text was
+    # never the text that was measured.
+    selected, dropped = _select(freshness, candidates, memory_counts, budget, 0)
+    if dropped:
+        selected, dropped = _select(freshness, candidates, memory_counts, budget,
+                                    _widest_footer(budget, candidates))
+    truncation = {"applied": bool(dropped), "budget": budget,
+                  "within_budget": True, "dropped": dropped}
+    text = _render(freshness, selected, memory_counts, truncation)
+    token_estimate = (len(text) + 3) // 4
+    # Every fact can be declined and the brief still costs what its own header
+    # and its report of the omissions cost. A budget under that floor is
+    # unmeetable, and saying so beats implying it was met. Measured before the
+    # line is added, because a line that only appears when already over budget
+    # cannot be what pushed it over.
+    truncation["within_budget"] = token_estimate <= budget
+    if not truncation["within_budget"]:
+        text = _render(freshness, selected, memory_counts, truncation)
+        token_estimate = (len(text) + 3) // 4
     return {
         "status": "ok",
         "budget": budget,
-        "token_estimate": (len(text) + 3) // 4,
+        "token_estimate": token_estimate,
         "token_heuristic": "ceil(characters / 4)",
+        "truncation": truncation,
         "freshness": freshness_gate,
         "staleness": freshness,
         "memory_verification": memory_counts,

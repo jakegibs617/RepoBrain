@@ -5,7 +5,7 @@ from pathlib import Path
 from click.testing import CliRunner
 
 from repobrain.agent_install import HOOK_COMMAND, MARKER_START, install_agent
-from repobrain.briefing import project_brief
+from repobrain.briefing import _render, _widest_footer, project_brief
 from repobrain.cli import main
 from repobrain.graph.store import GraphStore
 from repobrain.indexing.indexer import Indexer
@@ -313,6 +313,138 @@ def test_brief_purpose_survives_a_readme_too_terse_to_contain_a_sentence(tmp_pat
         result = project_brief(root, store, budget=2000)
 
     assert "A tiny indexer" in _purpose_texts(result)
+
+
+def test_brief_reports_the_facts_it_declined_to_add(small_app):
+    """A section that loses every slot must not vanish without a word.
+
+    At this budget `Configuration` does not shrink, it disappears: an agent
+    reading the result cannot tell "this project has no configuration" from
+    "the configuration facts did not fit."
+    """
+    with _indexed(small_app) as store:
+        result = project_brief(small_app, store, budget=300)
+
+    titles = [section["title"] for section in result["sections"]]
+    assert "Configuration" not in titles
+    truncation = result["truncation"]
+    assert truncation["applied"] is True
+    assert truncation["budget"] == 300
+    assert truncation["dropped"]["Configuration"] == 1
+    assert set(truncation["dropped"]) >= {"Configuration"}
+
+
+def test_brief_text_names_what_it_left_out(small_app):
+    """D47 required this of `change-context` and D53 of `impact`.
+
+    The brief's prose is the surface an agent actually reads; a payload key it
+    never renders would leave the injected session context just as silent.
+    """
+    with _indexed(small_app) as store:
+        result = project_brief(small_app, store, budget=300)
+
+    text = result["text"]
+    assert "Truncated to fit 300 tokens" in text
+    for title, count in result["truncation"]["dropped"].items():
+        assert f"- {title}: {count} fact(s) not shown" in text
+
+
+def test_brief_reporting_truncation_stays_inside_the_budget(small_app):
+    """The report of the omission is itself inside the budget (D48, D53).
+
+    Appending the footer after selection is the obvious implementation and it
+    lands over budget: at 300 the untruncated brief already costs 297 tokens.
+    """
+    with _indexed(small_app) as store:
+        for budget in (64, 100, 150, 200, 250, 280, 300, 320, 400, 900, 2000):
+            result = project_brief(small_app, store, budget=budget)
+            truncation = result["truncation"]
+            # Going over budget is only ever honest when nothing fit at all:
+            # while any fact is being shown, one more could have been declined
+            # instead. `within_budget` is not an excuse the brief may give
+            # itself for a payload it chose to emit.
+            if result["sections"]:
+                assert truncation["within_budget"] is True, budget
+                assert len(result["text"]) <= budget * 4, budget
+                assert result["token_estimate"] <= budget, budget
+            assert truncation["applied"] == bool(truncation["dropped"]), budget
+            for title, count in truncation["dropped"].items():
+                assert count > 0, (budget, title)
+                assert f"- {title}: {count} fact(s) not shown" in result["text"]
+
+
+def test_brief_that_fits_reports_no_omissions(small_app):
+    with _indexed(small_app) as store:
+        result = project_brief(small_app, store, budget=2000)
+
+    assert result["truncation"] == {"applied": False, "budget": 2000,
+                                    "within_budget": True, "dropped": {}}
+    assert "Truncated to fit" not in result["text"]
+
+
+def test_brief_does_not_report_sections_that_had_nothing_to_offer(small_app):
+    """An empty section is not an omission.
+
+    This repository's own `Entrypoints` is empty because no `Route` node exists
+    outside test fixtures; reporting that as dropped facts would invent a
+    shortfall the graph does not have.
+    """
+    with _indexed(small_app) as store:
+        result = project_brief(small_app, store, budget=200)
+
+    dropped = result["truncation"]["dropped"]
+    assert dropped, "budget 200 must force omissions for this test to mean anything"
+    for empty in ("Memory requiring attention", "Active assumptions",
+                  "Open questions", "Recent memory"):
+        assert empty not in dropped
+
+
+def test_widest_footer_bounds_every_report_the_omissions_could_produce():
+    """The reserve is what makes one pass enough, and only if it is an upper bound.
+
+    Selection reserves this many characters and then renders the footer it
+    actually needs; a reserve that any real footer can exceed would put the
+    brief over the budget it just claimed to meet.
+    """
+    fact = {"text": "app.services.user_service", "type": "Module",
+            "source": "app/services/user_service.py:1"}
+    candidates = [("Purpose", [fact] * 2), ("Subsystems", [fact] * 12),
+                  ("Entrypoints", [fact] * 2), ("Configuration", [fact] * 1),
+                  ("Open questions", [])]
+    staleness = {"is_stale": False}
+    counts = {"invalidated": 0, "drifted": 0}
+    reserve = _widest_footer(300, candidates)
+    bare = len(_render(staleness, [], counts))
+
+    for limit in range(1, 13):
+        dropped = {title: min(limit, len(facts))
+                   for title, facts in candidates if facts}
+        for within_budget in (True, False):
+            truncation = {"applied": True, "budget": 300,
+                          "within_budget": within_budget, "dropped": dropped}
+            footer = len(_render(staleness, [], counts, truncation)) - bare
+            assert footer <= reserve, (limit, within_budget, footer, reserve)
+
+
+def test_brief_says_when_it_cannot_fit_even_its_own_report(small_app):
+    """The floor is the header plus the report of the omissions.
+
+    Below it nothing can be done, and a brief that claimed `within_budget` here
+    would be asserting it met a budget it did not meet.
+    """
+    with _indexed(small_app) as store:
+        for number in range(3):
+            write_agent_memory(small_app, f"Note {number} uses `create_user`.")
+        target = small_app / "app" / "services" / "user_service.py"
+        target.write_text(target.read_text().replace("def create_user", "def create_account"))
+        Indexer(store).index(small_app)
+        result = project_brief(small_app, store, budget=64)
+
+    assert result["sections"] == []
+    assert result["truncation"]["within_budget"] is False
+    assert result["token_estimate"] > 64
+    assert "- Still over budget; nothing further can be dropped." in result["text"]
+    assert "- Memory requiring attention: 3 fact(s) not shown" in result["text"]
 
 
 def test_brief_detects_added_changed_and_deleted_files(small_app):

@@ -365,7 +365,8 @@ def _stale_summary(result: dict) -> str:
 
 @main.command("brief")
 @click.option("--budget", type=click.IntRange(min=MINIMUM_BUDGET), default=DEFAULT_BUDGET,
-              show_default=True, help="Approximate token budget (ceil(chars/4)).")
+              show_default=True,
+              help="Approximate token budget (ceil(chars/4)); truncation is reported.")
 @click.option("--path", "path", type=click.Path(exists=True, file_okay=False), default=".",
               show_default=True, help="Repository root whose database to query.")
 @click.option("--json", "as_json", is_flag=True, help="Machine-readable output.")

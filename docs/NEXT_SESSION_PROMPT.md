@@ -1,36 +1,31 @@
 # Next Session Prompt
 
-One of the three items the previous version queued shipped: **M10** became D53
-(PR #27). **M11 and M12 did not, and carry forward unchanged** — both were
-re-measured at `50ce295` and both still reproduce exactly as written. The third
-item below, M13, replaces nothing; it is the residual D52 named and deliberately
-declined to fix in the same PR.
+**M11 shipped as D55.** M12 and M13 carry forward at their original numbers,
+unchanged and un-re-measured this session — the last file measured both at
+`50ce295` and nothing since has touched extraction or the freshness envelope.
 
-This session was not a dogfooding pass. An independent `/audit-app` run at
-`cb692dd` produced six findings, and all six shipped as PRs #25–#30 (D51–D54,
-plus two changes small enough not to warrant a decision record). M10 was one of
-them, arrived at independently — which is mild evidence the queue is pointing at
-real things.
+The method note this session produced is about a defect in the *fix*, found by
+a test rather than by review.
 
-On method, two things landed, and both are about verifying the *fix* rather than
-the defect.
+**A test that excuses the case it exists to catch is not a test.** M11's budget
+sweep first read `if truncation["within_budget"]: assert len(text) <= budget*4`
+— which is vacuous exactly when the implementation is wrong, because a brief
+that overflows sets `within_budget` to false and skips the assertion. The
+mutation that proved it: capping the selection loop at one pass left the sweep
+green while three unrelated tests failed. Restated as *any brief showing a fact
+at all must be within budget* — on the reasoning that while facts are being
+shown, one more could always have been declined instead — it caught a real
+oscillation in the first implementation. **When a test guards an assertion on a
+field the implementation also computes, check that the guard is not the
+implementation marking its own homework.**
 
-**A remedy is a claim too, and the audit's was wrong.** The audit recommended
-closing F1 with `uvx --refresh-package`. One measurement killed it: neither
-`--refresh` nor `--refresh-package` invalidates a `file://` directory build —
-both return the stale wheel in 0.15 s. Only `--with-editable` (0.17 s) or
-`--no-cache` (1.39 s) actually rebuild. The previous file's rule — *read the code
-before believing the item's framing, including this file's* — extends to the
-proposed solution, not just the diagnosis. Measure the remedy before writing it
-into a decision record.
-
-**Assert on the surface the caller receives, not the one you computed.** D53's
-first implementation applied the budget inside the MCP callback and still
-returned 10,080 tokens against a 10,000 budget, because `_query` attaches the
-freshness envelope *after* the callback returns. It was trimming a payload that
-does not exist by the time anyone reads it. The tests now assert on the tool's
-return value rather than the query function's; that is the only reason the bug
-surfaced before merge rather than after.
+The corollary for mutation testing: a mutation that survives is not always a
+missing test. Understating the footer reserve by one digit per section survived
+every test, and it *should* have — at this repository's scale it is a four-byte
+difference, not a behavioural change. The behavioural mutation was removing the
+reserve entirely, which five tests killed. The invariant behind it (the reserve
+bounds any report it could produce) got its own direct assertion instead of a
+contorted end-to-end one.
 
 ## Where things stand
 
@@ -55,10 +50,17 @@ surfaced before merge rather than after.
   `apply_query_budget` defaults to 10,000 and reports `truncation`.
 - **D54** (#28) — a lost write-lock race is a retryable refusal with exit 75, not
   a traceback. `busy_timeout=5000` absorbs the ordinary overlap.
+- **D55** — M11, closed. `project_brief` reports `truncation` in D48's shape and
+  names the omissions in its `text`. At budget 300 this repository now says
+  `Configuration: 12 fact(s) not shown` where it previously dropped the section
+  in silence; the default budget is byte-identical to before. The interesting
+  part was not the reporting but paying for it: the footer's size depends on
+  what was dropped, so re-running selection against its own last footer is the
+  obvious fix and **oscillates rather than converging**. It is now at most two
+  passes, the second reserving the widest report those candidates could produce.
 
-Everything below was measured against `main` at **50ce295**. Read D52 and D53
-before touching M13 or M11 respectively; M13 sits directly on D52's closing
-paragraph.
+M12 and M13 below were measured against `main` at **50ce295**. Read D52 before
+touching M13; it sits directly on D52's closing paragraph.
 
 ## M13: nothing in the output names the code that produced it
 
@@ -107,38 +109,6 @@ Two things to settle, and they are the whole item:
    the same field would break the contract that `can_query` means something
    actionable. Decide whether this belongs in `freshness` at all, or in `status`
    and the brief header as advisory provenance.
-
-## M11: `project_brief` drops facts silently — the one thing D45, D47, D48 and now D53 all refuse to do
-
-Carried forward unchanged, and now the sole holdout. D53 gave three more tools
-`truncation` reporting; `project_brief` reports `budget` and `token_estimate` and
-**no `truncation` key**. It does not trim a payload — it declines to add facts
-that will not fit, one at a time, and never says how many it declined.
-Re-measured at `50ce295`:
-
-```
-budget 4000 → 26 facts   (Purpose 2, Subsystems 12, Configuration 12)
-budget 2000 → 26 facts
-budget  800 → 26 facts
-budget  300 → 11 facts   (Purpose 2, Subsystems 9 — Configuration is GONE)
-```
-
-Sharper than the previous file recorded: at 300 the `Configuration` section does
-not shrink, it **disappears entirely**, and the result says nothing. An agent
-reads eleven grounded facts and three section headings' worth of silence. That is
-the confidently-wrong answer the freshness gate exists to prevent, on the single
-most-read surface RepoBrain has.
-
-The fix is probably small; the design question is not. Settle two things:
-
-1. Whether "declined to add" and "trimmed after the fact" report through the same
-   key. They are different mechanisms with the same consequence, and an agent
-   cares only about the consequence. D53's `apply_query_budget` now provides a
-   second precedent for the `truncation.dropped` shape — check whether the brief
-   can reuse it outright rather than growing a third dialect.
-2. Whether the human `text` rendering says so too. D47 required it for
-   `change-context` and D53 added it to `impact`; a brief whose prose is silent
-   about omissions is the surface an agent actually reads.
 
 ## M12: this repository's brief has no `Entrypoints` section at all
 
