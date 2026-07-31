@@ -17,7 +17,7 @@ Implemented:
   from the PRD, with deterministic sha1 IDs and provenance on every row
   (path, span, extractor, confidence, commit hash, timestamps). Parsers and
   reports use only the subset they currently produce; reserved types such as
-  `Endpoint`, `CLICommand`, `Script`, and `ADR` are not synthesized.
+  `Endpoint`, `Script`, and `ADR` are not synthesized.
 - File scanner with gitwildmatch-compatible root and nested `.gitignore`
   rules, `.repobrainignore`, mandatory secret/database excludes, binary
   sniffing, and a 2 MB size cap
@@ -48,6 +48,13 @@ Implemented:
   reads without persisting assigned values.
 - Deterministic Flask-style and Express route adapters with precise named and
   inline callback identities, plus conservative SQLAlchemy table flow
+- CLI entrypoint extraction for decorator-declared commands, producing the
+  invocation a reader can actually type — Click's own naming rule, nested
+  command groups, and the console-script name from `[project.scripts]`. The
+  decorator shape is shared, so the framework (`click`, `typer`, or `unknown`)
+  is read from the file's own imports rather than assumed. `argparse` declares
+  subcommands through `add_parser(...)` calls with no decorator and is not
+  covered.
 - Grounded data-flow tracing and confidence-bucketed impact analysis shared by
   CLI, MCP, and change-context surfaces. Traversals carry a token budget
   (default 10,000) and report what they trimmed; `trace_symbol` defaults to one
@@ -564,6 +571,14 @@ quality page and `AGENT_HANDOFF.md` publish, so one command closes the gate:
   receivers, model aliases not grounded by an exact import, and ORM operations
   whose model maps to zero or multiple table literals. FastAPI and ORM
   relationship/join semantics are not supported yet.
+- CLI extraction reads the decorator, not the runtime. A command whose name is
+  not a literal in the decorator is skipped rather than guessed, a receiver the
+  declaring file cannot resolve (`get_app().command()`) is declined, and
+  `CLICommand` carries no edge to the function it decorates. The invocation is
+  prefixed with a console script only when `[project.scripts]` maps that
+  module; otherwise it is the command path alone. Groups nested through
+  Typer's `add_typer(...)` — a call, not a decorator — are not resolved, and
+  Typer is covered by shape rather than by any indexed Typer project.
 - Incremental runs only re-parse changed files, so a new function in file A
   will not gain inferred CALLS edges from an unchanged caller in file B until
   B changes (or a `--no-incremental` run).

@@ -2274,3 +2274,105 @@ the old build is still installed. Absolute staleness would need a reference
 this process does not have — a release feed, or the checkout's own sources when
 they are not the ones installed — and inventing one to make a number look
 authoritative is the failure this whole D-series exists to avoid.
+
+## 2026-07-30 — A CLI that could not name itself
+
+### D57: `CLICommand` is extracted from the decorator, and the fact promoted is the invocation a reader can type
+
+`repobrain brief` on this repository emitted three sections — Purpose,
+Subsystems, Configuration — and no `Entrypoints` at all. The section had been
+built since D43 and queried `Route` only; every `Route` node in the graph lives
+under `tests/fixtures/`, which D43 correctly withholds from promotion. So a
+project whose entire interface is a 25-command CLI could not name one way to
+invoke itself, in the first thing an agent reads at session start.
+
+**The type was already declared and deliberately unsynthesised.** `CLICommand`
+has been in `NodeType` since the schema was written, and the README said so:
+*"reserved types such as `Endpoint`, `CLICommand`, `Script`, and `ADR` are not
+synthesized."* That was right while nothing consumed them. `Entrypoints`
+consumes them, so the claim is now narrowed rather than left standing as
+documentation of a gap the code no longer has.
+
+**The name is the whole deliverable, so it is checked against Click.** Click
+derives an unnamed command as `f.__name__.lower().replace("_", "-")`, which
+makes `find_symbol` invocable as `find-symbol` and nothing else. An extractor
+that promoted the function name would have put a command that does not exist
+into the brief — a wrong answer wearing exactly the shape of a right one.
+`pyproject.toml` pins only `click>=8.1`, so a literal expected-name list would
+have passed forever while Click's rule moved underneath it. The test builds the
+fixture's declarations in-process, asks the installed Click what they resolve
+to, and requires the extractor to agree; `test_self_hosting` then resolves every
+invocation the brief promoted through `main.get_command`, so this repository's
+own brief cannot promote a string the CLI would reject.
+
+**Shape-based, framework named from the imports.** `@app.command()` is written
+identically by Click and Typer, so the shape cannot say which one a file uses
+and the imports can. `framework` is `click`, `typer`, or `unknown` — a command
+that is really declared is still worth reporting when the only thing missing is
+its label. The alternative was a Click-hardcoded matcher, which makes the second
+framework pay the entire cost of generalising: the runtime-adapter problem
+again. `argparse` is genuinely a different shape — `subparsers.add_parser(...)`
+calls, no decorator — and is documented as uncovered rather than half-attempted.
+
+**The console-script name needs one bounded manifest read, and the graph could
+not have supplied it.** `history co-change` is not a runnable command; the
+program's name lives only in `[project.scripts]`. The graph already holds
+`project.scripts.repobrain` as a `ConfigKey` — and holds it *value-free*, as
+`{"value_type": "str"}`, so the target `repobrain.cli:main` never reaches the
+database. Reading `pyproject.toml` once in `begin_run` is D19's established
+precedent, unchanged: `_read_go_module_prefix` has read `go.mod` exactly this
+way since Go imports shipped. A missing, unreadable, or malformed manifest
+yields no prefix; a caption must never be able to abort the run that prints it
+(D56).
+
+**That read exposed an invariant enforced by coincidence.**
+`test_no_change_fast_path_does_not_read_file_bodies` failed — an unchanged
+incremental run had read a file body inside the indexed tree. The tempting
+reading was that a bounded manifest read is obviously fine and the test needed
+an exemption. Measured instead: an unchanged run of a two-file repository reads
+`go.mod` *and* `pyproject.toml`, and always has. D19's read went through
+`Path.read_text` while the guard patched `Path.read_bytes`, so the exemption
+existed, was never decided, and grew by one the moment a second reader arrived
+using the other method. `RUN_SCOPED_MANIFESTS` names the set, the guard now
+covers both methods and allowlists by filename, and a third manifest read is a
+decision someone has to make rather than a coincidence nobody notices.
+
+**One section for routes and commands, because the format already separates
+them.** They answer the same agent question — how do I invoke this? — and have
+nothing else in common. `_fact_line` renders `- {text} [{type}] ({source})`, so
+`[Route]` and `[CLICommand]` state which kind each one is at no cost. A second
+section would have added an entry to the fixed priority list that every
+budget-selection test and D55's two-pass footer reasoning has to absorb, to
+express a distinction the existing line already makes.
+
+**The cost was measured, and the first measurement was the wrong one.** A
+full re-index went from 0.852 s to 1.153 s — **+35%** — because the parser ran
+`ast.parse` on all 100 Python files to find declarations in one. (An earlier
+comparison showed no difference at all; it was invalid. `indexer.py` binds
+`default_registry` at import, so patching the module attribute changed nothing
+and both arms measured the same registry.) Every decorator this parser matches
+spells `command`, so a file without that substring cannot declare one: the guard
+is behaviour-preserving rather than a heuristic, 21 files are parsed instead of
+100, and the cost is **+0.125 s / +15%**, which is what this decision records.
+`_console_scripts` is 0.324 ms, once per run. Both figures are medians of seven
+100-iteration warm loops (D56's cold-loop measurement was off by 2x in the
+flattering direction).
+
+**`EXTRACTOR_VERSION` does not move, and that is D44 working.** A new module
+inside `repobrain/parsers/` is caught twice — `parser_source_digest()` hashes
+every `*.py` in that directory, and registry composition changes when the parser
+is registered. D51 bumped the constant to `2` because `scanner.detect_language`
+changed, which lives outside the package; nothing here does.
+
+**What this does not do.** No edge links a `CLICommand` to the function it
+decorates: resolving `history_co_change` to `repobrain.cli.history_co_change`
+needs `CodeParser`'s qualified-name convention, which is a reconciler's job for
+exactly the reason `HANDLES_ROUTE` is kept out of `RouteParser`. `RUNS_COMMAND`
+exists in `EdgeType` and stays unused. The handler's name and line are in
+metadata so that reconciler has what it needs. Typer is covered by shape and by
+no indexed Typer project, and its nested groups — declared by an `add_typer(...)`
+call rather than a decorator — are not resolved. `Entrypoints` still promotes
+twelve facts ranked by path and line, so this repository's last thirteen
+commands do not appear; that is the same ceiling `Subsystems` and
+`Configuration` have always had, and a relevance ranking for commands is its own
+decision.

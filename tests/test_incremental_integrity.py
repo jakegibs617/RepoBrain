@@ -5,7 +5,11 @@ from pathlib import Path
 from repobrain.graph.store import GraphStore
 from repobrain.indexing import incremental
 from repobrain.indexing.indexer import Indexer
-from repobrain.parsers.base import GenericFileParser, ParserRegistry
+from repobrain.parsers.base import (
+    RUN_SCOPED_MANIFESTS,
+    GenericFileParser,
+    ParserRegistry,
+)
 
 
 def _older_extractor() -> ParserRegistry:
@@ -88,14 +92,27 @@ def test_no_change_fast_path_does_not_read_file_bodies(tmp_path, monkeypatch):
         # path does not read the bodies of the files it is indexing; RepoBrain
         # reading its own installed sources to fingerprint its extractor is a
         # different thing, and a blanket patch would conflate the two.
-        real_read_bytes = Path.read_bytes
+        #
+        # Both read methods, and an allowlist rather than a flat refusal. A
+        # guard on `read_bytes` alone passed for a year while D19's `go.mod`
+        # read went through `read_text` — the exemption existed and nothing
+        # enforced its bounds, so a second manifest reader could be added
+        # without anyone deciding to. `RUN_SCOPED_MANIFESTS` is that decision,
+        # and this is what holds the code to it.
+        real = {name: getattr(Path, name) for name in ("read_bytes", "read_text")}
 
-        def unexpected_read(self):
-            if self.resolve().is_relative_to(root.resolve()):
-                raise AssertionError("unchanged incremental run read a file body")
-            return real_read_bytes(self)
+        def guard(method: str):
+            def read(self, *args, **kwargs):
+                if (self.resolve().is_relative_to(root.resolve())
+                        and self.name not in RUN_SCOPED_MANIFESTS):
+                    raise AssertionError(
+                        f"unchanged incremental run read {self.name} via {method}"
+                    )
+                return real[method](self, *args, **kwargs)
+            return read
 
-        monkeypatch.setattr(Path, "read_bytes", unexpected_read)
+        for method in real:
+            monkeypatch.setattr(Path, method, guard(method))
         stats = indexer.index(root)
 
     assert stats.files_changed == 0

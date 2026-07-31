@@ -6,8 +6,11 @@ that only appear when they collaborate on a real repository.
 """
 from pathlib import Path
 
+import click
+
 from repobrain.graph.queries import code_for_docs, docs_for_code, explain_file, find_symbol
 from repobrain.briefing import project_brief
+from repobrain.cli import main
 from repobrain.graph.store import GraphStore
 from repobrain.indexing.indexer import Indexer
 from repobrain.retrieval.keyword import search
@@ -56,6 +59,23 @@ def test_repobrain_understands_its_own_repository(tmp_path):
         assert "local-first" in brief["text"].lower()
         assert "coding agents" in brief["text"].lower()
         assert "repobrain.cli [Module]" in brief["text"]
+
+        # M12: a project whose entire interface is a CLI could not name one way
+        # to invoke itself. Every command promoted here is checked against the
+        # CLI's own resolution, so this cannot pass on a plausible-looking
+        # string that no shell would accept.
+        entrypoints = next(section for section in brief["sections"]
+                           if section["title"] == "Entrypoints")
+        promoted = {fact["text"] for fact in entrypoints["facts"]}
+        assert promoted, "this repository's entrypoints are its CLI commands"
+        assert "repobrain index" in promoted
+        for invocation in promoted:
+            script, *path = invocation.split()
+            assert script == "repobrain"
+            resolved = main
+            for segment in path:
+                resolved = resolved.get_command(click.Context(resolved), segment)
+                assert resolved is not None, f"brief promoted `{invocation}`"
 
         unchanged = indexer.index(PROJECT_ROOT)
         assert unchanged.files_changed == 0

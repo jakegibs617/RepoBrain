@@ -38,21 +38,34 @@ def test_project_overview_and_report(indexer, store, node_app):
     assert {item["type"] for item in overview["entrypoints"]} == {"Route"}
     markdown, html = generate_report(store, node_app)
     report = markdown.read_text()
-    assert "## Detected Routes" in report
+    assert "## Detected Entrypoints" in report
     assert "Detected Config" in report
     assert html.read_text().startswith("<!doctype html>")
 
 
-def test_report_honestly_shows_when_no_routes_are_detected(
+def test_report_inventories_cli_commands_alongside_routes(indexer, store, click_app):
+    """This surface is an inventory of what extraction found, not a description
+    of what the project is (D43). Omitting a type it now produces would make it
+    under-report the graph."""
+    indexer.index(click_app)
+
+    overview = project_overview(store)
+    markdown, _ = generate_report(store, click_app)
+
+    assert {item["type"] for item in overview["entrypoints"]} == {"CLICommand"}
+    assert "- CLICommand: `migrate-up` — `mytool/cli.py`" in markdown.read_text()
+
+
+def test_report_honestly_shows_when_no_entrypoints_are_detected(
     indexer, store, docs_app
 ):
     indexer.index(docs_app)
 
     overview = project_overview(store)
     markdown, _ = generate_report(store, docs_app)
-    routes_section = markdown.read_text().split(
-        "## Detected Routes\n", 1
+    entrypoints_section = markdown.read_text().split(
+        "## Detected Entrypoints\n", 1
     )[1].split("\n## ", 1)[0]
 
     assert overview["entrypoints"] == []
-    assert "- None detected" in routes_section
+    assert "- None detected" in entrypoints_section

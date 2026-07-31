@@ -73,6 +73,51 @@ def test_brief_entrypoints_are_grounded_in_produced_route_nodes(small_app):
     assert {"CLICommand", "Script", "Endpoint", "ADR"}.isdisjoint(produced_types)
 
 
+def test_brief_names_a_cli_by_the_command_line_that_actually_runs(click_app):
+    """A project whose whole interface is a CLI must not have an empty section.
+
+    `Entrypoints` promoted only `Route`, so every CLI-only project — this
+    repository included — got a brief that could not name a single way to
+    invoke it. The promoted text has to be the invocation itself: a reader who
+    types what the brief printed must get the command it described.
+    """
+    with _indexed(click_app) as store:
+        result = project_brief(click_app, store, budget=2000)
+
+    entrypoints = next(section for section in result["sections"]
+                       if section["title"] == "Entrypoints")
+    assert {fact["type"] for fact in entrypoints["facts"]} == {"CLICommand"}
+    assert {fact["text"] for fact in entrypoints["facts"]} == {
+        "mytool start", "mytool list-items", "mytool build-all",
+        "mytool db migrate-up", "mytool db reset-db",
+    }
+    assert all(fact["source"].startswith("mytool/cli.py:")
+               for fact in entrypoints["facts"])
+
+
+def test_brief_states_which_kind_of_entrypoint_each_one_is(click_app, node_app):
+    """Routes and commands share a section; the type tag is what separates them.
+
+    They answer the same question — how do I invoke this? — and have nothing
+    else in common. `_fact_line` already prints each fact's type, so one
+    section can hold both without a reader having to guess which is which.
+    """
+    shutil.copytree(node_app, click_app / "service")
+    with _indexed(click_app) as store:
+        result = project_brief(click_app, store, budget=4000)
+
+    entrypoints = next(section for section in result["sections"]
+                       if section["title"] == "Entrypoints")
+    kinds = [fact["type"] for fact in entrypoints["facts"]]
+
+    assert set(kinds) == {"Route", "CLICommand"}
+    assert kinds == sorted(kinds, key=["Route", "CLICommand"].index), (
+        "the section's own type order is its ranking"
+    )
+    assert "- mytool start [CLICommand] (mytool/cli.py:" in result["text"]
+    assert "[Route] (service/src/routes/users.js:" in result["text"]
+
+
 def test_brief_omits_entrypoints_found_only_under_test_paths(small_app, tmp_path):
     """Routes that exist only in fixtures do not describe the project.
 

@@ -15,7 +15,7 @@ def project_overview(store: GraphStore) -> dict:
         return [dict(r) for r in store.conn.execute(f"SELECT type,name,path,start_line,metadata_json FROM nodes WHERE type IN ({marks}) ORDER BY path,start_line LIMIT ?", (*types, limit))]
     return {"root": store.get_meta("root"), "files": store.file_count(), "languages": languages,
             "nodes_by_type": store.counts_by_type("nodes"), "edges_by_type": store.counts_by_type("edges"),
-            "entrypoints": nodes("Route"),
+            "entrypoints": nodes("Route", "CLICommand"),
             "config": nodes("ConfigFile","ConfigKey","EnvVar"),
             "workflows": nodes("GitHubWorkflow","GitHubJob","GitHubStep"),
             "services": nodes("DockerService","KubernetesResource"),
@@ -39,7 +39,7 @@ Generated from `{data['root']}` using deterministic, source-grounded graph facts
 
 {listing([{'type':'language','name':k,'path':str(v)+' files'} for k,v in data['languages'].items()])}
 
-## Detected Routes
+## Detected Entrypoints
 
 {listing(data['entrypoints'])}
 
