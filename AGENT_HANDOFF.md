@@ -9,6 +9,11 @@ resolution are now implemented. Milestones 1–4 delivered storage,
 incremental indexing, code/docs parsing, search, and documentation mapping.
 Milestones 5–10 add config adapters and tracing, route/data-flow analysis,
 impact analysis, MCP tools, durable agent memory, and Markdown/HTML reports.
+The audit-derived track that followed (D51–D57: root containment, editable
+installs, query budgets, write-lock refusal, declined-fact reporting, code
+provenance, CLI command extraction) is closed as well. **No milestone is
+open.** What remains deliberately unbuilt, and what is waiting on a human
+decision, is listed in `docs/NEXT_SESSION_PROMPT.md`.
 
 ## Delivery Status
 
@@ -99,7 +104,7 @@ impact analysis, MCP tools, durable agent memory, and Markdown/HTML reports.
   correctness bug (the substring-boundary marker match), one plausible edge
   case (go.mod block comments), and one real efficiency finding (per-import
   linear scans over the known-files set); all three were fixed before merge.
-- Scale hardening is implemented on `feat/scale-hardening`: a deterministic
+- Scale hardening is implemented on `main`: a deterministic
   synthetic large-repo generator (`repobrain/testing/synthetic_repo.py`, 1,050+
   real parseable files with known graph answers, never committed) plus
   SQL-statement-counting instrumentation (`repobrain/testing/perf.py`) drove a
@@ -147,8 +152,8 @@ impact analysis, MCP tools, durable agent memory, and Markdown/HTML reports.
   compilation and whitespace checks were clean. Review fixed an overly broad
   isolated-smoke skip that could have hidden real packaging failures.
 
-- M16 framework/runtime adapters are implemented on
-  `feat/framework-runtime-adapters`. A transaction-local reconciler consumes
+- M16 framework/runtime adapters are implemented on `main`.
+  A transaction-local reconciler consumes
   persisted syntax facts and emits precise Flask-style/Express route-handler
   relationships plus conservative SQLAlchemy Table/READS_TABLE/WRITES_TABLE
   evidence without importing target frameworks.
@@ -166,7 +171,7 @@ impact analysis, MCP tools, durable agent memory, and Markdown/HTML reports.
   actionable regressions after fixing versioned backfill, exact Flask span
   disambiguation, and empty adapter-set injection.
 
-- Distribution is implemented on `feat/distribution-agent-install`.
+- Distribution is implemented on `main`.
   `repobrain install-agent` now installs one exact repository-scoped
   `mcpServers.repobrain` entry in `.mcp.json`, the marker-owned CLAUDE.md
   session context, the exact SessionStart hook, and optional Git hooks in one
@@ -186,7 +191,7 @@ impact analysis, MCP tools, durable agent memory, and Markdown/HTML reports.
   explicit dev dependency so artifact inspection remains offline in the test
   suite after normal dev installation. Full verification: 199 pytest tests
   passed; compilation and whitespace checks were clean.
-- M15 memory verification is implemented on `feat/m15-memory-verification`.
+- M15 memory verification is implemented on `main`.
   New memory writes store exact file/unambiguous-symbol anchors plus resolution
   evidence; every shared read annotates entries as verified, drifted,
   invalidated, or unanchored without changing Markdown or stored metadata.
@@ -200,7 +205,7 @@ impact analysis, MCP tools, durable agent memory, and Markdown/HTML reports.
 - M15 verification: 183 pytest tests passed; compilation and whitespace
   checks were clean, and the final Codex review found no actionable regressions.
 
-- M14 is implemented on `feat/m14-git-history-extractor`: a deterministic
+- M14 is implemented on `main`: a deterministic
   Git history extractor (`repobrain/history.py`) mines a bounded recent
   commit window (default 500 commits, local plumbing only) into
   `git_commits`/`git_commit_files` tables and extractor-owned
@@ -220,7 +225,7 @@ impact analysis, MCP tools, durable agent memory, and Markdown/HTML reports.
   `git_commit_files`.
 - M14 verification: 171 pytest tests passed; whitespace checks and the
   uncommitted Codex review were clean before merge.
-- M13 is implemented on `feat/m13-diff-aware-change-context`:
+- M13 is implemented on `main`:
   `repobrain change-context` and the matching MCP tool capture a working or
   merge-base branch diff before freshness repair, then map changed lines to
   symbols, aggregate impact/tests, and flag unchanged docs that mention the
@@ -231,7 +236,7 @@ impact analysis, MCP tools, durable agent memory, and Markdown/HTML reports.
   deterministically from the captured Git blob with revision provenance.
 - M13 verification: 146 pytest tests passed; Python compilation and whitespace
   checks were clean before review.
-- M12 is implemented on `feat/m12-freshness-automation`: every read-only CLI
+- M12 is implemented on `main`: every read-only CLI
   and MCP query passes through one freshness gate. Small diffs are repaired
   incrementally; large, opted-out, or failed repairs refuse to serve stale
   facts with a structured/actionable envelope.
@@ -240,7 +245,7 @@ impact analysis, MCP tools, durable agent memory, and Markdown/HTML reports.
   RepoBrain-owned settings, Markdown, runner, and dispatcher blocks.
 - M12 verification: 133 pytest tests passed; Python compilation and whitespace
   checks were clean before review.
-- M11 is implemented on `feat/m11-session-start-briefing`: `repobrain brief`
+- M11 is implemented on `main`: `repobrain brief`
   and the matching `project_brief` MCP tool produce a fixed-priority,
   source-grounded orientation pack under an approximate token budget.
 - The brief performs a read-only size+mtime freshness check before serving
